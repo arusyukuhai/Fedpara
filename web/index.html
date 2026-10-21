@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mummy WebRTC test</title>
+<style>
+body{font:15px system-ui,-apple-system,sans-serif;max-width:820px;margin:3em auto;padding:0 1em;color:#202632}
+h1{font-size:1.5em} .form{display:grid;gap:.6em;grid-template-columns:9em 1fr}
+input,select,button{font:inherit;padding:.45em} button{cursor:pointer} label{padding:.45em 0}
+video{max-width:47%;background:#111;min-height:120px} pre{max-height:230px;overflow:auto;white-space:pre-wrap;background:#f2f4f8;padding:1em}
+#chat{width:70%} .hint{color:#596273;font-size:.9em}
+</style></head><body>
+<h1>Mummy WebRTC デモ</h1>
+<p class="hint">P2P: 同じルームを2つのタブで開きます。Native echo: -d:rtcNative でコンパイルしたサーバーにDataChannel接続します。</p>
+<div class="form">
+  <label for="mode">モード</label><select id="mode"><option value="p2p">2者P2P</option><option value="echo">Nimネイティブエコー</option></select>
+  <label for="room">ルームID</label><input id="room" autocomplete="off" spellcheck="false">
+  <label for="token">APP_TOKEN</label><input id="token" type="password" placeholder="未設定なら空欄">
+  <label for="media">音声・映像</label><div><input id="media" type="checkbox"> P2P送受信 / nativeエコーはSRTP受信数を計測</div>
+  <label for="relay">接続経路</label><div><input id="relay" type="checkbox"> TURN relayだけを利用（検証用）</div>
+</div>
+<p><button id="connect">接続</button> <button id="disconnect" disabled>切断</button></p>
+<p>状態: <strong id="status">未接続</strong></p>
+<div><video id="local" autoplay playsinline muted></video> <video id="remote" autoplay playsinline></video></div>
+<p><input id="chat" placeholder="DataChannelのメッセージ" disabled> <button id="send" disabled>送信</button></p>
+<pre id="log"></pre>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const log=s=>{ $('log').textContent += `${new Date().toLocaleTimeString()} ${s}\n`; $('log').scrollTop=$('log').scrollHeight; };
+let ws=null, pc=null, channel=null, stream=null, remoteStream=null, pending=[], pendingLocal=[], haveRemote=false, offerSent=false, localSignalReady=false;
+const roomId=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)), n=>n.toString(16).padStart(2,'0')).join('');
+$('room').value=(location.hash.slice(1).match(/^[A-Za-z0-9_-]{16,64}$/)||[])[0]||roomId();
+const sendSignal=data=>{if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(data));};
+const status=s=>$('status').textContent=s;
+function setupChannel(ch){
+  channel=ch;
+  channel.onopen=()=>{log('DataChannel opened'); $('chat').disabled=false; $('send').disabled=false;};
+  channel.onclose=()=>{log('DataChannel closed'); $('chat').disabled=true; $('send').disabled=true;};
+  channel.onerror=e=>log('DataChannel error: '+(e.message||'unknown'));
+  channel.onmessage=e=>log('受信: '+String(e.data));
+}
+function closePeer(){
+  if(channel){channel.close();channel=null;}
+  if(pc){pc.close();pc=null;}
+  pending=[];pendingLocal=[];haveRemote=false;offerSent=false;localSignalReady=false;
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+  $('local').srcObject=null;$('remote').srcObject=null;
+  $('chat').disabled=true;$('send').disabled=true;
+}
+function disconnect(){
+  if(ws){const old=ws;ws=null;try{old.close();}catch{}}
+  closePeer();status('未接続');$('connect').disabled=false;$('disconnect').disabled=true;
+}
+async function preparePc(iceServers){
+  pc=new RTCPeerConnection({iceServers,iceTransportPolicy:$('relay').checked?'relay':'all'});
+  pc.onicecandidate=e=>{
+    // Explicitly send end-of-candidates as null too.
+    const m={type:'candidate',candidate:e.candidate?e.candidate.toJSON():null};
+    if(localSignalReady)sendSignal(m);else pendingLocal.push(m);
+  };
+  pc.onconnectionstatechange=()=>{if(pc){status(pc.connectionState);log('PeerConnection: '+pc.connectionState);}};
+  pc.oniceconnectionstatechange=()=>{if(pc)log('ICE: '+pc.iceConnectionState);};
+  pc.ondatachannel=e=>setupChannel(e.channel);
+  pc.ontrack=e=>{
+    if(!remoteStream){remoteStream=new MediaStream();$('remote').srcObject=remoteStream;}
+    remoteStream.addTrack(e.track);
+  };
+  if(stream)for(const track of stream.getTracks())pc.addTrack(track,stream);
+}
+async function setRemote(sdp,type){
+  await pc.setRemoteDescription({type,sdp});haveRemote=true;
+  for(const c of pending)await pc.addIceCandidate(c);
+  pending=[];
+}
+function publishLocalCandidates(){
+  localSignalReady=true;
+  for(const m of pendingLocal)sendSignal(m);
+  pendingLocal=[];
+}
+async function offer(){
+  if(!pc || offerSent)return;
+  offerSent=true;
+  const o=await pc.createOffer();
+  await pc.setLocalDescription(o);
+  sendSignal({type:'offer',sdp:pc.localDescription.sdp});
+  publishLocalCandidates();
+  log('SDP offer sent');
+}
+async function handleMessage(event){
+  let m;try{m=JSON.parse(event.data);}catch{log('Bad server JSON');return;}
+  try{
+    switch(m.type){
+      case 'joined':
+        log('Joined: '+m.role);
+        await preparePc(m.iceServers);
+        if(m.role==='initiator'||m.role==='native-client'){
+          setupChannel(pc.createDataChannel('chat'));
+          if(m.role==='native-client')await offer();
+        }break;
+      case 'peer-joined': await offer();break;
+      case 'offer':
+        await setRemote(m.sdp,'offer');
+        await pc.setLocalDescription(await pc.createAnswer());
+        sendSignal({type:'answer',sdp:pc.localDescription.sdp});
+        publishLocalCandidates();
+        log('SDP answer sent');break;
+      case 'answer':await setRemote(m.sdp,'answer');log('SDP answer received');break;
+      case 'candidate':
+        if(!pc)return;
+        if(!haveRemote)pending.push(m.candidate);
+        else await pc.addIceCandidate(m.candidate);
+        break;
+      case 'peer-left':log('相手が切断しました。再接続してください');disconnect();break;
+      case 'state':log('Native state: '+m.state);break;
+      case 'rtp-stats':log('Native SRTP → RTP packets received: '+m.receivedPackets);break;
+      case 'error':log('Server error: '+m.message);break;
+      default:log(JSON.stringify(m));
+    }
+  }catch(e){log('WebRTC error: '+e.message);console.error(e);}
+}
+$('connect').onclick=async()=>{
+  $('connect').disabled=true;$('disconnect').disabled=false;
+  try{
+    const mode=$('mode').value;
+    if($('media').checked){
+      stream=await navigator.mediaDevices.getUserMedia({audio:true,video:true});
+      $('local').srcObject=stream;
+    }
+    if(mode==='p2p')location.hash=$('room').value;
+    ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+    ws.onopen=()=>{status('シグナリング接続');sendSignal({type:'join',mode,room:$('room').value,token:$('token').value});};
+    ws.onmessage=e=>{void handleMessage(e);};
+    ws.onerror=()=>log('WebSocket transport error');
+    ws.onclose=()=>{log('Signaling closed');disconnect();};
+  }catch(e){log('接続失敗: '+e.message);disconnect();}
+};
+$('disconnect').onclick=disconnect;
+$('send').onclick=()=>{if(channel?.readyState==='open'){
+ const message=$('chat').value;channel.send(message);log('送信: '+message);$('chat').value='';
+}};
+$('chat').onkeydown=e=>{if(e.key==='Enter')$('send').click();};
+</script></body></html>

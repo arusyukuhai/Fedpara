@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fedpara | P2P Console</title>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color-scheme:dark;background:#0b1020;color:#e6ebf8}
+body{max-width:1050px;margin:28px auto;padding:0 20px}h1{font-size:28px;letter-spacing:-.8px}h2{font-size:16px}
+section{border:1px solid #293449;padding:19px;border-radius:15px;background:#131c2d;margin:16px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:13px}
+label{font-size:13px;display:block;color:#acbad4;margin:12px 0 3px}input,select{background:#0c1527;color:#f5f8ff;border:1px solid #394a65;border-radius:7px;width:100%;padding:9px;box-sizing:border-box}
+button{background:#3f6ee6;color:white;border:0;border-radius:9px;padding:10px 14px;margin:8px 7px 4px 0;cursor:pointer}
+button.alt{background:#31415c}button.danger{background:#a83d51}small,.sub{color:#a3b5ce}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#090e1a;padding:14px;border-radius:9px;max-height:280px;overflow-y:auto}
+.notice{color:#dbd39b}
+</style></head><body>
+<h1>Fedpara <span style="color:#83aaff">P2P Console</span></h1>
+<p class="sub">ローカル管理画面。モデル重みや学習データをシグナリングサーバーへアップロードしません。</p>
+<section><h2>① ルームとモデルの設定</h2>
+<div class="grid"><div><label>ルームID</label><input id="room" placeholder="安全なランダムID"><button class="alt" onclick="newRoom()">新しいルームIDを生成</button></div>
+<div><label>シグナリングURL</label><input id="ws" value="ws://127.0.0.1:8080/ws"><label>モデルID</label><input id="model" value="sshleifer/tiny-gpt2"><label>モデルリビジョン（推奨: 固定コミット）</label><input id="revision" value="main"></div></div>
+<div class="grid"><div><label>データセット概要の名前</label><input id="dataset" value="private-local"><label>学習データ概要（公開可能な説明）</label><input id="dsdesc" placeholder="例: 同意済みテキストのみ"><label>ライセンス</label><input id="license" value="unspecified"></div>
+<div><label>独自モデル実行コード（ローカル .py パス、任意）</label><input id="codefile" placeholder="/path/to/factory.py"><label>コードの取得URL（HTTPS、任意）</label><input id="codeurl" placeholder="https://example.org/model.py"><small>コード本体はローカル端末内に保存し、ルームにはSHA-256のみ登録。自動実行しません。</small>
+<label>Pythonモデルをアップロード（.pyまたは.zip、最大256KiB）</label>
+<input id="upload" type="file" accept=".py,.zip"><button class="alt" onclick="uploadCode()">コードを登録</button><small id="uploadStatus"></small></div></div>
+<button onclick="makeManifest()">ルーム概要を保存</button><small id="manifestStatus"></small>
+</section>
+<section><h2>② 端末の自動設定・MoE</h2><div class="grid"><div id="device">端末スペックを確認中…</div>
+<div><label>共通のLoRA/LoHA方式</label><select id="kind"><option value="loha">LoHA</option><option value="lora">LoRA</option></select>
+<label>共通ランク（全ピアで同じ値）</label><select id="rank"><option>8</option><option>16</option><option selected>32</option><option>64</option></select>
+<label>MoE expert-plan JSON（任意、全ピア共通）</label><input id="plan" placeholder="/path/to/moe-plan.json"></div></div>
+<p class="notice">Expert切り出しは未対応アーキテクチャへ自動適用しません。全参加者で一致する配置が必要です。</p></section>
+<section><h2>③ 学習</h2><div class="grid"><div><label>初期モデル .fstate</label><input id="base" placeholder="/path/to/genesis.fstate"><label>ローカル学習テキスト</label><input id="data" placeholder="/path/to/train.txt"></div>
+<div><label>端末固有の学習履歴ファイル</label><input id="journal" value="gui-elastic-events.sqlite3">
+<p class="sub">切断しても継続学習。自動でバッチサイズ・更新間隔・通信精度を選択します。</p></div></div>
+<button onclick="startTrain()">学習を開始</button><button class="danger" onclick="stopTrain()">停止</button><span id="status"></span>
+<pre id="logs">ここに学習ログが表示されます。</pre></section>
+<section><h2>非常時モード</h2><p class="sub">シグナリングが停止しても、生きているWebRTC接続で署名付き更新を転送し続けます。完全に新規のピア同士を見つけるには予備シグナリング経路が必要です。</p></section>
+<script>
+const token=new URLSearchParams(location.hash.slice(1)).get('session')||'';
+const val=id=>document.getElementById(id).value;
+async function req(path,payload){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Session':token},body:JSON.stringify(payload)});const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j}
+function inform(s){document.getElementById('status').textContent=s}
+async function newRoom(){try{document.getElementById('room').value=(await req('/api/room',{})).room_id}catch(e){inform(e.message)}}
+async function uploadCode(){try{
+ const file=document.getElementById('upload').files[0];if(!file)throw Error('コードファイルを選択してください');
+ if(file.size>262144)throw Error('256KiBを超えています');
+ const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(const b of bytes)binary+=String.fromCharCode(b);
+ const res=await req('/api/code-register',{name:file.name,contents:btoa(binary)});
+ document.getElementById('codefile').value=res.path;
+ document.getElementById('uploadStatus').textContent='検証・登録完了 SHA256 '+res.sha256.slice(0,16)+'…';
+ }catch(e){inform(e.message)}}
+async function makeManifest(){try{const x=await req('/api/manifest',{model:val('model'),revision:val('revision'),dataset:val('dataset'),dataset_description:val('dsdesc'),license:val('license'),code_file:val('codefile'),code_url:val('codeurl'),output:'room-manifest.json'});document.getElementById('manifestStatus').textContent='保存: '+x.path+' SHA256: '+x.sha256.slice(0,16)+'…';}catch(e){inform(e.message)}}
+async function startTrain(){try{const x=await req('/api/start',{room:val('room'),model:val('model'),base:val('base'),data:val('data'),ws:val('ws'),kind:val('kind'),rank:val('rank'),journal:val('journal'),manifest:'room-manifest.json',moe_plan:val('plan')});inform('起動 pid='+x.pid)}catch(e){inform(e.message)}}
+async function stopTrain(){try{await req('/api/stop',{});inform('停止指示を送信しました')}catch(e){inform(e.message)}}
+async function refresh(){try{const d=await (await fetch('/api/status')).json();document.getElementById('status').textContent=d.running?'学習中 pid='+d.pid:'停止';document.getElementById('logs').textContent=d.logs||'ログなし'}catch(e){} }
+fetch('/api/device').then(x=>x.json()).then(x=>{document.getElementById('device').textContent='CPU: '+x.device.cpu_threads+'スレッド / RAM空き: '+x.device.ram_free_gib.toFixed(1)+'GiB / GPU: '+x.device.accelerator+' / 推奨バッチ: '+x.suggestion.batch_size}).catch(()=>{});
+refresh();setInterval(refresh,2000);
+</script></body></html>

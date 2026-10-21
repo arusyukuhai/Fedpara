@@ -1,0 +1,10 @@
+# Build while you have network connectivity. Runtime containers have --network none.
+# For reproducibility in production, pin image digest and lock package hashes.
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN pip install --no-cache-dir 'torch>=2.3,<3' 'transformers>=4.45,<6' \
+    'safetensors>=0.4,<1' 'huggingface_hub>=0.25,<2' 'accelerate>=1,<2'
+WORKDIR /app
+COPY patchlib /app/patchlib
+CMD ["python", "-m", "patchlib.cli", "--help"]

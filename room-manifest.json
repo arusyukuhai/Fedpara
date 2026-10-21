@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "model": {
+    "id": "sshleifer/tiny-gpt2",
+    "revision": "main",
+    "architecture": "causal-lm",
+    "description": ""
+  },
+  "dataset": {
+    "name": "private-local",
+    "description": "",
+    "license": "unspecified",
+    "privacy": "local-only"
+  },
+  "code": {
+    "sha256": null,
+    "source": ""
+  }
+}

@@ -1,0 +1,100 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fedpara P2P Patch Exchange</title>
+<style>body{font:15px system-ui,sans-serif;max-width:760px;margin:3em auto;padding:0 1em;line-height:1.6}label{display:block;margin:12px 0}input,button{font:inherit;padding:7px}button{cursor:pointer}input[type=text],input[type=password]{width:min(90%,470px)}pre{background:#f4f5f7;overflow:auto;max-height:240px;padding:12px;white-space:pre-wrap}small{color:#555}</style>
+</head><body><h1>Fedpara — WebRTCパッチ送受信</h1>
+<p><small>Mummyをシグナリングに使い、LoRA/LoHAパッチのバイト列そのものは暗号化されたDataChannelでピア間転送します。同じルームIDを双方で設定してください。</small></p>
+<label>ルームID <input id="room" type="text" autocomplete="off"></label>
+<label>APP_TOKEN <input id="token" type="password"></label>
+<button id="connect">接続</button> <button id="close">切断</button>
+<p>接続状態：<b id="state">未接続</b></p>
+<label>送信する .fpatch <input id="file" type="file" accept=".fpatch"></label>
+<button id="send" disabled>パッチを送信</button>
+<pre id="log"></pre>
+<script>
+'use strict';
+const $ = id=>document.getElementById(id), log=x=>{$('log').textContent+=x+'\n';};
+const magic = 'FPAT1';
+const makeRoom=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
+$('room').value=location.hash.slice(1).match(/^[\w-]{16,64}$/)?.[0] || makeRoom();
+let ws=null,pc=null,dc=null,readyRemote=false,waitingIce=[],pendingLocal=[],canSendLocal=false,rx=null,rxPieces=[];
+function signal(msg){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(msg));}
+function display(s){$('state').textContent=s;}
+function close(){if(dc){dc.close();dc=null;}if(pc){pc.close();pc=null;}if(ws){ws.close();ws=null;}$('send').disabled=true;display('切断');rx=null;rxPieces=[];}
+function acceptChannel(channel){
+ if(channel.label!=='fedpara-patch'){channel.close();return;}
+ dc=channel;dc.binaryType='arraybuffer';dc.bufferedAmountLowThreshold=128*1024;
+ dc.onopen=()=>{display('接続済み');$('send').disabled=false;log('DataChannel connected');};
+ dc.onclose=()=>{display('切断');$('send').disabled=true;};
+ dc.onmessage=event=>{try{acceptFrame(event.data);}catch(e){log('受信エラー: '+e.message);rx=null;rxPieces=[];}};
+}
+function acceptFrame(value){
+ if(typeof value==='string'){
+  const j=JSON.parse(value);
+  if(j.v!==1)throw Error('frame version');
+  if(j.type==='start'){
+   if(rx||!Number.isSafeInteger(j.size)||j.size<1||j.size>512*1024*1024||!/^[0-9a-f]{64}$/.test(j.sha256))throw Error('invalid header');
+   rx={...j,received:0};rxPieces=[];log('受信開始: '+j.size+' bytes');
+  }else if(j.type==='end'){
+   if(!rx||j.id!==rx.id||rx.received!==rx.size)throw Error('mismatched/truncated end');
+   const chunks=rxPieces;
+   const blob=new Blob(chunks,{type:'application/octet-stream'});
+   const complete=rx;rx=null;rxPieces=[];
+   // Hash asynchronously; next transfer may begin while verification proceeds.
+   (async()=>{
+    const data=await blob.arrayBuffer();
+    const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),n=>n.toString(16).padStart(2,'0')).join('');
+    if(hash!==complete.sha256||new TextDecoder().decode(data.slice(0,5))!==magic){log('破損したパッチを拒否');return;}
+    let peer='remote',seq='x';
+    try{const v=new DataView(data);const length=v.getUint32(5,false);const m=JSON.parse(new TextDecoder().decode(data.slice(9,9+length)));peer=String(m.peer_id).replace(/[^\w-]/g,'_');seq=String(m.seq).replace(/[^0-9]/g,'');}catch{}
+    const url=URL.createObjectURL(blob), a=document.createElement('a');a.href=url;a.download=peer+'_'+seq+'.fpatch';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);
+    log('SHA-256確認済み・受信完了: '+a.download);
+   })().catch(e=>log('検証エラー: '+e.message));
+  } else throw Error('unknown control frame');
+ }else if(value instanceof ArrayBuffer){
+  if(!rx||!value.byteLength||value.byteLength>16384||rx.received+value.byteLength>rx.size)throw Error('invalid data frame');
+  rx.received+=value.byteLength;rxPieces.push(value);
+ }else throw Error('unknown payload');
+}
+async function setup(servers, role){
+ pc=new RTCPeerConnection({iceServers:servers});
+ pc.onconnectionstatechange=()=>display(pc.connectionState);
+ pc.ondatachannel=e=>acceptChannel(e.channel);
+ pc.onicecandidate=e=>{let msg={type:'candidate',candidate:e.candidate?.toJSON()||null};if(canSendLocal)signal(msg);else pendingLocal.push(msg);};
+ if(role==='initiator')acceptChannel(pc.createDataChannel('fedpara-patch',{ordered:true}));
+}
+function flushCandidates(){canSendLocal=true;for(const m of pendingLocal)signal(m);pendingLocal=[];}
+async function setRemote(sdp,type){await pc.setRemoteDescription({sdp,type});readyRemote=true;for(const item of waitingIce)await pc.addIceCandidate(item);waitingIce=[];}
+async function handle(msg){
+ switch(msg.type){
+ case 'joined':log('joined: '+msg.role);await setup(msg.iceServers,msg.role);break;
+ case 'peer-joined':await pc.setLocalDescription(await pc.createOffer());signal({type:'offer',sdp:pc.localDescription.sdp});flushCandidates();break;
+ case 'offer':await setRemote(msg.sdp,'offer');await pc.setLocalDescription(await pc.createAnswer());signal({type:'answer',sdp:pc.localDescription.sdp});flushCandidates();break;
+ case 'answer':await setRemote(msg.sdp,'answer');break;
+ case 'candidate':if(!pc)return;if(!readyRemote)waitingIce.push(msg.candidate);else await pc.addIceCandidate(msg.candidate);break;
+ case 'error':log('Server: '+msg.message);break;
+ case 'peer-left':log('ピアが切断しました');close();break;
+ }
+}
+$('connect').onclick=()=>{
+ close();location.hash=$('room').value;
+ const proto=location.protocol==='https:'?'wss://':'ws://';ws=new WebSocket(proto+location.host+'/ws');
+ ws.onopen=()=>{signal({type:'join',mode:'p2p',room:$('room').value,token:$('token').value});display('接続待機');};
+ ws.onmessage=e=>{handle(JSON.parse(e.data)).catch(err=>log('Signal: '+err.message));};
+ ws.onerror=()=>log('WebSocket error');
+ ws.onclose=()=>display('シグナリング切断');
+};
+$('close').onclick=close;
+async function drain(){while(dc.readyState==='open'&&dc.bufferedAmount>256*1024)await new Promise(r=>setTimeout(r,15));if(dc.readyState!=='open')throw Error('channel closed');}
+$('send').onclick=async()=>{
+ try{
+  if(!dc||dc.readyState!=='open')throw Error('channel not open');
+  const f=$('file').files?.[0];if(!f)throw Error('ファイルを選択してください');
+  if(f.size>512*1024*1024)throw Error('512MiB以下のパッチを選択してください');
+  const data=await f.arrayBuffer(), hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),x=>x.toString(16).padStart(2,'0')).join('');
+  const id=Array.from(crypto.getRandomValues(new Uint8Array(12)),x=>x.toString(16).padStart(2,'0')).join('');
+  dc.send(JSON.stringify({v:1,type:'start',id,size:data.byteLength,sha256:hash}));
+  for(let i=0;i<data.byteLength;i+=16384){await drain();dc.send(data.slice(i,i+16384));}
+  await drain();dc.send(JSON.stringify({v:1,type:'end',id}));log('送信完了: '+f.name);
+ }catch(e){log('送信エラー: '+e.message);}
+};
+</script></body></html>
