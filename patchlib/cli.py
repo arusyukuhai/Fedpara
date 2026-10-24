@@ -17,7 +17,7 @@ import torch
 from safetensors.torch import load_file
 from .core import UniversalAdapter, PatchError, decode_patch
 from .p2p import PatchNode, exchange_file, exchange_state
-from .state import export_state, apply_state, verify_state, inspect_state
+from .state import export_state, apply_state, verify_state, inspect_state, semantic_state_sha256
 from .identity import generate_keypair, signer_from_pem, verifier_from_pem
 from .shards import (shard_state, export_state_sharded, read_manifest, verify_shards,
                      assemble_state, DEFAULT_SHARD_BYTES, shard_map)
@@ -76,9 +76,58 @@ def _create_factory(args):
         raise TypeError('factory must return torch.nn.Module')
     return model
 
+def resolve_device(device):
+    """Resolve runtime device consistently; fail early for unavailable accelerators."""
+    if str(device) == 'auto':
+        if torch.cuda.is_available():
+            return torch.device('cuda')
+        if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
+            return torch.device('mps')
+        return torch.device('cpu')
+    result = torch.device(device)
+    if result.type == 'mps' and not torch.backends.mps.is_available():
+        raise RuntimeError('MPS selected, but PyTorch MPS is unavailable')
+    if result.type == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError('CUDA selected, but no available CUDA device was found')
+    return result
+
+
+def input_device(model, fallback):
+    """First embedding is a safer placement for integer token IDs than a CLI hint."""
+    emb = model.get_input_embeddings() if hasattr(model,'get_input_embeddings') else None
+    if emb is not None:
+        for param in emb.parameters():
+            if param.device.type != 'meta':
+                return param.device
+    for param in model.parameters():
+        return param.device
+    return resolve_device(fallback)
+
+
+def check_adapter_placement(adapter):
+    """Detect mixed-device factors *before* the first forward/backward."""
+    for group in adapter.groups:
+        modpath, _, name = group.aliases[0].rpartition('.')
+        original = adapter.model.get_submodule(modpath).parametrizations[name].original
+        for factor in group.overlay.local.parts:
+            if factor.device != original.device:
+                raise RuntimeError(f'LoRA/LoHA factor for {group.canonical} on {factor.device}; base on {original.device}')
+
+
 def load_model(args, *, use_adapter: bool):
     _untrusted_guard(args)
-    if getattr(args,'factory_file',None):
+    initialization = getattr(args, 'initialization', 'pretrained')
+    if initialization not in ('pretrained', 'random'):
+        raise ValueError('initialization must be pretrained/random')
+    if initialization == 'random':
+        # Create the SAME GPT-Neo architecture, but do not fetch pretrained
+        # weights. This seed only governs model genesis, not data sampling.
+        from .live_initialization import create_random_tinystories_model
+        if getattr(args, 'factory_file', None):
+            raise ValueError('random TinyStories genesis cannot use custom model factory')
+        mdl, revision = create_random_tinystories_model(
+            args.model, args.revision, getattr(args, 'initial_seed', 42))
+    elif getattr(args,'factory_file',None):
         mdl = _create_factory(args)
         factory_sha = hashlib.sha256(Path(args.factory_file).read_bytes()).hexdigest()
         revision = 'factory-sha256:'+factory_sha
@@ -94,7 +143,8 @@ def load_model(args, *, use_adapter: bool):
                     local_files_only=custom,
                     use_safetensors=not args.allow_legacy_bin)
         revision = getattr(mdl.config,'_commit_hash',None) or args.revision
-    mdl.to(args.device)
+    device = resolve_device(args.device)
+    mdl.to(device)
     if hasattr(mdl,'config') and hasattr(mdl.config,'use_cache'):
         mdl.config.use_cache = False
     if getattr(args,'gradient_checkpointing',False) and hasattr(mdl,'gradient_checkpointing_enable'):
@@ -104,12 +154,9 @@ def load_model(args, *, use_adapter: bool):
         state = Path(args.state_base)
         apply_state(mdl, state, model_id=model_id,revision=revision,
                     max_bytes=args.max_state_gb*1024**3)
-        # Derive a unique base revision from snapshot bytes so patches cannot
-        # mistakenly apply to a model still using the original Hub weights.
-        sha = hashlib.sha256()
-        with state.open('rb') as f:
-            for part in iter(lambda:f.read(1024*1024),b''): sha.update(part)
-        revision = 'fstate-sha256:'+sha.hexdigest()
+        # The archive ZIP header contains timestamps and peer_id can vary.
+        # Bind to tensor CONTENT, not incidental archive bytes.
+        revision = 'fstate-sha256:'+semantic_state_sha256(state)
     if getattr(args,'moe_plan',None):
         from .moe_light import slice_moe_modulelist
         plan=json.loads(Path(args.moe_plan).read_text(encoding='utf-8'))
@@ -123,9 +170,18 @@ def load_model(args, *, use_adapter: bool):
             print('MoE retained expert indices:',sl.path,sl.keep,flush=True)
     if not use_adapter:
         return mdl,revision
+    resolved_scope=getattr(args,'target_scope','all')
+    if resolved_scope=='auto':
+        resolved_scope=(('gpt_neo_full' if args.kind == 'loha' else 'gpt_neo_linear')
+                        if getattr(getattr(mdl,'config',None),
+                           'model_type',None)=='gpt_neo' else 'all')
+    args.target_scope=resolved_scope
     adapter = UniversalAdapter(mdl, model_id, revision,
                                kind=args.kind,rank=args.rank,alpha=args.alpha,
-                               max_peers=args.max_peers)
+                               max_peers=args.max_peers,target_scope=resolved_scope,
+                               init_style=getattr(args,'init_style','balanced'))
+    print(f'adapter policy scope={resolved_scope} init={getattr(args,"init_style","balanced")}',flush=True)
+    check_adapter_placement(adapter)
     print('adapter:',json.dumps({**adapter.counts(),'layout':adapter.layout,
                                    'resolved_revision':revision},indent=2))
     return mdl,adapter
@@ -136,16 +192,24 @@ def load(args):
 
 
 def training_batches(args):
-    if getattr(args,'room_manifest',None) and not (args.batches_dir or args.text_file or args.jsonl):
-        from .room_manifest import load_manifest
+    from .data_sampling import peer_sampling_seed, shuffled_cycle
+    from .room_manifest import load_manifest
+    manifest = (load_manifest(args.room_manifest) if getattr(args, 'room_manifest', None)
+                and not (args.batches_dir or args.text_file or args.jsonl) else None)
+    # Same room seed, but independent deterministic stream per persistent peer.
+    root_seed = manifest['datasets']['seed'] if manifest is not None else 42
+    data_seed = peer_sampling_seed(getattr(args, 'peer_id', None), root_seed)
+    print(f'DATA SAMPLING peer={getattr(args, "peer_id", None) or "standalone"} '
+          f'seed={data_seed} source={"huggingface" if manifest else "local"}', flush=True)
+    if manifest is not None:
         from .hf_datasets import batches_from_room
-        yield from batches_from_room(args,load_manifest(args.room_manifest))
+        yield from batches_from_room(args,manifest)
         return
     if args.batches_dir:
         files = sorted(Path(args.batches_dir).glob('*.safetensors'))
         if not files:
             raise ValueError('No .safetensors batches in --batches-dir')
-        for file in itertools.cycle(files):
+        for file in shuffled_cycle(files, data_seed):
             # A batch is exactly the named tensor arguments accepted by model(**batch).
             yield load_file(file)
     else:
@@ -168,8 +232,9 @@ def training_batches(args):
                 raise ValueError('empty text dataset')
             mlm = args.hf_task == 'masked-lm'
             collator = DataCollatorForLanguageModeling(tokenizer, mlm=mlm, mlm_probability=0.15)
+            local_rows=shuffled_cycle(lines, data_seed)
             for step in itertools.count():
-                selected = [lines[(step*args.batch_size + j) % len(lines)] for j in range(args.batch_size)]
+                selected = list(itertools.islice(local_rows, args.batch_size))
                 encoded = tokenizer(selected, truncation=True, max_length=args.max_length,
                                     padding='max_length', return_tensors='pt')
                 # Collator masks -100 on pad tokens for CLM, random masks for MLM.
@@ -180,8 +245,9 @@ def training_batches(args):
             examples = [json.loads(line) for line in Path(args.jsonl).read_text(encoding='utf8').splitlines() if line.strip()]
             if not examples:
                 raise ValueError('empty JSONL')
+            local_rows=shuffled_cycle(examples, data_seed)
             for step in itertools.count():
-                items = [examples[(step*args.batch_size + j) % len(examples)] for j in range(args.batch_size)]
+                items = list(itertools.islice(local_rows, args.batch_size))
                 enc = tokenizer([x['input'] if args.hf_task=='seq2seq-lm' else x['text'] for x in items],
                                 return_tensors='pt',padding=True,truncation=True,max_length=args.max_length)
                 if args.hf_task == 'seq2seq-lm':
@@ -198,7 +264,9 @@ def training_batches(args):
 def run_step(model, adapter, optimizer, batch, args):
     with adapter.lock:
         model.train()
-        batch = {k: v.to(args.device) for k, v in batch.items()}
+        target = input_device(model, args.device)
+        batch = {k: v.to(target, non_blocking=True) if isinstance(v,torch.Tensor) else v
+                 for k, v in batch.items()}
         outputs = model(**batch)
         loss = getattr(outputs, 'loss', None)
         if loss is None and isinstance(outputs, dict):
@@ -542,12 +610,24 @@ def add_model_args(p):
     p.add_argument('--factory-file', help='Untrusted custom Python build_model() factory; offline container required')
     p.add_argument('--trust-remote-code', action='store_true',help='Explicit opt-in, only in sandbox with local pinned HF snapshot')
     p.add_argument('--state-base',help='Apply verified full-state base before attaching any patches')
+    p.add_argument('--initialization',choices=('pretrained','random'),default='pretrained',
+        help='random creates official TinyStories-1M config weights from a fixed seed (no pretrained weights)')
+    p.add_argument('--initial-seed',type=int,default=42,
+        help='Shared random model genesis seed; MUST match all room peers')
     p.add_argument('--max-state-gb',type=int,default=32,help='Full state file limit in GiB')
     p.add_argument('--hf-task', choices=tuple(AUTO_CLASSES), default='causal-lm')
     p.add_argument('--auto-class', help='Override with a packaged Transformers AutoModelFor* class')
     p.add_argument('--revision', default='main', help='Prefer pinned Hub commit SHA')
     p.add_argument('--kind', choices=('lora','loha'), default='loha')
     p.add_argument('--rank', type=int, default=16,help='SHARED room rank; do not auto-change between peers')
+    p.add_argument('--target-scope',choices=('all','gpt_neo_linear','gpt_neo_full','auto'),default='all',
+        help='Adapter selection: auto uses GPT-Neo Attention/MLP + Embedding/LM head for LoHa; linear-only for LoRA')
+    p.add_argument('--init-style',choices=('legacy','balanced'),default='balanced',
+        help='LoHa initialization: balanced avoids near-zero initial gradients')
+    p.add_argument('--optimizer',choices=('adamw','lora-muon'),default='adamw',
+        help='Continual adapter optimizer; LoRA-Muon requires --kind lora')
+    p.add_argument('--muon-momentum',type=float,default=.9)
+    p.add_argument('--muon-weight-decay',type=float,default=0.)
     p.add_argument('--moe-plan',type=Path,help='Shared, deterministic explicit ModuleList expert plan JSON (experimental)')
     p.add_argument('--alpha', type=float, default=None)
     p.add_argument('--max-peers', type=int, default=8)
@@ -605,7 +685,13 @@ def main():
     add_identity(live)
     livefed = sub.add_parser('train-live', aliases=['train-elastic'], help='Elastic (default) or synchronous streaming federated training over WebRTC')
     add_train_args(livefed)
+    # The old 1e-3 + std=.02 LoHa startup was too aggressive and had extremely
+    # weak first gradients. For new live rooms, match benchmark-safe settings.
+    livefed.set_defaults(lr=1e-4,target_scope='auto',init_style='balanced')
     livefed.add_argument('--mode',choices=['elastic','synchronous'],default='elastic',help='Elastic is default; synchronous requires fixed roster')
+    livefed.add_argument('--auto-state',action='store_true',help='Automatically create missing genesis .fstate from trusted packaged HF model; no custom code execution')
+    livefed.add_argument('--room-public',action='store_true',help='Publish bearer-secret room ID in the public directory (opt-in)')
+    livefed.add_argument('--max-neighbors',type=int,default=8,choices=(2,4,6,8),help='Symmetric ring/chord WebRTC links per peer; max 8')
     livefed.add_argument('--room-id',help='Room-only discovery; no keygen, --link or roster file needed')
     livefed.add_argument('--auto-tune',action=argparse.BooleanOptionalAction,default=True,help='Conservatively tune memory, batch, wire precision and local sync cadence')
     livefed.add_argument('--ws',default='ws://127.0.0.1:8080/ws')
@@ -615,6 +701,8 @@ def main():
     livefed.add_argument('--token',default=os.getenv('APP_TOKEN',''))
     livefed.add_argument('--local-steps',type=int,default=64,help='Maximum local minibatches before publishing; receiving early seals sooner')
     livefed.add_argument('--rounds',type=int,default=0,help='Elastic: 0 runs continuously; synchronous requires > 0 rounds')
+    livefed.add_argument('--reinit-every',type=int,default=20,
+        help='Reinitialize committed LoHa/LoRA factors and optimizer every N local signed events; 0 disables (requires a NEW room)')
     livefed.add_argument('--round-timeout',type=float,default=600)
     livefed.add_argument('--connect-timeout',type=float,default=120)
     livefed.add_argument('--max-patch-mb',type=int,default=512)
@@ -627,13 +715,21 @@ def main():
     livefed.add_argument('--self-public-key',help='This peer Ed25519 public key; used to validate relayed history')
     livefed.add_argument('--roster-file',type=Path,help='Optional reloadable JSON peer roster for joining/leaving')
     livefed.add_argument('--journal',type=Path,default=Path('elastic-events.sqlite3'),help='Durable signed patch event journal')
+    livefed.add_argument('--swarm-pause-file',type=Path,help=argparse.SUPPRESS)
+    livefed.add_argument('--swarm-max-events',type=int,default=0,help=argparse.SUPPRESS)
+    livefed.add_argument('--epoch-v2-probe-committee',type=Path,help='EXPERIMENTAL: fixed JSON list of signed peer IDs for no-op Epoch Paxos WebRTC probe; does NOT change v1 training')
+    livefed.add_argument('--durable-every' ,type=int,default=1,help='Save local factors + optimizer state every N optimizer steps (0 disables; default 1 for crash recovery)')
     livefed.add_argument('--max-journal-gb',type=int,default=20,help='Hard log cap; no silent pruning')
-    livefed.add_argument('--peer-timeout',type=float,default=18.,help='Inactive peer expires from denominator')
+    livefed.add_argument('--peer-timeout',type=float,default=45.,help='Inactive peer expires from denominator')
     livefed.add_argument('--heartbeat-interval',type=float,default=4.,help='Signed heartbeat cadence in seconds')
+    livefed.add_argument('--hf-shuffle-buffer',type=int,default=512,
+                         help='HF streaming shuffle buffer; smaller (e.g. 64) reduces cold-start data reads')
+    livefed.add_argument('--data-wait-report-seconds',type=float,default=15.,
+                         help='Log an in-progress HF batch fetch or model step every N seconds (0 disables)')
     livefed.add_argument('--sync-timeout',type=float,default=30.,help='Max pause to catch up after connection; never indefinite')
     livefed.add_argument('--boot-grace',type=float,default=4.,help='Initial catchup grace, even when all peers are offline')
-    livefed.add_argument('--inventory-interval',type=float,default=.07,help='Minimum gap between paged history listings')
-    livefed.add_argument('--inventory-cycle',type=float,default=10.,help='Repeat all-history reconciliation after this many seconds')
+    livefed.add_argument('--inventory-interval',type=float,default=.4,help='Minimum gap between paged history listings; bounded gossip traffic')
+    livefed.add_argument('--inventory-cycle',type=float,default=60.,help='Repeat all-history reconciliation after this many seconds')
     exchange = sub.add_parser('exchange',help='Exchange saved .fpatch via WebRTC')
     exchange.add_argument('--ws', default='ws://127.0.0.1:8080/ws')
     exchange.add_argument('--room', required=True)
@@ -738,6 +834,8 @@ def main():
     fetch.add_argument('--revision',required=True)
     fetch.add_argument('--output-dir',required=True)
     sub.add_parser('room-create',help='Generate a cryptographically random shareable room ID')
+    listing=sub.add_parser('room-list',help='List explicitly published server rooms')
+    listing.add_argument('--ws',default='ws://127.0.0.1:8080/ws')
     info=sub.add_parser('room-info',help='Fetch room model and HF dataset collection without training')
     info.add_argument('--room-id',required=True)
     info.add_argument('--ws',default='ws://127.0.0.1:8080/ws')
@@ -757,12 +855,77 @@ def main():
     rm.add_argument('--code-file',type=Path)
     rm.add_argument('--code-url',default='')
     rm.add_argument('--output',type=Path,required=True)
-    gui = sub.add_parser('gui',help='Native Tkinter desktop GUI; no HTTP server or port')
+    sub.add_parser('gui',help='Embedded HTML/CSS/JS desktop WebView GUI (no HTTP server)')
+    sub.add_parser('gui-desktop',help='Legacy native Tkinter GUI')
     keygen = sub.add_parser('keygen',help='Create Ed25519 P2P sender keys')
     keygen.add_argument('--private',type=Path,required=True)
     keygen.add_argument('--public',type=Path,required=True)
+    effect=sub.add_parser('benchmark-effectiveness',
+        help='Offline real-LoHa: central vs ideal-parallel peer FedSum (NOT WebRTC)')
+    effect.add_argument('--model',choices=('toy','tinystories-1m'),default='tinystories-1m',
+        help='tinystories-1m=pinned pretrained GPT-Neo; toy=synthetic transformer')
+    effect.add_argument('--dataset',choices=('auto','builtin','tinystories'),default='auto',
+        help='TinyStories-1M: builtin is a smoke test; tinystories streams actual disjoint HF train/validation examples')
+    effect.add_argument('--initialization',choices=('random','pretrained'),default='random',
+        help='default random: TinyStories-1M structure initialized from config, frozen base; LoHa only')
+    effect.add_argument('--peers',type=int,default=4)
+    effect.add_argument('--rounds',type=int,default=5)
+    effect.add_argument('--local-steps',type=int,default=2)
+    effect.add_argument('--reinit-every',type=int,default=20,
+        help='ReLoRA-style merge+reset every N synchronous rounds; 0 disables')
+    effect.add_argument('--batch-size',type=int,default=4)
+    effect.add_argument('--seed',type=int,default=20261023)
+    effect.add_argument('--lr',type=float,default=None,help='auto: 0.0001 for TinyStories-1M; 0.003 for toy')
+    effect.add_argument('--kind',choices=('loha','lora'),default='loha')
+    effect.add_argument('--optimizer',choices=('adamw','lora-muon'),default='adamw',
+        help='LoHa uses AdamW; LoRA-Muon requires --kind lora')
+    effect.add_argument('--muon-momentum',type=float,default=.9)
+    effect.add_argument('--muon-weight-decay',type=float,default=0.)
+    effect.add_argument('--rank',type=int,default=None,
+        help='default: 16 for TinyStories-1M (Attention+MLP only); 4 for toy')
+    effect.add_argument('--width',type=int,default=24)
+    effect.add_argument('--context',type=int,default=None,help='auto: 64 for TinyStories-1M; 12 for toy')
+    effect.add_argument('--sequences',type=int,default=None,
+        help='training sequences per peer: default 2048 for TinyStories-1M, 64 for toy')
+    effect.add_argument('--validation-sequences',type=int,default=None,
+        help='heldout validation sequences: default 1024 for TinyStories-1M, 64 for toy')
+    effect.add_argument('--warmup-ratio',type=float,default=.05)
+    effect.add_argument('--min-lr-ratio',type=float,default=.1)
+    effect.add_argument('--grad-clip',type=float,default=1.)
+    effect.add_argument('--target-scope',choices=('all','gpt_neo_linear','gpt_neo_full'),default=None)
+    effect.add_argument('--threads',type=int,default=1)
+    effect.add_argument('--text-file',type=Path,help='Use disjoint local UTF8 byte text corpus instead of synthetic Markov data (requires --vocab 256)')
+    effect.add_argument('--vocab',type=int,default=32)
+    effect.add_argument('--output-dir',type=Path,default=Path('effectiveness-benchmark'))
+    v2bench=sub.add_parser('elastic-v2-benchmark',
+        help='8-peer synthetic from-scratch optimizer comparison (in-process, NOT WebRTC)')
+    v2bench.add_argument('--peers',type=int,default=8)
+    v2bench.add_argument('--epochs',type=int,default=24)
+    v2bench.add_argument('--seed',type=int,default=20261022)
+    v2bench.add_argument('--local-steps',type=int,default=4)
+    v2bench.add_argument('--lr',type=float,default=0.04)
+    v2bench.add_argument('--ridge',type=float,default=0.)
+    v2bench.add_argument('--output',type=Path,default=Path('elastic-v2-benchmark.json'))
+    v2=sub.add_parser('elastic-v2-compare',help='Offline counterfactual V2 aggregation on a completed V1 swarm run (NOT a true V2 training A/B)')
+    v2.add_argument('--run',type=Path,required=True,help='Completed Swarm Simulator output directory')
+    v2.add_argument('--cap-per-peer',type=int,default=8,help='Up to N earliest events per peer to replay (1..64)')
+    v2.add_argument('--eta',type=float,default=1.)
+    v2.add_argument('--ridge',type=float,default=0.)
+    v2.add_argument('--output',type=Path,help='Optional output JSON; defaults to RUN/elastic-v2-counterfactual.json')
+    from .swarm_sim import add_parser as add_swarm_parser
+    add_swarm_parser(sub)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(message)s')
+    if args.cmd in ('train-live','train-elastic'):
+        # httpx INFO dumps enormous *signed* CDN redirect URLs for normal 206
+        # range responses. Keep errors, but surface actionable batch progress.
+        logging.getLogger('httpx').setLevel(logging.WARNING)
+        logging.getLogger('httpcore').setLevel(logging.WARNING)
+
+    if getattr(args,'hf_shuffle_buffer',512) < 2 or getattr(args,'hf_shuffle_buffer',512) > 100000:
+        parser.error('--hf-shuffle-buffer must be in 2..100000')
+    if getattr(args,'data_wait_report_seconds',15.0) < 0:
+        parser.error('--data-wait-report-seconds cannot be negative')
     if getattr(args,'steps',1) <= 0 or getattr(args,'grad_accum',1) <= 0:
         parser.error('--steps and --grad-accum must be > 0')
     if args.cmd in ('train','train-p2p','train-live','train-elastic') and not any((args.batches_dir,args.text_file,args.jsonl,args.room_manifest)) and not (args.cmd in ('train-live','train-elastic') and args.room_id):
@@ -781,6 +944,9 @@ def main():
     elif args.cmd=='train': train(args)
     elif args.cmd=='train-p2p': asyncio.run(train_p2p(args))
     elif args.cmd in ('train-live','train-elastic'):
+        if args.auto_state:
+            from .bootstrap import ensure_state
+            ensure_state(args, load_model=load_model)
         if args.mode=='synchronous':
             if args.rounds<=0: parser.error('--mode synchronous requires --rounds > 0')
             from .livefed import train_live
@@ -828,6 +994,9 @@ def main():
         args.output.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
         print('manifest:',args.output,'sha256:',manifest_digest(manifest))
     elif args.cmd == 'gui':
+        from .webview_gui import run_webview
+        run_webview()
+    elif args.cmd == 'gui-desktop':
         from .gui import run_desktop
         run_desktop()
     elif args.cmd == 'room-info':
@@ -837,6 +1006,48 @@ def main():
         if args.output:
             args.output.write_text(json.dumps(m,ensure_ascii=False,indent=2)+'\n',encoding='utf8')
         print(json.dumps({'manifest':m,'sha256':manifest_digest(m)},indent=2,ensure_ascii=False))
+    elif args.cmd == 'room-list':
+        from .roomid import list_public_rooms
+        print(json.dumps(list_public_rooms(args.ws),ensure_ascii=False,indent=2))
+    elif args.cmd == 'benchmark-effectiveness':
+        from .effectiveness_benchmark import run_effectiveness_benchmark
+        result=run_effectiveness_benchmark(peers=args.peers,rounds=args.rounds,
+            local_steps=args.local_steps,batch_size=args.batch_size,seed=args.seed,
+            lr=args.lr,kind=args.kind,rank=args.rank,width=args.width,
+            context=(args.context if args.context is not None else (12 if args.model=='toy' else 64)),
+            sequences=args.sequences,validation_sequences=args.validation_sequences,
+            threads=args.threads,
+            text_file=args.text_file,vocab=args.vocab,model=args.model,dataset=args.dataset,
+            warmup_ratio=args.warmup_ratio,min_lr_ratio=args.min_lr_ratio,
+            grad_clip=args.grad_clip,target_scope=args.target_scope,initialization=args.initialization,
+            optimizer=args.optimizer,muon_momentum=args.muon_momentum,
+            muon_weight_decay=args.muon_weight_decay,
+            reinit_every=args.reinit_every,output_dir=args.output_dir)
+        print(json.dumps({'status':result['status'],'loss':result['loss'],
+            'compute':result['compute'],'artifacts':result['artifacts']},
+            ensure_ascii=False,indent=2),flush=True)
+    elif args.cmd == 'elastic-v2-benchmark':
+        from .elastic_v2_benchmark import run_optimizer_benchmark
+        result=run_optimizer_benchmark(peers=args.peers,epochs=args.epochs,
+                    seed=args.seed,local_steps=args.local_steps,lr=args.lr,ridge=args.ridge)
+        args.output.parent.mkdir(parents=True,exist_ok=True)
+        args.output.write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
+        print(json.dumps({k:result[k] for k in ('status','loss_first','loss_last','optimizer_time_s','warning')},indent=2))
+        print('Saved:',args.output)
+    elif args.cmd == 'elastic-v2-compare':
+        from .elastic_v2 import compare_legacy_swarm_trace
+        if not 1 <= args.cap_per_peer <= 64:
+            parser.error('--cap-per-peer must be in 1..64')
+        result=compare_legacy_swarm_trace(args.run,cap_per_peer=args.cap_per_peer,
+                                          eta=args.eta,ridge=args.ridge)
+        output=args.output or args.run/'elastic-v2-counterfactual.json'
+        output.parent.mkdir(parents=True,exist_ok=True)
+        output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+        print(json.dumps(result,ensure_ascii=False,indent=2))
+        print('Counterfactual analysis saved:',output)
+    elif args.cmd == 'swarm-sim':
+        from .swarm_sim import cli as run_swarm_sim
+        run_swarm_sim(args)
     elif args.cmd == 'room-create':
         from .roomid import create_room_id
         print(create_room_id())

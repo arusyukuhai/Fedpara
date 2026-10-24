@@ -1,0 +1,181 @@
+bootstrap: verified cached genesis, tensor content: 0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5
+adaptive local policy: {"device": "mps", "batch_size": 1, "grad_accum": 4, "gradient_checkpointing": true, "wire_dtype": "float16", "local_steps": 64, "preferred_neighbors": 2, "memory_fraction": 0.35}
+2026-10-22 19:59:05,822 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+W1022 19:59:05.912000 7889 site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
+2026-10-22 19:59:06,940 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2 "HTTP/1.1 200 OK"
+2026-10-22 19:59:07,417 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/main "HTTP/1.1 200 OK"
+2026-10-22 19:59:07,617 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/discussions?p=0 "HTTP/1.1 200 OK"
+2026-10-22 19:59:07,850 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/refs%2Fpr%2F2 "HTTP/1.1 200 OK"
+2026-10-22 19:59:08,268 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 19:59:08,268 huggingface_hub.utils._http Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 19:59:08,756 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors "HTTP/1.1 302 Found"
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 10720.27it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+adapter: {
+  "original": 102714,
+  "patch": 102714,
+  "groups": 28,
+  "dense_fallback": 28,
+  "layout": "003e3a9e0e6caed95f532c92fa8e05f9727a21048d70a28ac7f09d7ac08ba12c",
+  "resolved_revision": "fstate-sha256:0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5"
+}
+elastic peer=p3dc1d57308a570c6d4376fb699851285 genesis=b272504c874178f699fa11bf76b5b1d750906b30f198b8b41645fb1953d1db99 recovered=0 events; log=/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/tDg2sdLIlFlmZjfs4jQ0Gsz3EXvuy8Bl/peers/peer-3d35248a63d07062/events.sqlite3
+JOIN WAIT: waiting-for-room-signaling: check Mummy /ws URL, version and port; lobby_online=False living=1 active=1 journal_events=0 neighbors=0 peer_errors={} snapshot_progress={}
+2026-10-22 19:59:09,373 fedpara.roomid room presence: peer=p3dc1d57308a570c6d4376fb699851285 type=group-members living=2
+peer registered: p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 19:59:11,390 fedpara.elastic connecting peer=p4e5ea9e787b41e4af665ff175405d846 pair=35d0eb961015 retry=0
+2026-10-22 19:59:11,759 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-connect role=None ice=new rtc=new
+2026-10-22 19:59:11,760 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-join role=None ice=new rtc=new
+2026-10-22 19:59:11,769 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=waiting-peer role=initiator ice=new rtc=new
+2026-10-22 19:59:11,770 fedpara.snapshot full-model state DataChannel attached; awaiting open state=connecting
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 1.0}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 4.0}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 7.1}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 10.1}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 13.2}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 16.2}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 19.3}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 22.3}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 25.4}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 28.4}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 31.5}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-peer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 34.5}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+2026-10-22 19:59:48,854 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE=closed role=initiator
+2026-10-22 19:59:48,854 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE/DTLS=closed role=initiator
+bootstrap: verified cached genesis, tensor content: 0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5
+adaptive local policy: {"device": "mps", "batch_size": 1, "grad_accum": 4, "gradient_checkpointing": true, "wire_dtype": "float16", "local_steps": 64, "preferred_neighbors": 2, "memory_fraction": 0.35}
+2026-10-22 20:00:01,575 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+W1022 20:00:01.650000 8093 site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
+2026-10-22 20:00:03,698 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2 "HTTP/1.1 200 OK"
+2026-10-22 20:00:04,999 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/main "HTTP/1.1 200 OK"
+2026-10-22 20:00:07,540 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/discussions?p=0 "HTTP/1.1 200 OK"
+2026-10-22 20:00:08,957 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/refs%2Fpr%2F2 "HTTP/1.1 200 OK"
+2026-10-22 20:00:10,342 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 20:00:10,343 huggingface_hub.utils._http Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 20:00:11,619 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors "HTTP/1.1 302 Found"
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 10769.42it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+adapter: {
+  "original": 102714,
+  "patch": 102714,
+  "groups": 28,
+  "dense_fallback": 28,
+  "layout": "003e3a9e0e6caed95f532c92fa8e05f9727a21048d70a28ac7f09d7ac08ba12c",
+  "resolved_revision": "fstate-sha256:0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5"
+}
+elastic peer=p3dc1d57308a570c6d4376fb699851285 genesis=b272504c874178f699fa11bf76b5b1d750906b30f198b8b41645fb1953d1db99 recovered=0 events; log=/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/tDg2sdLIlFlmZjfs4jQ0Gsz3EXvuy8Bl/peers/peer-3d35248a63d07062/events.sqlite3
+JOIN WAIT: waiting-for-room-signaling: check Mummy /ws URL, version and port; lobby_online=False living=1 active=1 journal_events=0 neighbors=0 peer_errors={} snapshot_progress={}
+2026-10-22 20:00:12,305 fedpara.roomid room presence: peer=p3dc1d57308a570c6d4376fb699851285 type=group-members living=2
+peer registered: p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:00:14,310 fedpara.elastic connecting peer=p4e5ea9e787b41e4af665ff175405d846 pair=35d0eb961015 retry=0
+2026-10-22 20:00:14,542 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-connect role=None ice=new rtc=new
+2026-10-22 20:00:14,543 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-join role=None ice=new rtc=new
+2026-10-22 20:00:14,546 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=waiting-offer role=answerer ice=new rtc=new
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-offer', 'role': 'answerer', 'ice': 'new', 'rtc': 'new', 'since_s': 1.0}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'waiting-offer', 'role': 'answerer', 'ice': 'new', 'rtc': 'new', 'since_s': 4.1}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+2026-10-22 20:00:19,563 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=answering-offer role=answerer ice=new rtc=new
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'answering-offer', 'role': 'answerer', 'ice': 'new', 'rtc': 'new', 'since_s': 7.1}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p4e5ea9e787b41e4af665ff175405d846': {'error': '', 'phase': 'answering-offer', 'role': 'answerer', 'ice': 'new', 'rtc': 'new', 'since_s': 10.1}} snapshot_progress={'p4e5ea9e787b41e4af665ff175405d846': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+2026-10-22 20:00:24,568 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=answer-sent role=answerer ice=new rtc=new
+2026-10-22 20:00:24,568 aioice.ice Connection(0) Check CandidatePair(('2408:212:44f6:d300:820:6787:cc34:e564', 56217) -> ('2408:212:44f6:d300:820:6787:cc34:e564', 59130)) State.FROZEN -> State.WAITING
+2026-10-22 20:00:24,568 aioice.ice Connection(0) Check CandidatePair(('192.168.53.152', 62430) -> ('192.168.53.152', 65050)) State.FROZEN -> State.WAITING
+2026-10-22 20:00:24,568 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE=checking role=answerer
+2026-10-22 20:00:24,568 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE/DTLS=connecting role=answerer
+2026-10-22 20:00:24,569 aioice.ice Connection(0) Check CandidatePair(('2408:212:44f6:d300:820:6787:cc34:e564', 56217) -> ('2408:212:44f6:d300:820:6787:cc34:e564', 59130)) State.WAITING -> State.IN_PROGRESS
+2026-10-22 20:00:24,569 aioice.ice Connection(0) Check CandidatePair(('2408:212:44f6:d300:820:6787:cc34:e564', 56217) -> ('2408:212:44f6:d300:820:6787:cc34:e564', 59130)) State.IN_PROGRESS -> State.SUCCEEDED
+2026-10-22 20:00:24,571 aioice.ice Connection(0) Check CandidatePair(('192.168.53.152', 62430) -> ('192.168.53.152', 65050)) State.WAITING -> State.FAILED
+2026-10-22 20:00:24,571 aioice.ice Connection(0) ICE completed
+2026-10-22 20:00:24,602 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE=completed role=answerer
+2026-10-22 20:00:24,629 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE/DTLS=connected role=answerer
+2026-10-22 20:00:24,629 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=rtc-connected role=answerer ice=completed rtc=connected
+2026-10-22 20:00:24,631 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=datachannel-open role=answerer ice=completed rtc=connected
+2026-10-22 20:00:24,633 fedpara.snapshot full-model state DataChannel ready label=fedpara-state id=3
+2026-10-22 20:00:24,635 fedpara.elastic SIGNED HELLO OK peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:00:24,635 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=authenticated role=answerer ice=completed rtc=connected
+SNAPSHOT REQUEST peer=p4e5ea9e787b41e4af665ff175405d846 id=8edff269d4b422bd source_stage=no-ack
+SNAPSHOT SOURCE peer=p4e5ea9e787b41e4af665ff175405d846 stage=accepted
+SNAPSHOT SOURCE peer=p4e5ea9e787b41e4af665ff175405d846 stage=exporting
+SNAPSHOT TIP peer=p4e5ea9e787b41e4af665ff175405d846 events=22
+SNAPSHOT SOURCE peer=p4e5ea9e787b41e4af665ff175405d846 stage=offered
+SNAPSHOT DOWNLOADED peer=p4e5ea9e787b41e4af665ff175405d846
+SNAPSHOT READY: verified full model from p4e5ea9e787b41e4af665ff175405d846; events=22, suffix_events=1, model=/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/tDg2sdLIlFlmZjfs4jQ0Gsz3EXvuy8Bl/peers/peer-3d35248a63d07062/events.sqlite3.snapshots/joined-c900bee1b64d72c061f863cc890cbc0257eeede283586416b726bebba1dd6087.fstate
+JOIN READY: verified-full-model-snapshot; events=23 peer=p3dc1d57308a570c6d4376fb699851285
+DATA SAMPLING peer=p3dc1d57308a570c6d4376fb699851285 seed=4909573540765863080 source=huggingface
+2026-10-22 20:00:29,048 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+2026-10-22 20:00:29,533 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-10-22 20:00:29,975 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-22 20:00:31,379 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+2026-10-22 20:00:31,583 httpx HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/roneneldan/TinyStories/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/README.md?%2Fdatasets%2Froneneldan%2FTinyStories%2Fresolve%2Fmain%2FREADME.md=&etag=%22852d1e5307bae52dd2fd3fb7650b7c90b233297f%22 "HTTP/1.1 200 OK"
+2026-10-22 20:00:31,943 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/TinyStories.py "HTTP/1.1 404 Not Found"
+2026-10-22 20:00:33,473 httpx HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/roneneldan/TinyStories/roneneldan/TinyStories.py "HTTP/1.1 404 Not Found"
+2026-10-22 20:00:33,696 httpx HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/revision/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64 "HTTP/1.1 200 OK"
+2026-10-22 20:00:34,022 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/.huggingface.yaml "HTTP/1.1 404 Not Found"
+2026-10-22 20:00:34,570 httpx HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=roneneldan/TinyStories "HTTP/1.1 200 OK"
+2026-10-22 20:00:34,859 httpx HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-22 20:00:35,165 httpx HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64?recursive=false&expand=false "HTTP/1.1 200 OK"
+2026-10-22 20:00:35,474 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/dataset_infos.json "HTTP/1.1 404 Not Found"
+2026-10-22 20:00:36,060 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00001-of-00004-5852b56a2bd28fd9.parquet "HTTP/1.1 302 Found"
+2026-10-22 20:00:37,446 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/f8de96e95253ad68d69504d20b5529c0ce4974c02dd2b381be1982232cdd95f7?xip=6LMmE6pGjeo&user_id=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00001-of-00004-5852b56a2bd28fd9.parquet%3B+filename%3D%22train-00001-of-00004-5852b56a2bd28fd9.parquet%22%3B&X-Xet-Cas-Uid=public&Expires=1792670435&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2Y4ZGU5NmU5NTI1M2FkNjhkNjk1MDRkMjBiNTUyOWMwY2U0OTc0YzAyZGQyYjM4MWJlMTk4MjIzMmNkZDk1ZjdcXD94aXA9NkxNbUU2cEdqZW8mdXNlcl9pZD1wdWJsaWMmcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAxLW9mLTAwMDA0LTU4NTJiNTZhMmJkMjhmZDkucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAxLW9mLTAwMDA0LTU4NTJiNTZhMmJkMjhmZDkucGFycXVldCUyMiUzQiZYLVhldC1DYXMtVWlkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwNDM1fX19XX0_&Signature=MEUCIQCLFgXIsdWNTcUoc2V8-EJP1il4FYydkycIN4vNLmMVWQIgRUZ0QUjaZqcbtmBdINm-gQDNTJ5z5soxqWODm6M5gcQ_&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+2026-10-22 20:00:38,245 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00001-of-00004-5852b56a2bd28fd9.parquet "HTTP/1.1 302 Found"
+2026-10-22 20:00:38,927 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/f8de96e95253ad68d69504d20b5529c0ce4974c02dd2b381be1982232cdd95f7?user_id=public&X-Xet-Cas-Uid=public&xip=6LMmE6pGjeo&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00001-of-00004-5852b56a2bd28fd9.parquet%3B+filename%3D%22train-00001-of-00004-5852b56a2bd28fd9.parquet%22%3B&Expires=1792670438&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2Y4ZGU5NmU5NTI1M2FkNjhkNjk1MDRkMjBiNTUyOWMwY2U0OTc0YzAyZGQyYjM4MWJlMTk4MjIzMmNkZDk1ZjdcXD91c2VyX2lkPXB1YmxpYyZYLVhldC1DYXMtVWlkPXB1YmxpYyZ4aXA9NkxNbUU2cEdqZW8mcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAxLW9mLTAwMDA0LTU4NTJiNTZhMmJkMjhmZDkucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAxLW9mLTAwMDA0LTU4NTJiNTZhMmJkMjhmZDkucGFycXVldCUyMiUzQiIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwNDM4fX19XX0_&Signature=MEYCIQCyHcqvwD99watuSxvKMxyu%7ENApzHC%7EFvAw1YySRTCWdgIhAPWue7Gv-VlgBFRE3ge3xlJVJ8L3HRACXoPuGFCDRDeH&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+2026-10-22 20:00:41,407 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00001-of-00004-5852b56a2bd28fd9.parquet "HTTP/1.1 302 Found"
+2026-10-22 20:00:42,097 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/f8de96e95253ad68d69504d20b5529c0ce4974c02dd2b381be1982232cdd95f7?xip=6LMmE6pGjeo&user_id=public&X-Xet-Cas-Uid=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00001-of-00004-5852b56a2bd28fd9.parquet%3B+filename%3D%22train-00001-of-00004-5852b56a2bd28fd9.parquet%22%3B&Expires=1792670441&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2Y4ZGU5NmU5NTI1M2FkNjhkNjk1MDRkMjBiNTUyOWMwY2U0OTc0YzAyZGQyYjM4MWJlMTk4MjIzMmNkZDk1ZjdcXD94aXA9NkxNbUU2cEdqZW8mdXNlcl9pZD1wdWJsaWMmWC1YZXQtQ2FzLVVpZD1wdWJsaWMmcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAxLW9mLTAwMDA0LTU4NTJiNTZhMmJkMjhmZDkucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAxLW9mLTAwMDA0LTU4NTJiNTZhMmJkMjhmZDkucGFycXVldCUyMiUzQiIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwNDQxfX19XX0_&Signature=MEQCIC9zLj4waBUGvoO3y%7EmbvGOHkWoxYrstTpYNNcCK1S89AiBOP8QUpAQVuifOMXr%7ED-qhjhKtlfFxy6L08nVDs6Atqg__&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+2026-10-22 20:01:22,655 fedpara.roomid room presence: peer=p3dc1d57308a570c6d4376fb699851285 type=group-peer-left living=1
+2026-10-22 20:01:23,664 fedpara.roomid room presence: peer=p3dc1d57308a570c6d4376fb699851285 type=group-peer-joined living=2
+2026-10-22 20:01:32,307 fedpara.roomid discovery endpoint ws://127.0.0.1:8080/ws unavailable: sent 1011 (internal error) keepalive ping timeout; no close frame received
+2026-10-22 20:01:32,835 fedpara.p2p P2P signaling peer-left room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 channel_open=True
+2026-10-22 20:01:32,835 fedpara.p2p Signaling unavailable; retaining live WebRTC DataChannel
+2026-10-22 20:01:32,835 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=datachannel-closed role=answerer ice=completed rtc=connected
+2026-10-22 20:01:32,836 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE=closed role=answerer
+2026-10-22 20:01:32,836 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE/DTLS=closed role=answerer
+2026-10-22 20:01:33,316 fedpara.roomid room presence: peer=p3dc1d57308a570c6d4376fb699851285 type=group-members living=2
+[transformers] `loss_type=None` was set in the config but it is unrecognized. Using the default loss: `ForCausalLMLoss`.
+2026-10-22 20:02:29,517 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00001-of-00004-5852b56a2bd28fd9.parquet "HTTP/1.1 302 Found"
+2026-10-22 20:02:30,365 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/f8de96e95253ad68d69504d20b5529c0ce4974c02dd2b381be1982232cdd95f7?response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00001-of-00004-5852b56a2bd28fd9.parquet%3B+filename%3D%22train-00001-of-00004-5852b56a2bd28fd9.parquet%22%3B&user_id=public&X-Xet-Cas-Uid=public&xip=6LMmE6pGjeo&Expires=1792670549&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2Y4ZGU5NmU5NTI1M2FkNjhkNjk1MDRkMjBiNTUyOWMwY2U0OTc0YzAyZGQyYjM4MWJlMTk4MjIzMmNkZDk1ZjdcXD9yZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDEtb2YtMDAwMDQtNTg1MmI1NmEyYmQyOGZkOS5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDEtb2YtMDAwMDQtNTg1MmI1NmEyYmQyOGZkOS5wYXJxdWV0JTIyJTNCJnVzZXJfaWQ9cHVibGljJlgtWGV0LUNhcy1VaWQ9cHVibGljJnhpcD02TE1tRTZwR2plbyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwNTQ5fX19XX0_&Signature=MEQCIEP9aeUXfSZTR%7EsEDZD2d88lTQuatAIbnfLQKTBafapmAiBGyQTwQwWJTvcvCGCDnXIGsmk7u3uFfypTkI3RhqRATA__&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic steps=1 emitted=0 loss=9.6055 active=1 living=2 channels=0 authed=0 synced=1 peer=p3dc1d57308a570c6d4376fb699851285
+elastic local event=1, living=2, active=1, bytes=211104
+bootstrap: verified cached genesis, tensor content: 0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5
+adaptive local policy: {"device": "mps", "batch_size": 1, "grad_accum": 4, "gradient_checkpointing": true, "wire_dtype": "float16", "local_steps": 64, "preferred_neighbors": 2, "memory_fraction": 0.35}
+2026-10-22 20:04:02,818 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+W1022 20:04:02.941000 13673 site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
+2026-10-22 20:04:04,204 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2 "HTTP/1.1 200 OK"
+2026-10-22 20:04:04,615 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/main "HTTP/1.1 200 OK"
+2026-10-22 20:04:04,986 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/discussions?p=0 "HTTP/1.1 200 OK"
+2026-10-22 20:04:05,377 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/refs%2Fpr%2F2 "HTTP/1.1 200 OK"
+2026-10-22 20:04:05,724 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 20:04:05,724 huggingface_hub.utils._http Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 20:04:06,108 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors "HTTP/1.1 302 Found"
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 14956.76it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+adapter: {
+  "original": 102714,
+  "patch": 102714,
+  "groups": 28,
+  "dense_fallback": 28,
+  "layout": "003e3a9e0e6caed95f532c92fa8e05f9727a21048d70a28ac7f09d7ac08ba12c",
+  "resolved_revision": "fstate-sha256:0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5"
+}
+elastic peer=p3dc1d57308a570c6d4376fb699851285 genesis=b272504c874178f699fa11bf76b5b1d750906b30f198b8b41645fb1953d1db99 recovered=24 events; log=/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/tDg2sdLIlFlmZjfs4jQ0Gsz3EXvuy8Bl/peers/peer-3d35248a63d07062/events.sqlite3
+2026-10-22 20:04:08,196 fedpara.roomid room presence: peer=p3dc1d57308a570c6d4376fb699851285 type=group-members living=2
+REJOIN READY: rejoining-with-durable-model-and-background-anti-entropy; synced_events=24 living=2 active=1 peer=p3dc1d57308a570c6d4376fb699851285

@@ -104,7 +104,7 @@ CPU paging uses `module.to('cpu')`. NVMe paging stores safetensors and replaces 
 
 ## F. Room creation with custom Python model code (PyTorch, Transformers available)
 
-GUI: `python -m patchlib.cli gui`. Choose **Python model .py/.zip upload** under the room settings, max 256KiB. The GUI stores it locally as `./.fedpara-codes/<sha256>.py` or `.zip` with restricted permissions and automatically copies its path to the manifest form. The **room manifest distributes its SHA-256 and optional HTTPS source reference only**; server does not store or run user Python. Other peers must explicitly acquire, verify and approve the exact source from a trusted channel before executing. This release does not automatically exchange source code over P2P.
+WebView desktop GUI: `python -m patchlib.cli gui` (after installing `requirements-gui.txt`). Choose **Python model .py/.zip upload** under the room settings, max 256KiB. The GUI stores it locally as `./.fedpara-codes/<sha256>.py` or `.zip` with restricted permissions and automatically copies its path to the manifest form. The **room manifest distributes its SHA-256 and optional HTTPS source reference only**; server does not store or run user Python. Other peers must explicitly acquire, verify and approve the exact source from a trusted channel before executing. This release does not automatically exchange source code over P2P.
 
 CLI alternative:
 

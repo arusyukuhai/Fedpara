@@ -71,7 +71,7 @@ def test_self_certified_hello_peer_validation(tmp_path):
     bob,sb,pb,_=auto_identity(tmp_path/'b.pem')
     g='a'*64
     class Channel:
-        readyState='open';bufferedAmount=0
+        readyState='connecting';bufferedAmount=0
         def __init__(self): self.events={};self.other=None
         def on(self,name):
             def register(func): self.events[name]=func;return func
@@ -85,6 +85,7 @@ def test_self_certified_hello_peer_validation(tmp_path):
         b=ElasticNode('ws://localhost/ws','b'*32,origin=bob,remote=alice,genesis=g,signer=sb,public_key=pb)
         ac=Channel();bc=Channel();ac.other=bc;bc.other=ac
         a._attach_channel(ac);b._attach_channel(bc)
+        ac.readyState=bc.readyState='open'
         ac.events['open']();bc.events['open']()
         await asyncio.sleep(.02)
         assert a.verifier is not None and b.verifier is not None
@@ -113,14 +114,20 @@ def test_room_only_elastic_training_with_no_peers(tmp_path,monkeypatch):
     from patchlib import elasticnet
     from types import SimpleNamespace
     from patchlib.core import _canonical_json
-    # Simulate a room whose discovery service does not connect.
-    async def never_lobby(self,stop): await stop.wait()
-    monkeypatch.setattr(elasticnet.RoomDiscovery,'run',never_lobby,raising=False) if hasattr(elasticnet,'RoomDiscovery') else None
-    # RoomDiscovery imported lazily, patch the actual module.
+    # Solo training is allowed only AFTER signaling has confirmed that the
+    # room really has no other participants. A failed lobby must not be
+    # silently interpreted as an empty room.
+    async def confirmed_empty_lobby(self,stop):
+        self.members.clear()
+        self.online=True
+        self.updated.set()
+        await stop.wait()
     import patchlib.roomid as roomid
-    monkeypatch.setattr(roomid.RoomDiscovery,'run',never_lobby)
-    base=tmp_path/'genesis.fstate';base.write_bytes(b'dummy local genesis')
+    monkeypatch.setattr(roomid.RoomDiscovery,'run',confirmed_empty_lobby)
+    base=tmp_path/'genesis.fstate'
     model=Tiny()
+    from patchlib.state import export_state
+    export_state(model,base,model_id='m',revision='v',peer_id='bootstrap')
     def load(_):return model,UniversalAdapter(model,'m','v',rank=3)
     def batches(_):
         while True:yield None

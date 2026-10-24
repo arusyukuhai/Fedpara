@@ -9,7 +9,9 @@ const WebPage = staticRead("../web/index.html")
 const PatchPage = staticRead("../web/patches.html")
 const MaxRooms = 1024
 const MaxGroups = 1024
-const MaxGroupMembers = 32
+const MaxGroupMembers = 96
+const MaxStoredRooms = 4096
+const MaxListedRooms = 256
 const MaxClients = 4096
 const MaxWsMessageBytes = 140_000
 const MaxRoomManifestBytes = 4096
@@ -35,6 +37,9 @@ var clients = initTable[WebSocket, Client]()
 var rooms = initTable[string, seq[WebSocket]]()
 var groups = initTable[string, seq[WebSocket]]()
 var groupManifests = initTable[string, JsonNode]()
+var roomPublished = initTable[string, bool]()
+var roomCreated = initTable[string, int64]()
+var roomEverJoined = initTable[string, bool]()
 var rates = initTable[WebSocket, RateState]()
 
 let appToken = getEnv("APP_TOKEN")
@@ -43,6 +48,8 @@ let turnSecret = getEnv("TURN_SECRET")
 let turnHost = getEnv("TURN_HOST", "localhost")
 let turnPort = getEnv("TURN_PORT", "3478")
 let bindAddr = getEnv("BIND_ADDR", "127.0.0.1")
+let roomDataDir = getEnv("ROOM_DATA_DIR", "fedpara-rooms")
+let publishSecret = getEnv("ROOM_PUBLISH_TOKEN")
 let listenPort = parseInt(getEnv("PORT", "8080"))
 
 proc getString(n:JsonNode, key:string):string =
@@ -140,6 +147,48 @@ proc validRoomManifest(doc: JsonNode): bool =
     if not link.startsWith("https://") or not code.hasKey("sha256") or code["sha256"].kind != JString: return false
   true
 
+# Immutable metadata is persisted once, not at every presence event. Store the
+# random room ID only in owner-readable disk files; never list private rooms.
+proc persistRoom(id: string, manifest: JsonNode, isPublic: bool,
+                 everJoined: bool = false, createdAt: int64 = 0): bool =
+  if not validRoom(id) or manifest == nil or not validRoomManifest(manifest): return false
+  try:
+    createDir(roomDataDir)
+    setFilePermissions(roomDataDir, {fpUserRead, fpUserWrite, fpUserExec})
+    let name = roomDataDir / (id & ".json")
+    let temp = roomDataDir / (id & ".tmp")
+    let created = (if createdAt > 0: createdAt else: getTime().toUnix())
+    let record = %*{"room":id, "manifest":manifest,
+                    "public":isPublic, "created_at":created,
+                    "ever_joined":everJoined}
+    writeFile(temp, $record)
+    setFilePermissions(temp, {fpUserRead, fpUserWrite})
+    moveFile(temp, name)
+    return true
+  except CatchableError as e:
+    echo "room directory write failed: ", e.msg
+    return false
+
+proc loadRoomDirectory() =
+  if not dirExists(roomDataDir): return
+  for path in walkFiles(roomDataDir / "*.json"):
+    if groupManifests.len >= MaxStoredRooms: break
+    try:
+      if getFileSize(path) > MaxRoomManifestBytes + 1024: continue
+      let record = parseFile(path)
+      let id = record.getString("room")
+      if not validRoom(id) or extractFilename(path) != id & ".json": continue
+      if not record.hasKey("manifest") or not validRoomManifest(record["manifest"]): continue
+      if record.hasKey("public") and record["public"].kind != JBool: continue
+      groupManifests[id] = record["manifest"]
+      roomPublished[id] = record.hasKey("public") and record["public"].getBool()
+      roomEverJoined[id] = (if record.hasKey("ever_joined") and record["ever_joined"].kind == JBool:
+                              record["ever_joined"].getBool() else: true)
+      roomCreated[id] = (if record.hasKey("created_at") and record["created_at"].kind == JInt:
+                           record["created_at"].getInt().int64 else: 0'i64)
+    except CatchableError:
+      discard  # Do not crash the signaling service on a corrupt metadata file.
+
 proc acceptBudget(ws:WebSocket, n:int):bool {.gcsafe.} =
   {.cast(gcsafe).}:
     withLock mutex:
@@ -177,7 +226,8 @@ proc removeClient(ws:WebSocket) {.gcsafe.} =
               groupPeers.add(candidate)
           if kept.len == 0:
             groups.del(client.room)
-            if client.room in groupManifests:groupManifests.del(client.room)
+            # Persistent room metadata must survive its last peer leaving.
+            discard
           else: groups[client.room] = kept
         elif not client.native and client.room in rooms:
           var kept: seq[WebSocket] = @[]
@@ -194,7 +244,80 @@ proc removeClient(ws:WebSocket) {.gcsafe.} =
     if notify: peer.send("""{"type":"peer-left"}""")
     if departed.len > 0:
       let event = $(%*{"type":"group-peer-left","peer":departed})
-      for recipient in groupPeers: recipient.send(event)
+      for recipient in groupPeers:
+        try: recipient.send(event)
+        except CatchableError: discard
+
+proc groupRegister(ws:WebSocket, data:JsonNode) {.gcsafe.} =
+  # Register metadata without joining or taking a peer slot. It does NOT mark
+  # the room as trained; the first real group-join can still found its genesis.
+  {.cast(gcsafe).}:
+    if appToken.len > 0 and not equalToken(appToken, getString(data,"token")):
+      errorWs(ws,"Invalid access token")
+      return
+    let room = getString(data,"room")
+    if room.len < 24 or not validRoom(room):
+      errorWs(ws,"Invalid room ID")
+      return
+    if not data.hasKey("manifest") or not validRoomManifest(data["manifest"]):
+      errorWs(ws,"Invalid room manifest")
+      return
+    let publish = data.hasKey("publish") and data["publish"].kind == JBool and
+                  data["publish"].getBool()
+    if data.hasKey("publish") and data["publish"].kind != JBool:
+      errorWs(ws,"Invalid publish setting")
+      return
+    if publish and (publishSecret.len > 0 and
+                    not equalToken(publishSecret,getString(data,"publish_token"))):
+      errorWs(ws,"Publishing requires ROOM_PUBLISH_TOKEN")
+      return
+    if publish and publishSecret.len == 0 and bindAddr notin ["127.0.0.1", "::1"]:
+      errorWs(ws,"Publishing disabled without ROOM_PUBLISH_TOKEN")
+      return
+    var accepted=false
+    withLock mutex:
+      if ws notin clients:
+        if room in groupManifests:
+          accepted=(groupManifests[room]==data["manifest"] and
+                    roomPublished.getOrDefault(room,false)==publish)
+        elif groupManifests.len < MaxStoredRooms:
+          var publicCount=0
+          if publish:
+            for entry in roomPublished.values:
+              if entry:inc publicCount
+          if not publish or publicCount < MaxListedRooms:
+            if persistRoom(room,data["manifest"],publish,false):
+              groupManifests[room]=data["manifest"]
+              roomPublished[room]=publish
+              roomCreated[room]=getTime().toUnix()
+              roomEverJoined[room]=false
+              accepted=true
+    if accepted:
+      ws.send($(%*{"type":"room-registered","room":room}))
+    else:
+      errorWs(ws,"Room already registered with different immutable metadata, or capacity reached")
+
+proc groupDescribe(ws:WebSocket, data:JsonNode) {.gcsafe.} =
+  # Read-only metadata lookup. Unlike group-join, this must NOT create
+  # presence, modify roomEverJoined, or send group-peer-joined notifications.
+  # Otherwise merely pressing the GUI's "load room" button consumes the
+  # founder's one-time genesis entitlement and strands both GUI windows.
+  {.cast(gcsafe).}:
+    if appToken.len > 0 and not equalToken(appToken, getString(data, "token")):
+      errorWs(ws, "Invalid server token")
+      return
+    let room = getString(data, "room")
+    if room.len < 24 or not validRoom(room):
+      errorWs(ws, "Invalid room ID")
+      return
+    var manifest: JsonNode = nil
+    withLock mutex:
+      if room in groupManifests:
+        manifest = groupManifests[room]
+    if manifest == nil:
+      errorWs(ws, "Room metadata not found")
+    else:
+      ws.send($(%*{"type":"room-description","room":room,"manifest":manifest}))
 
 proc groupJoin(ws:WebSocket, data:JsonNode) {.gcsafe.} =
   # Room ID is a bearer secret. Signaling server keeps only bounded presence.
@@ -206,6 +329,18 @@ proc groupJoin(ws:WebSocket, data:JsonNode) {.gcsafe.} =
     let room=getString(data,"room")
     let identity=getString(data,"peer")
     let manifest=(if data.hasKey("manifest"):data["manifest"] else:nil)
+    let publish = data.hasKey("publish") and data["publish"].kind == JBool and
+                  data["publish"].getBool()
+    if data.hasKey("publish") and data["publish"].kind != JBool:
+      errorWs(ws,"Invalid publish flag")
+      return
+    if publish and (publishSecret.len > 0 and
+                    not equalToken(publishSecret, getString(data, "publish_token"))):
+      errorWs(ws,"Room listing publication requires operator authorization")
+      return
+    if publish and publishSecret.len == 0 and bindAddr notin ["127.0.0.1", "::1"]:
+      errorWs(ws,"Public listing disabled without ROOM_PUBLISH_TOKEN")
+      return
     if manifest != nil and not validRoomManifest(manifest):
       errorWs(ws,"Invalid bounded room model/dataset/code descriptor")
       return
@@ -222,18 +357,48 @@ proc groupJoin(ws:WebSocket, data:JsonNode) {.gcsafe.} =
     var current:seq[WebSocket] = @[]
     var members:seq[string] = @[]
     var accepted=false
+    var previouslyRegistered=false
     withLock mutex:
+      previouslyRegistered = roomEverJoined.getOrDefault(room,false)
       if ws notin clients and clients.len < MaxClients and
           (room in groups or groups.len < MaxGroups):
         let existing=groups.getOrDefault(room)
         let compatible=(room notin groupManifests or manifest == nil or
-                        groupManifests[room] == manifest)
+                        groupManifests[room] == manifest) and
+                        (not publish or room notin groupManifests or
+                         roomPublished.getOrDefault(room,false))
         if existing.len < MaxGroupMembers and compatible:
           var duplicate=false
           for prior in existing:
             if prior in clients and clients[prior].peerId==identity:
               duplicate=true
               break
+          # Unknown rooms require metadata on first join. This prevents
+          # silently creating a room which cannot later be listed/rejoined.
+          if room notin groupManifests and manifest == nil: duplicate=true
+          if room notin groupManifests and groupManifests.len >= MaxStoredRooms: duplicate=true
+          if room notin groupManifests and publish:
+            var publicCount=0
+            for published in roomPublished.values:
+              if published: inc publicCount
+            if publicCount >= MaxListedRooms: duplicate=true
+          if not duplicate and room notin groupManifests:
+            if not persistRoom(room,manifest,publish,true): duplicate=true
+            else:
+              groupManifests[room]=manifest
+              roomPublished[room]=publish
+              roomCreated[room]=getTime().toUnix()
+              roomEverJoined[room]=true
+          if not duplicate and room in groupManifests and
+              not roomEverJoined.getOrDefault(room,false):
+            # A GUI-created room was saved without training. Its first REAL
+            # peer may still found genesis; future joins must not reset it.
+            if not persistRoom(room,groupManifests[room],
+                               roomPublished.getOrDefault(room,false),true,
+                               roomCreated.getOrDefault(room,0'i64)):
+              duplicate=true
+            else:
+              roomEverJoined[room]=true
           if not duplicate:
             for prior in existing:
               if prior in clients:
@@ -241,20 +406,21 @@ proc groupJoin(ws:WebSocket, data:JsonNode) {.gcsafe.} =
                 members.add(clients[prior].peerId)
             groups.mgetOrPut(room,@[]).add(ws)
             clients[ws]=Client(room:room,group:true,peerId:identity)
-            if room notin groupManifests and manifest != nil:
-              groupManifests[room]=manifest
             accepted=true
     if not accepted:
       errorWs(ws,"Group full, identity already online, or server busy")
       return
     var roster=newJArray()
     for id in members: roster.add(%id)
-    var reply = %*{"type":"group-members","peers":roster}
+    var reply = %*{"type":"group-members","peers":roster,
+                    "existing_room":previouslyRegistered}
     withLock mutex:
       if room in groupManifests:reply["manifest"]=groupManifests[room]
     ws.send($reply)
     let announce = $(%*{"type":"group-peer-joined","peer":identity})
-    for recipient in current: recipient.send(announce)
+    for recipient in current:
+      try: recipient.send(announce)
+      except CatchableError: discard
 
 proc onJoin(ws:WebSocket, data:JsonNode) {.gcsafe.} =
   {.cast(gcsafe).}:
@@ -403,6 +569,8 @@ proc websocketHandler(ws:WebSocket, event:WebSocketEvent, message:Message) {.gcs
     case kind
     of "join": onJoin(ws, doc)
     of "group-join": groupJoin(ws, doc)
+    of "group-describe": groupDescribe(ws, doc)
+    of "room-register": groupRegister(ws, doc)
     of "offer", "answer", "candidate": forwardMessage(ws, doc, kind)
     of "leave":
       removeClient(ws)
@@ -429,6 +597,35 @@ proc healthHandler(request:Request) {.gcsafe.} =
   headers["Content-Type"] = "application/json"
   request.respond(200, headers, """{"ok":true}""")
 
+proc directoryHandler(request:Request) {.gcsafe.} =
+  # Only explicitly published rooms are enumerable. Room IDs are bearer
+  # secrets: opting into directory listing grants discoverability and entry.
+  {.cast(gcsafe).}:
+    var resultRows = newJArray()
+    withLock mutex:
+      for id, doc in groupManifests.pairs:
+        if resultRows.len >= MaxListedRooms: break
+        if not roomPublished.getOrDefault(id, false): continue
+        var datasets = newJArray()
+        if doc.hasKey("datasets") and doc["datasets"].kind == JObject and
+            doc["datasets"].hasKey("sources"):
+          for item in doc["datasets"]["sources"].items:
+            datasets.add(%item.getString("repo"))
+        elif doc.hasKey("dataset"):
+          datasets.add(%doc["dataset"].getString("name"))
+        let live = groups.getOrDefault(id).len
+        resultRows.add(%*{"room_id":id,
+                            "model":doc["model"].getString("id"),
+                            "revision":doc["model"].getString("revision"),
+                            "datasets":datasets,"online":live,
+                            "capacity":MaxGroupMembers,
+                            "created_at":roomCreated.getOrDefault(id,0'i64)})
+    var headers:HttpHeaders
+    headers["Content-Type"]="application/json; charset=utf-8"
+    headers["Cache-Control"]="no-store"
+    headers["X-Content-Type-Options"]="nosniff"
+    request.respond(200,headers,$(%*{"rooms":resultRows,"limit":MaxListedRooms}))
+
 proc upgradeHandler(request:Request) {.gcsafe.} =
   # ALLOWED_ORIGIN is read-only after initialization. Safe to share across workers.
   {.cast(gcsafe).}:
@@ -442,9 +639,11 @@ if bindAddr != "127.0.0.1" and bindAddr != "::1" and appToken.len == 0:
 if turnSecret.len > 0 and turnSecret.len < 32:
   quit("TURN_SECRET must have >= 32 characters", QuitFailure)
 
+loadRoomDirectory()
 var router:Router
 router.get("/", htmlHandler)
 router.get("/healthz", healthHandler)
+router.get("/api/rooms", directoryHandler)
 router.get("/patches", patchesHandler)
 router.get("/ws", upgradeHandler)
 # Version-compatible Mummy initialization; see scripts/check_nim.sh.

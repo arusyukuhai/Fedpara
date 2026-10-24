@@ -25,6 +25,7 @@ from .core import (FactorDelta, PatchError, UniversalAdapter, _canonical_json,
                    _cp, decode_patch, PEER_ID)
 from .identity import signer_from_pem, verifier_from_pem
 from .p2p import PatchNode
+from .numerics import squared_l2
 
 HEX64 = re.compile(r'^[a-f0-9]{64}$')
 
@@ -159,7 +160,7 @@ class FedAvgRound:
                     delta = _delta_block(spec,group_parts,lo,min(lo+rows,n0))
                     if not torch.isfinite(delta).all().item():
                         raise PatchError(f'nonfinite reconstructed delta from {peer}')
-                    power += delta.double().square().sum().item()
+                    power += squared_l2(delta)
                 rms = math.sqrt(power / math.prod(group.shape))
                 if not math.isfinite(rms) or rms > self.max_delta_rms:
                     raise PatchError(f'excessive update RMS from {peer}: {rms}')

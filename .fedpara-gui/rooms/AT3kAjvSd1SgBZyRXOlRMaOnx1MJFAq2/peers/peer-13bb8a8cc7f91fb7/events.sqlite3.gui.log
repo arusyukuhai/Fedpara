@@ -1,0 +1,613 @@
+Traceback (most recent call last):
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/bootstrap.py", line 55, in ensure_state
+    fd = os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+FileExistsError: [Errno 17] File exists: '/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/AT3kAjvSd1SgBZyRXOlRMaOnx1MJFAq2/genesis.fstate.creating'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 906, in <module>
+    main()
+    ~~~~^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 838, in main
+    ensure_state(args, load_model=load_model)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/bootstrap.py", line 57, in ensure_state
+    raise RuntimeError(f'another process is creating {path}; check its training log') from e
+RuntimeError: another process is creating /Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/AT3kAjvSd1SgBZyRXOlRMaOnx1MJFAq2/genesis.fstate; check its training log
+bootstrap: verified cached genesis, tensor content: 0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5
+adaptive local policy: {"device": "mps", "batch_size": 1, "grad_accum": 4, "gradient_checkpointing": true, "wire_dtype": "float16", "local_steps": 64, "preferred_neighbors": 2, "memory_fraction": 0.35}
+2026-10-22 11:08:39,847 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+W1022 11:08:39.922000 9248 site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
+2026-10-22 11:08:40,789 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2 "HTTP/1.1 200 OK"
+2026-10-22 11:08:40,976 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/main "HTTP/1.1 200 OK"
+2026-10-22 11:08:41,168 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/discussions?p=0 "HTTP/1.1 200 OK"
+2026-10-22 11:08:41,375 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/refs%2Fpr%2F2 "HTTP/1.1 200 OK"
+2026-10-22 11:08:41,550 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 11:08:41,551 huggingface_hub.utils._http Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 11:08:41,759 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors "HTTP/1.1 302 Found"
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 9213.19it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+adapter: {
+  "original": 102714,
+  "patch": 102714,
+  "groups": 28,
+  "dense_fallback": 28,
+  "layout": "003e3a9e0e6caed95f532c92fa8e05f9727a21048d70a28ac7f09d7ac08ba12c",
+  "resolved_revision": "fstate-sha256:0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5"
+}
+elastic peer=pefcfbb0d4604a2de8164f8b331b308cf genesis=8968f0c66b4d6258ccac3ba8aa59d2ff4ffc34212a6f50e3d2d25d732040ff74 recovered=0 events; log=/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/AT3kAjvSd1SgBZyRXOlRMaOnx1MJFAq2/peers/peer-13bb8a8cc7f91fb7/events.sqlite3
+JOIN WAIT: waiting-for-room-signaling: check Mummy /ws URL, version and port; lobby_online=False living=1 active=1 journal_events=0 neighbors=0 peer_errors={} snapshot_progress={}
+2026-10-22 11:08:42,494 fedpara.roomid room presence: peer=pefcfbb0d4604a2de8164f8b331b308cf type=group-members living=2
+peer registered: p066a053afc10149986a5d60da0a7c676
+2026-10-22 11:08:44,504 fedpara.elastic connecting peer=p066a053afc10149986a5d60da0a7c676 pair=6c6f5e88a0fe retry=0
+2026-10-22 11:08:44,854 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=signaling-connect role=None ice=new rtc=new
+2026-10-22 11:08:44,856 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=signaling-join role=None ice=new rtc=new
+2026-10-22 11:08:44,869 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=waiting-peer role=initiator ice=new rtc=new
+2026-10-22 11:08:44,870 fedpara.snapshot full-model state DataChannel attached; awaiting open state=connecting
+2026-10-22 11:08:44,870 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=gathering-offer role=initiator ice=new rtc=new
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p066a053afc10149986a5d60da0a7c676': {'error': '', 'phase': 'gathering-offer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 1.1}} snapshot_progress={'p066a053afc10149986a5d60da0a7c676': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p066a053afc10149986a5d60da0a7c676': {'error': '', 'phase': 'gathering-offer', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 4.1}} snapshot_progress={'p066a053afc10149986a5d60da0a7c676': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+2026-10-22 11:08:49,884 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=offer-sent role=initiator ice=new rtc=new
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p066a053afc10149986a5d60da0a7c676': {'error': '', 'phase': 'offer-sent', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 7.2}} snapshot_progress={'p066a053afc10149986a5d60da0a7c676': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=1 journal_events=0 neighbors=1 peer_errors={'p066a053afc10149986a5d60da0a7c676': {'error': '', 'phase': 'offer-sent', 'role': 'initiator', 'ice': 'new', 'rtc': 'new', 'since_s': 10.2}} snapshot_progress={'p066a053afc10149986a5d60da0a7c676': {'state_channel': False, 'tip_received': False, 'manifest_received': False, 'snapshot_downloaded': False, 'requested': False, 'source_stage': 'no-ack', 'request_age_s': None, 'missing_shards': 0, 'error': ''}}
+2026-10-22 11:08:54,908 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=processing-answer role=initiator ice=new rtc=new
+2026-10-22 11:08:54,913 aioice.ice Connection(0) Check CandidatePair(('2408:212:44f6:d300:820:6787:cc34:e564', 64150) -> ('2408:212:44f6:d300:820:6787:cc34:e564', 53513)) State.FROZEN -> State.WAITING
+2026-10-22 11:08:54,913 aioice.ice Connection(0) Check CandidatePair(('192.168.0.172', 53388) -> ('192.168.0.172', 60169)) State.FROZEN -> State.WAITING
+2026-10-22 11:08:54,913 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 ICE=checking role=initiator
+2026-10-22 11:08:54,913 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 ICE/DTLS=connecting role=initiator
+2026-10-22 11:08:54,913 aioice.ice Connection(0) Check CandidatePair(('2408:212:44f6:d300:820:6787:cc34:e564', 64150) -> ('2408:212:44f6:d300:820:6787:cc34:e564', 53513)) State.WAITING -> State.IN_PROGRESS
+2026-10-22 11:08:54,914 aioice.ice Connection(0) Check CandidatePair(('2408:212:44f6:d300:820:6787:cc34:e564', 64150) -> ('2408:212:44f6:d300:820:6787:cc34:e564', 53513)) State.IN_PROGRESS -> State.SUCCEEDED
+2026-10-22 11:08:54,916 aioice.ice Connection(0) Check CandidatePair(('192.168.0.172', 53388) -> ('192.168.0.172', 60169)) State.WAITING -> State.FAILED
+2026-10-22 11:08:54,916 aioice.ice Connection(0) ICE completed
+2026-10-22 11:08:54,949 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 ICE=completed role=initiator
+2026-10-22 11:08:54,968 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 ICE/DTLS=connected role=initiator
+2026-10-22 11:08:54,968 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=rtc-connected role=initiator ice=completed rtc=connected
+2026-10-22 11:08:54,988 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=datachannel-open role=initiator ice=completed rtc=connected
+2026-10-22 11:08:54,991 fedpara.elastic SIGNED HELLO OK peer=p066a053afc10149986a5d60da0a7c676
+2026-10-22 11:08:54,991 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=authenticated role=initiator ice=completed rtc=connected
+2026-10-22 11:08:54,991 fedpara.snapshot full-model state DataChannel ready label=fedpara-state id=3
+SNAPSHOT REQUEST peer=p066a053afc10149986a5d60da0a7c676 id=79d45fa6ee1c8592 source_stage=no-ack
+SNAPSHOT SOURCE peer=p066a053afc10149986a5d60da0a7c676 stage=accepted
+SNAPSHOT SOURCE peer=p066a053afc10149986a5d60da0a7c676 stage=exporting
+SNAPSHOT TIP peer=p066a053afc10149986a5d60da0a7c676 events=13
+SNAPSHOT SOURCE peer=p066a053afc10149986a5d60da0a7c676 stage=offered
+SNAPSHOT DOWNLOADED peer=p066a053afc10149986a5d60da0a7c676
+SNAPSHOT HISTORY WAIT peer=p066a053afc10149986a5d60da0a7c676 verified_model=yes events=3/13 boundary_match=False
+2026-10-22 11:08:55,502 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:08:55,518 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:08:55,533 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:08:56,404 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:08:56,420 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:08:56,435 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:08:57,345 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:08:57,376 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:08:57,570 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:08:57,586 fedpara.p2p P2P patch sent (211105 bytes)
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=2 journal_events=10 neighbors=1 peer_errors={'p066a053afc10149986a5d60da0a7c676': {'error': '', 'phase': 'authenticated', 'role': 'initiator', 'ice': 'completed', 'rtc': 'connected', 'since_s': 13.3}} snapshot_progress={'p066a053afc10149986a5d60da0a7c676': {'state_channel': True, 'tip_received': True, 'manifest_received': True, 'snapshot_downloaded': True, 'requested': True, 'source_stage': 'offered', 'request_age_s': 2.8, 'missing_shards': 0, 'error': ''}}
+2026-10-22 11:08:58,472 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:08:58,488 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:08:58,519 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:08:59,329 fedpara.p2p P2P patch sent (211105 bytes)
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=2 journal_events=14 neighbors=1 peer_errors={'p066a053afc10149986a5d60da0a7c676': {'error': '', 'phase': 'authenticated', 'role': 'initiator', 'ice': 'completed', 'rtc': 'connected', 'since_s': 16.4}} snapshot_progress={'p066a053afc10149986a5d60da0a7c676': {'state_channel': True, 'tip_received': True, 'manifest_received': True, 'snapshot_downloaded': True, 'requested': True, 'source_stage': 'offered', 'request_age_s': 5.8, 'missing_shards': 0, 'error': ''}}
+2026-10-22 11:09:01,026 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:02,763 fedpara.p2p P2P patch sent (211105 bytes)
+JOIN WAIT: waiting-for-verified-full-model-snapshot; lobby_online=True living=2 active=2 journal_events=16 neighbors=1 peer_errors={'p066a053afc10149986a5d60da0a7c676': {'error': '', 'phase': 'authenticated', 'role': 'initiator', 'ice': 'completed', 'rtc': 'connected', 'since_s': 19.4}} snapshot_progress={'p066a053afc10149986a5d60da0a7c676': {'state_channel': True, 'tip_received': True, 'manifest_received': True, 'snapshot_downloaded': True, 'requested': True, 'source_stage': 'offered', 'request_age_s': 8.9, 'missing_shards': 0, 'error': ''}}
+2026-10-22 11:09:04,559 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:05,279 fedpara.p2p P2P patch sent (211105 bytes)
+SNAPSHOT READY: verified full model from p066a053afc10149986a5d60da0a7c676; events=13, suffix_events=5, model=/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/AT3kAjvSd1SgBZyRXOlRMaOnx1MJFAq2/peers/peer-13bb8a8cc7f91fb7/events.sqlite3.snapshots/joined-9d76a8110fb0b3f78d0d60126ca3968518017e742f0017c423e427db1b03da86.fstate
+JOIN READY: verified-full-model-snapshot; events=18 peer=pefcfbb0d4604a2de8164f8b331b308cf
+DATA SAMPLING peer=pefcfbb0d4604a2de8164f8b331b308cf seed=1218152296188056001 source=huggingface
+2026-10-22 11:09:05,874 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+2026-10-22 11:09:06,059 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-10-22 11:09:06,254 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-22 11:09:07,498 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+2026-10-22 11:09:07,515 httpx HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/roneneldan/TinyStories/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/README.md?%2Fdatasets%2Froneneldan%2FTinyStories%2Fresolve%2Fmain%2FREADME.md=&etag=%22852d1e5307bae52dd2fd3fb7650b7c90b233297f%22 "HTTP/1.1 200 OK"
+2026-10-22 11:09:07,701 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/TinyStories.py "HTTP/1.1 404 Not Found"
+2026-10-22 11:09:08,278 httpx HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/roneneldan/TinyStories/roneneldan/TinyStories.py "HTTP/1.1 404 Not Found"
+2026-10-22 11:09:08,455 httpx HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/revision/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64 "HTTP/1.1 200 OK"
+2026-10-22 11:09:08,627 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/.huggingface.yaml "HTTP/1.1 404 Not Found"
+2026-10-22 11:09:08,845 httpx HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=roneneldan/TinyStories "HTTP/1.1 200 OK"
+2026-10-22 11:09:09,023 httpx HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-22 11:09:09,201 httpx HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64?recursive=false&expand=false "HTTP/1.1 200 OK"
+2026-10-22 11:09:09,394 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/dataset_infos.json "HTTP/1.1 404 Not Found"
+2026-10-22 11:09:09,965 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+2026-10-22 11:09:10,752 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?xip=sMmKBnQXzI8&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&user_id=public&X-Xet-Cas-Uid=public&Expires=1792638549&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD94aXA9c01tS0JuUVh6STgmcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUyMiUzQiZ1c2VyX2lkPXB1YmxpYyZYLVhldC1DYXMtVWlkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTQ5fX19XX0_&Signature=MEQCIDhlcVbA3MDnP93lIObdn7EpE0LjeHI3qq0HdHl7n6ETAiAWzxbZSq7P8pjiJT%7EDq3VxVAMNU7QVyv5SpsHkTSGyIQ__&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+2026-10-22 11:09:11,159 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+2026-10-22 11:09:11,772 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?xip=sMmKBnQXzI8&X-Xet-Cas-Uid=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&user_id=public&Expires=1792638551&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD94aXA9c01tS0JuUVh6STgmWC1YZXQtQ2FzLVVpZD1wdWJsaWMmcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUyMiUzQiZ1c2VyX2lkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTUxfX19XX0_&Signature=MEQCICNTuve2UGgktzcEwZirukYbEvJMT0h6WewYGRSzaKnKAiAnzzLEqHdPJB8Ksvx5dGeyU2nvqyKzMwsEaRGdWSetcQ__&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+2026-10-22 11:09:12,360 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+2026-10-22 11:09:13,015 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?X-Xet-Cas-Uid=public&user_id=public&xip=sMmKBnQXzI8&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&Expires=1792638552&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD9YLVhldC1DYXMtVWlkPXB1YmxpYyZ1c2VyX2lkPXB1YmxpYyZ4aXA9c01tS0JuUVh6STgmcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUyMiUzQiIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTUyfX19XX0_&Signature=MEUCIQCpH%7EO2KYjIUETjDRGG4tdfe%7EE19TJdxhA3hCHQqFf2lAIgXq1A4anRbsj9N5PEqw-0D8HwfNQspnD16OnQRsdiKF0_&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+[transformers] `loss_type=None` was set in the config but it is unrecognized. Using the default loss: `ForCausalLMLoss`.
+2026-10-22 11:09:14,625 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+elastic steps=1 emitted=0 loss=10.164 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:15,693 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?xip=sMmKBnQXzI8&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&user_id=public&X-Xet-Cas-Uid=public&Expires=1792638554&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD94aXA9c01tS0JuUVh6STgmcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUyMiUzQiZ1c2VyX2lkPXB1YmxpYyZYLVhldC1DYXMtVWlkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTU0fX19XX0_&Signature=MEYCIQC1tNZqfVQuLMvlH-%7EDyV%7E0rOcqTt2fApikzKzybWTHSQIhANyIvLUf2I1ERgLKRTa3Jdb3VCH8akV-IF0tTQciWHDE&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic local event=1, living=2, active=2, bytes=211104
+2026-10-22 11:09:16,269 fedpara.p2p P2P patch sent (211104 bytes)
+elastic steps=1 emitted=1 loss=9.8797 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:16,333 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:16,349 fedpara.p2p P2P patch sent (211105 bytes)
+elastic local event=2, living=2, active=2, bytes=211104
+2026-10-22 11:09:17,035 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:09:17,051 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=2 loss=9.8499 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:17,269 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+elastic local event=3, living=2, active=2, bytes=211104
+2026-10-22 11:09:17,488 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:09:17,505 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=3 loss=9.846 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=3 loss=9.8134 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:17,892 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?user_id=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&X-Xet-Cas-Uid=public&xip=sMmKBnQXzI8&Expires=1792638557&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD91c2VyX2lkPXB1YmxpYyZyZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDAtb2YtMDAwMDQtMmQ1YTE0NjdmZmYxMDgxYi5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDAtb2YtMDAwMDQtMmQ1YTE0NjdmZmYxMDgxYi5wYXJxdWV0JTIyJTNCJlgtWGV0LUNhcy1VaWQ9cHVibGljJnhpcD1zTW1LQm5RWHpJOCIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTU3fX19XX0_&Signature=MEUCIDhqvMt6YcYeLojizoOZq-L-f4OyZlWC7nSAeeXtMAcAAiEA9zShmjlj52-NjJvT6Acn-AvGBN4vgFZS3mI0tM6Esgs_&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic local event=4, living=2, active=2, bytes=211104
+2026-10-22 11:09:17,997 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:09:18,013 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=4 loss=9.8474 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=5, living=2, active=2, bytes=211104
+2026-10-22 11:09:18,366 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:09:18,382 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=5 loss=9.8756 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=6, living=2, active=2, bytes=211104
+2026-10-22 11:09:18,820 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:09:18,836 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=6 loss=9.8096 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=6 loss=9.8575 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=7, living=2, active=2, bytes=211104
+2026-10-22 11:09:19,442 fedpara.p2p P2P patch sent (211104 bytes)
+elastic steps=1 emitted=7 loss=9.8144 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:19,490 fedpara.p2p P2P patch sent (211105 bytes)
+elastic local event=8, living=2, active=2, bytes=211104
+2026-10-22 11:09:19,873 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+2026-10-22 11:09:20,314 fedpara.p2p P2P patch sent (211104 bytes)
+elastic steps=1 emitted=8 loss=9.8167 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:20,345 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=10 emitted=8 loss=9.8838 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=9, living=2, active=2, bytes=211104
+2026-10-22 11:09:20,728 fedpara.p2p P2P patch sent (211104 bytes)
+2026-10-22 11:09:20,744 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=9 loss=9.7396 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:20,901 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?X-Xet-Cas-Uid=public&xip=sMmKBnQXzI8&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&user_id=public&Expires=1792638559&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD9YLVhldC1DYXMtVWlkPXB1YmxpYyZ4aXA9c01tS0JuUVh6STgmcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUyMiUzQiZ1c2VyX2lkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTU5fX19XX0_&Signature=MEYCIQCjh1pp-wDEPV51R0G2d5qQmqCtXmZXSAmJCjhyjzCF2wIhAI2ZWedlUB9T-COCAqFbVI3Qw5TyM09x6a3zOmC2VZb5&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic local event=10, living=2, active=2, bytes=211105
+2026-10-22 11:09:21,141 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:21,157 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=10 loss=9.731 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=11, living=2, active=2, bytes=211105
+2026-10-22 11:09:21,556 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:21,572 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=11 loss=9.6417 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=12, living=2, active=2, bytes=211105
+2026-10-22 11:09:22,155 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:22,189 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=12 loss=9.7846 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=13, living=2, active=2, bytes=211105
+2026-10-22 11:09:22,676 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=13 loss=9.7663 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:22,733 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=10 emitted=13 loss=9.7529 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=14, living=2, active=2, bytes=211105
+2026-10-22 11:09:23,174 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:23,190 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=14 loss=9.6957 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=15, living=2, active=2, bytes=211105
+2026-10-22 11:09:23,614 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:23,630 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=15 loss=9.6799 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=15 loss=9.6624 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=16, living=2, active=2, bytes=211105
+2026-10-22 11:09:24,179 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=16 loss=9.6754 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:24,211 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:24,271 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+elastic steps=10 emitted=16 loss=9.7025 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=17, living=2, active=2, bytes=211105
+2026-10-22 11:09:24,703 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:24,719 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=17 loss=9.7258 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:24,895 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?X-Xet-Cas-Uid=public&user_id=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&xip=sMmKBnQXzI8&Expires=1792638564&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD9YLVhldC1DYXMtVWlkPXB1YmxpYyZ1c2VyX2lkPXB1YmxpYyZyZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDAtb2YtMDAwMDQtMmQ1YTE0NjdmZmYxMDgxYi5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDAtb2YtMDAwMDQtMmQ1YTE0NjdmZmYxMDgxYi5wYXJxdWV0JTIyJTNCJnhpcD1zTW1LQm5RWHpJOCIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTY0fX19XX0_&Signature=MEUCIQCIycRORnuCaX7%7E0mlspOeFTPE58gxbhQn3EgUkj%7EBOZQIgeLEgTq24Fx0cFVcs-NKE7XvLferYy04684okTSB2tYE_&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic steps=10 emitted=17 loss=9.5058 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=18, living=2, active=2, bytes=211105
+2026-10-22 11:09:25,452 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:25,468 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=18 loss=9.6082 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=18 loss=9.6253 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=19, living=2, active=2, bytes=211105
+2026-10-22 11:09:26,039 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:26,057 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=19 loss=9.6126 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:26,454 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+elastic local event=20, living=2, active=2, bytes=211105
+2026-10-22 11:09:26,568 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:26,584 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=20 loss=9.7344 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=21, living=2, active=2, bytes=211105
+2026-10-22 11:09:27,018 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:27,080 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&user_id=public&xip=sMmKBnQXzI8&X-Xet-Cas-Uid=public&Expires=1792638566&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD9yZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDAtb2YtMDAwMDQtMmQ1YTE0NjdmZmYxMDgxYi5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDAtb2YtMDAwMDQtMmQ1YTE0NjdmZmYxMDgxYi5wYXJxdWV0JTIyJTNCJnVzZXJfaWQ9cHVibGljJnhpcD1zTW1LQm5RWHpJOCZYLVhldC1DYXMtVWlkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTY2fX19XX0_&Signature=MEQCIHaFCxXZEO7IiIOaEVWSgUdsYwDLVk8qfnoPbq%7E0RvwjAiARN0G3gDOVUmdqYRIuu3LDdWdpdrKodA43kOhq2NJN%7Ew__&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic steps=1 emitted=21 loss=9.6292 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:27,130 fedpara.p2p P2P patch sent (211105 bytes)
+elastic local event=22, living=2, active=2, bytes=211105
+2026-10-22 11:09:27,802 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=22 loss=9.5759 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:27,852 fedpara.p2p P2P patch sent (211105 bytes)
+elastic local event=23, living=2, active=2, bytes=211105
+2026-10-22 11:09:28,296 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:28,312 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=23 loss=9.579 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:28,386 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+elastic local event=24, living=2, active=2, bytes=211105
+2026-10-22 11:09:28,647 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:28,663 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=24 loss=9.6162 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=25, living=2, active=2, bytes=211105
+2026-10-22 11:09:29,091 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?user_id=public&X-Xet-Cas-Uid=public&xip=sMmKBnQXzI8&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&Expires=1792638568&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD91c2VyX2lkPXB1YmxpYyZYLVhldC1DYXMtVWlkPXB1YmxpYyZ4aXA9c01tS0JuUVh6STgmcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAwLW9mLTAwMDA0LTJkNWExNDY3ZmZmMTA4MWIucGFycXVldCUyMiUzQiIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTY4fX19XX0_&Signature=MEYCIQCDpeSBIuGc5tvBjIAzn%7EjDt4sL%7EBnAYcng6jPCMK2WSgIhALMyZvdqOGGtwdMe0ir5X84mqlpMU0bWTAgvc-E5kx9i&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+2026-10-22 11:09:29,147 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:29,163 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=25 loss=9.4958 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=25 loss=9.6683 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=26, living=2, active=2, bytes=211105
+2026-10-22 11:09:29,606 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=26 loss=9.5143 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:29,678 fedpara.p2p P2P patch sent (211105 bytes)
+elastic local event=27, living=2, active=2, bytes=211105
+2026-10-22 11:09:30,179 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:30,195 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=27 loss=9.4056 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=27 loss=9.4654 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=28, living=2, active=2, bytes=211105
+2026-10-22 11:09:30,680 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00000-of-00004-2d5a1467fff1081b.parquet "HTTP/1.1 302 Found"
+2026-10-22 11:09:30,755 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:30,771 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=28 loss=9.5354 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=28 loss=9.5423 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=29, living=2, active=2, bytes=211105
+2026-10-22 11:09:31,197 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:31,213 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=29 loss=9.4599 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:31,345 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/9d76d61814aace744933de591830e698b46395c8a875b83fd499c5fec9865dba?response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00000-of-00004-2d5a1467fff1081b.parquet%3B+filename%3D%22train-00000-of-00004-2d5a1467fff1081b.parquet%22%3B&user_id=public&X-Xet-Cas-Uid=public&xip=sMmKBnQXzI8&Expires=1792638570&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhLzlkNzZkNjE4MTRhYWNlNzQ0OTMzZGU1OTE4MzBlNjk4YjQ2Mzk1YzhhODc1YjgzZmQ0OTljNWZlYzk4NjVkYmFcXD9yZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDAtb2YtMDAwMDQtMmQ1YTE0NjdmZmYxMDgxYi5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDAtb2YtMDAwMDQtMmQ1YTE0NjdmZmYxMDgxYi5wYXJxdWV0JTIyJTNCJnVzZXJfaWQ9cHVibGljJlgtWGV0LUNhcy1VaWQ9cHVibGljJnhpcD1zTW1LQm5RWHpJOCIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjM4NTcwfX19XX0_&Signature=MEQCIDuoHV9v7Ka992%7Es8bpLitIMwLQkMiEvNMOB2cdzBbTjAiAcLD3%7Eix%7E9DEYkfiS6ro7fkDNu6n8tIgwcFGxYXhfFog__&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic local event=30, living=2, active=2, bytes=211105
+2026-10-22 11:09:31,647 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:31,663 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=30 loss=9.5246 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=31, living=2, active=2, bytes=211105
+2026-10-22 11:09:32,121 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:32,138 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=31 loss=9.4675 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=31 loss=9.4319 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=32, living=2, active=2, bytes=211105
+2026-10-22 11:09:32,526 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:32,557 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=32 loss=9.4541 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=33, living=2, active=2, bytes=211105
+2026-10-22 11:09:33,005 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:33,036 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=33 loss=9.3278 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=34, living=2, active=2, bytes=211105
+2026-10-22 11:09:33,409 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:33,440 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=34 loss=9.3301 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=35, living=2, active=2, bytes=211105
+2026-10-22 11:09:33,881 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:33,897 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=35 loss=9.2663 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=36, living=2, active=2, bytes=211105
+2026-10-22 11:09:34,284 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:34,299 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=36 loss=9.2489 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=37, living=2, active=2, bytes=211105
+2026-10-22 11:09:34,736 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:34,752 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=37 loss=9.3574 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=37 loss=9.3298 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=38, living=2, active=2, bytes=211105
+2026-10-22 11:09:35,179 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:35,195 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=38 loss=9.3806 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=39, living=2, active=2, bytes=211105
+2026-10-22 11:09:35,536 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:35,566 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=39 loss=9.4858 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=40, living=2, active=2, bytes=211105
+2026-10-22 11:09:35,969 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=40 loss=9.3599 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:36,029 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=10 emitted=40 loss=9.313 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=41, living=2, active=2, bytes=211105
+2026-10-22 11:09:36,462 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=41 loss=9.1815 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:36,493 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:36,698 fedpara.roomid room presence: peer=pefcfbb0d4604a2de8164f8b331b308cf type=group-peer-left living=1
+elastic steps=10 emitted=41 loss=9.1898 active=2 living=1 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=42, living=1, active=2, bytes=211105
+2026-10-22 11:09:36,909 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=42 loss=9.1028 active=2 living=1 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:36,940 fedpara.p2p P2P patch sent (211105 bytes)
+elastic local event=43, living=1, active=2, bytes=211105
+2026-10-22 11:09:37,448 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=43 loss=9.2269 active=2 living=1 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:37,496 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:37,768 fedpara.roomid room presence: peer=pefcfbb0d4604a2de8164f8b331b308cf type=group-peer-joined living=2
+elastic local event=44, living=2, active=2, bytes=211105
+2026-10-22 11:09:37,991 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:38,007 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=44 loss=9.1486 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=45, living=2, active=2, bytes=211105
+2026-10-22 11:09:38,510 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:38,526 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=45 loss=9.151 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=45 loss=9.1532 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=46, living=2, active=2, bytes=211105
+2026-10-22 11:09:38,925 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:38,941 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=46 loss=9.263 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=47, living=2, active=2, bytes=211105
+2026-10-22 11:09:39,352 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:39,384 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=47 loss=9.3536 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=47 loss=9.3919 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=48, living=2, active=2, bytes=211105
+2026-10-22 11:09:39,838 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:39,854 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=48 loss=9.2758 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=48 loss=9.0811 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=49, living=2, active=2, bytes=211105
+2026-10-22 11:09:40,747 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:40,778 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=49 loss=8.9318 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=49 loss=9.0676 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=50, living=2, active=2, bytes=211105
+2026-10-22 11:09:41,215 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:41,231 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=50 loss=9.1737 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=51, living=2, active=2, bytes=211105
+2026-10-22 11:09:41,625 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:41,641 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=51 loss=9.1264 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=51 loss=9.0774 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=52, living=2, active=2, bytes=211105
+2026-10-22 11:09:42,156 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=52 loss=8.9222 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:42,188 fedpara.p2p P2P patch sent (211105 bytes)
+elastic local event=53, living=2, active=2, bytes=211105
+2026-10-22 11:09:42,651 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:42,667 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=53 loss=8.9654 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=54, living=2, active=2, bytes=211105
+2026-10-22 11:09:43,169 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:43,185 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=54 loss=8.8278 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=54 loss=9.0262 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=55, living=2, active=2, bytes=211105
+2026-10-22 11:09:43,580 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:43,611 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=55 loss=9.1348 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=56, living=2, active=2, bytes=211105
+2026-10-22 11:09:43,994 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:44,026 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=56 loss=8.9511 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=57, living=2, active=2, bytes=211105
+2026-10-22 11:09:44,539 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:44,555 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=57 loss=9.0066 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=57 loss=8.7632 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=58, living=2, active=2, bytes=211105
+2026-10-22 11:09:44,966 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:44,983 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=58 loss=8.9524 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=58 loss=8.9928 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=59, living=2, active=2, bytes=211105
+2026-10-22 11:09:45,355 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:45,371 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=59 loss=8.8555 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=59 loss=8.7759 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=60, living=2, active=2, bytes=211105
+2026-10-22 11:09:45,883 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=60 loss=8.9169 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:45,930 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=10 emitted=60 loss=9.0307 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=61, living=2, active=2, bytes=211105
+2026-10-22 11:09:46,416 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:46,433 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=61 loss=8.7364 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=61 loss=8.6926 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=62, living=2, active=2, bytes=211105
+2026-10-22 11:09:46,967 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:46,983 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=62 loss=8.7304 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=62 loss=8.8853 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=63, living=2, active=2, bytes=211105
+2026-10-22 11:09:47,498 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:47,560 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=63 loss=8.8041 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=64, living=2, active=2, bytes=211105
+2026-10-22 11:09:47,957 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:47,974 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=64 loss=8.6609 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=65, living=2, active=2, bytes=211105
+2026-10-22 11:09:48,360 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=65 loss=8.8936 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:48,392 fedpara.p2p P2P patch sent (211105 bytes)
+elastic local event=66, living=2, active=2, bytes=211105
+2026-10-22 11:09:48,786 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=66 loss=8.7363 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:48,855 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=10 emitted=66 loss=8.7693 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=67, living=2, active=2, bytes=211105
+2026-10-22 11:09:49,291 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:49,307 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=67 loss=8.9271 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=67 loss=8.8522 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=68, living=2, active=2, bytes=211105
+2026-10-22 11:09:49,711 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:49,727 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=68 loss=8.83 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=69, living=2, active=2, bytes=211105
+2026-10-22 11:09:50,087 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=69 loss=8.6658 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:50,146 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=10 emitted=69 loss=8.7137 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=70, living=2, active=2, bytes=211105
+2026-10-22 11:09:50,680 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:50,696 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=70 loss=8.749 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=71, living=2, active=2, bytes=211105
+2026-10-22 11:09:51,118 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:51,134 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=71 loss=8.6655 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=71 loss=8.7274 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=72, living=2, active=2, bytes=211105
+2026-10-22 11:09:51,559 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:51,575 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=72 loss=8.659 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=72 loss=8.9702 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=73, living=2, active=2, bytes=211105
+2026-10-22 11:09:51,990 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:52,006 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=73 loss=8.7635 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=73 loss=8.5788 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=74, living=2, active=2, bytes=211105
+2026-10-22 11:09:52,469 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:52,486 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=74 loss=8.4834 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=75, living=2, active=2, bytes=211105
+2026-10-22 11:09:52,877 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:52,894 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=75 loss=8.7812 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=75 loss=8.577 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=76, living=2, active=2, bytes=211105
+2026-10-22 11:09:53,340 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:53,357 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=76 loss=8.5726 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=77, living=2, active=2, bytes=211105
+2026-10-22 11:09:53,803 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:53,819 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=77 loss=8.4479 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=78, living=2, active=2, bytes=211105
+2026-10-22 11:09:54,315 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:54,332 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=78 loss=8.4763 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=78 loss=8.5562 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=79, living=2, active=2, bytes=211105
+2026-10-22 11:09:54,931 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:54,947 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=79 loss=8.55 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=80, living=2, active=2, bytes=211105
+2026-10-22 11:09:55,572 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:55,588 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=80 loss=8.4353 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=81, living=2, active=2, bytes=211105
+2026-10-22 11:09:56,157 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:56,174 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=81 loss=8.5719 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=81 loss=8.5123 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=82, living=2, active=2, bytes=211105
+2026-10-22 11:09:56,634 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:56,651 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=82 loss=8.5046 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=82 loss=8.6482 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=83, living=2, active=2, bytes=211105
+2026-10-22 11:09:57,076 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=83 loss=8.5074 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:09:57,152 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=10 emitted=83 loss=8.3278 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=84, living=2, active=2, bytes=211105
+2026-10-22 11:09:57,666 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:57,682 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=84 loss=8.2913 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=84 loss=8.635 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=85, living=2, active=2, bytes=211105
+2026-10-22 11:09:58,238 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:58,255 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=85 loss=8.5293 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=85 loss=8.4917 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=86, living=2, active=2, bytes=211105
+2026-10-22 11:09:58,834 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:58,850 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=86 loss=8.5475 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=86 loss=8.197 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=87, living=2, active=2, bytes=211105
+2026-10-22 11:09:59,359 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:09:59,392 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=87 loss=8.3629 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=87 loss=8.3065 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=88, living=2, active=2, bytes=211105
+2026-10-22 11:10:00,095 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:10:00,111 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=88 loss=8.3035 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=88 loss=8.4905 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=89, living=2, active=2, bytes=211105
+2026-10-22 11:10:00,662 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:10:00,678 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=89 loss=8.3131 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=89 loss=8.3947 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=90, living=2, active=2, bytes=211105
+2026-10-22 11:10:01,174 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:10:01,190 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=90 loss=8.2096 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=91, living=2, active=2, bytes=211105
+2026-10-22 11:10:01,703 fedpara.p2p P2P patch sent (211105 bytes)
+elastic steps=1 emitted=91 loss=8.3362 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:10:01,751 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=10 emitted=91 loss=7.9368 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=92, living=2, active=2, bytes=211105
+2026-10-22 11:10:02,225 fedpara.p2p P2P patch sent (211105 bytes)
+2026-10-22 11:10:02,241 fedpara.p2p P2P patch sent (211106 bytes)
+elastic steps=1 emitted=92 loss=8.3692 active=2 living=2 channels=1 authed=1 synced=2 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:10:02,502 fedpara.roomid discovery endpoint ws://127.0.0.1:8080/ws unavailable: sent 1011 (internal error) keepalive ping timeout; no close frame received
+2026-10-22 11:10:02,539 fedpara.p2p P2P signaling peer-left room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 channel_open=True
+2026-10-22 11:10:02,539 fedpara.p2p Signaling unavailable; retaining live WebRTC DataChannel
+2026-10-22 11:10:02,541 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=datachannel-closed role=initiator ice=completed rtc=connected
+2026-10-22 11:10:02,544 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 ICE=closed role=initiator
+2026-10-22 11:10:02,544 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 ICE/DTLS=closed role=initiator
+2026-10-22 11:10:02,572 fedpara.elastic peer p066a053afc10149986a5d60da0a7c676 SCTP DataChannel closed; scheduling reconnect: ICE/DTLS closed
+elastic steps=10 emitted=92 loss=8.4016 active=1 living=1 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=20 emitted=92 loss=8.1874 active=1 living=1 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=30 emitted=92 loss=8.2442 active=1 living=1 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:10:03,569 fedpara.roomid room presence: peer=pefcfbb0d4604a2de8164f8b331b308cf type=group-members living=2
+elastic steps=40 emitted=92 loss=8.3321 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=50 emitted=92 loss=8.0739 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=60 emitted=92 loss=8.1572 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=93, living=2, active=1, bytes=211105
+elastic steps=0 emitted=93 loss=8.1689 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=1 emitted=93 loss=8.2625 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=93 loss=8.0071 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=20 emitted=93 loss=8.3413 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:10:05,432 fedpara.elastic connecting peer=p066a053afc10149986a5d60da0a7c676 pair=6c6f5e88a0fe retry=1
+2026-10-22 11:10:05,433 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=signaling-connect role=None ice=new rtc=new
+2026-10-22 11:10:05,436 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=signaling-join role=None ice=new rtc=new
+2026-10-22 11:10:05,445 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=waiting-offer role=answerer ice=new rtc=new
+elastic steps=30 emitted=93 loss=8.3488 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=40 emitted=93 loss=8.2768 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=50 emitted=93 loss=8.0904 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=60 emitted=93 loss=8.0719 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=94, living=2, active=1, bytes=211105
+elastic steps=0 emitted=94 loss=8.1295 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=1 emitted=94 loss=8.237 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=94 loss=8.2032 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=20 emitted=94 loss=8.0376 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=30 emitted=94 loss=8.1454 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=40 emitted=94 loss=8.0392 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=50 emitted=94 loss=7.7731 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=60 emitted=94 loss=8.0873 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=95, living=2, active=1, bytes=211105
+elastic steps=0 emitted=95 loss=7.9423 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=1 emitted=95 loss=8.14 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=10 emitted=95 loss=8.041 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=20 emitted=95 loss=8.3257 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=30 emitted=95 loss=8.0864 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:10:10,445 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 phase=answering-offer role=answerer ice=new rtc=new
+elastic steps=40 emitted=95 loss=7.6646 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=50 emitted=95 loss=7.9337 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=60 emitted=95 loss=7.9633 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic local event=96, living=2, active=1, bytes=211105
+elastic steps=0 emitted=96 loss=8.0137 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+elastic steps=1 emitted=96 loss=7.8361 active=1 living=2 channels=0 authed=0 synced=1 peer=pefcfbb0d4604a2de8164f8b331b308cf
+2026-10-22 11:10:12,835 fedpara.roomid room presence: peer=pefcfbb0d4604a2de8164f8b331b308cf type=group-peer-left living=1
+elastic local event=97, living=1, active=1, bytes=211105
+2026-10-22 11:10:14,454 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 ICE=closed role=answerer
+2026-10-22 11:10:14,454 fedpara.p2p P2P room=6c6f5e88a0fef6992e02e10bea0b88d80fbfdffe344aacb3d9b613a2828df644 ICE/DTLS=closed role=answerer

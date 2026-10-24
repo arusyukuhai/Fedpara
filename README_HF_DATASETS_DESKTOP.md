@@ -1,3 +1,5 @@
+> **GUI update:** The default `python -m patchlib.cli gui` now starts the HTML/CSS/JS **embedded WebView desktop application**, not Tkinter and not a browser server. See [README_WEBVIEW.md](README_WEBVIEW.md). Legacy Tkinter remains available as `gui-desktop`.
+
 # Fedpara — Hugging Face dataset collections + native Python GUI
 
 This release corrects the old meaning of `dataset`: **a room now holds a collection of actionable Hugging Face dataset references**, not a text summary. Each peer independently obtains examples from the Hub using `datasets>=4`, without sending dataset examples, access tokens, or model parameters through Mummy.

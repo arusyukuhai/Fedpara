@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fedpara — P2P Training</title>
+<!-- Styles are inlined by Python; no web server or file access from WebView. -->
+<!-- Script is inlined by Python; only the fixed pywebview bridge is used. -->
+</head>
+<body>
+<header><div class="brandbar"><span>F E D P A R A  /  P2P LAB</span><span>EST. 2026  ·  DISTRIBUTED LEARNING</span></div><div class="eyebrow">FEDPARA // LOCAL CONSOLE</div><h1>分散学習コントロール</h1>
+<p>デスクトップアプリでルームとデータセットを管理。学習データ・モデル重み・LoHAは中央サーバーに送信されません。</p><div class="diag" role="status" aria-live="polite">
+  <div><strong>GUI動作診断</strong><div id="uiProbeStatus">画面のJavaScriptを読み込んでいます…</div><div id="bridgeState">Pythonブリッジの状態を確認中…</div></div>
+  <button id="uiProbe" class="secondary" type="button">クリックテスト</button>
+</div></header>
+<main>
+<section><div class="section-title"><h2>01 · ルーム・モデル</h2><span>ルームIDで参加</span></div>
+<div class="fields">
+<label>ルームID <div class="inputrow"><input id="room" spellcheck="false" placeholder="ルームID"><button id="newRoom" class="secondary" type="button">生成</button></div></label>
+<label>シグナリング WebSocket <input id="ws" spellcheck="false" value="ws://127.0.0.1:8080/ws"></label>
+<label>Hugging Face モデルID <input id="model" spellcheck="false" value="roneneldan/TinyStories-1M"></label>
+<label>モデルのRevision <input id="revision" spellcheck="false" value="77f1b168e219585646439073245fe87e56b3023e"></label>
+<label>モデル初期化 <select id="modelInitialization"><option value="random" selected>ランダム（GPT-Neo構造のみ・本体固定）</option><option value="pretrained">事前学習済み（従来方式）</option></select></label>
+<label>学習タスク <select id="task"><option value="causal-lm">Causal LM</option><option value="masked-lm">Masked LM</option><option value="seq2seq-lm">Seq2Seq LM</option><option value="sequence-classification">Text Classification</option></select></label>
+<label>Dataset sampling seed <input id="seed" type="number" min="0" max="2147483647" value="42"></label>
+</div>
+<div class="actions"><button id="join" type="button" class="secondary">既存ルームを読み込む</button><button id="registerRoom" class="secondary" type="button">サーバーにルーム登録</button><button id="refreshRooms" class="secondary" type="button">公開ルーム一覧を更新</button><button id="save" type="button">ルーム設定を保存</button></div>
+<p class="hint">既存ルームに参加すると、Hugging Faceデータセット集合がルーム定義から読み込まれます。新規ルームは最初の学習ピアの接続時にシグナリングサーバーへ登録されます。公開すると誰でもルームIDを知り参加できます。</p>
+<label class="room-visibility"><input id="roomPublic" type="checkbox"> このルームを公開一覧へ掲載（参加用ルームIDも公開されます）</label>
+<div class="directory-toolbar" aria-label="公開ルームを探す">
+  <label>ルームを検索 <input id="roomFilter" placeholder="モデル名 / データセット / ルームID" autocomplete="off"></label>
+  <label>並び順 <select id="roomSort"><option value="popular">参加者の多い順</option><option value="available">空席の多い順</option><option value="model">モデル名順</option></select></label>
+  <label class="room-filter-check"><input id="roomAvailable" type="checkbox"> 空席のあるルームのみ</label>
+</div>
+<div id="roomDirectoryCount" class="directory-count" aria-live="polite">まだ取得していません</div>
+<div id="roomDirectory" class="room-directory" aria-live="polite">「公開ルーム一覧を更新」を押すと一覧が表示されます。</div></section>
+<section><div class="section-title"><h2>02 · Hugging Face データセット集合</h2><span>最大12件 · 実データを各端末で取得</span></div>
+<div class="dataset-list" id="datasets"></div>
+<div class="fields">
+<label>Dataset repo <input id="repo" placeholder="org/dataset" spellcheck="false"></label>
+<label>Config（任意） <input id="config" placeholder="wikitext-2-raw-v1"></label>
+<label>Split <input id="split" value="train"></label>
+<label>Revision <input id="ds_revision" value="main"></label>
+<label>Columns <input id="columns" value="text=text" placeholder="text=text / input=question,target=answer"></label>
+<label>Mix weight <input id="weight" type="number" min="0.001" max="100" step="0.1" value="1"></label>
+</div>
+<div class="actions"><button id="addDataset" class="secondary" type="button">+ データセットを追加</button><label class="upload-action">JSONからインポート <input id="importDatasets" type="file" accept=".json,application/json" hidden></label></div>
+<p class="hint">利用例: <code>text=content</code>、<code>input=question,target=answer</code>。ストリーミング取得・重み付き混合は既存のPython学習処理が担当します。</p></section>
+<section><div class="section-title"><h2>03 · 独自モデルコード（任意）</h2><span>実行せずハッシュのみ登録</span></div>
+<div class="fields"><label>Pythonファクトリ（.py / .zip）<input id="codeUpload" type="file" accept=".py,.zip"></label>
+<label>コードの配布元（HTTPS、任意）<input id="codeUrl" placeholder="https://example.org/factory.py" spellcheck="false"></label></div>
+<div class="actions"><button id="registerCode" class="secondary" type="button">コードを検証・登録</button></div>
+<p id="codeStatus" class="hint">コードは参加だけではダウンロード・実行されません。任意Pythonコードの実行は別途、隔離環境で許可する必要があります。</p></section>
+<section><div class="section-title"><h2>04 · P2P 継続FedSum学習</h2><span>FedSum + Periodic ReLoRA</span></div>
+<div class="fields"><label>初期状態ファイル（任意・空欄ならモデルから自動作成）<input id="base" placeholder="空欄で自動初期化 / 既存 .fstate の絶対パス" spellcheck="false"></label>
+<label>Optimizer <select id="trainOptimizer"><option value="adamw" selected>AdamW</option><option value="lora-muon">LoRA-Muon（LoRAのみ）</option></select></label>
+<label>Adapter <select id="kind"><option value="loha">LoHA</option><option value="lora">LoRA</option></select></label>
+<label>Rank <select id="rank"><option>4</option><option>8</option><option selected>16</option><option>32</option><option>64</option></select></label>
+<label>LoHa再初期化 (Nローカル公開ごと・0で無効) <input id="trainReinitEvery" type="number" min="0" max="100000" value="20"></label>
+<label>学習率 (AdamW) <input id="trainLr" type="number" min="0.0000001" max="0.1" step="0.00001" value="0.0001"></label>
+<label>ローカルステップ / 公開 <input id="trainLocalSteps" type="number" min="1" max="10000" value="64"></label>
+<label>最大文脈長 <input id="trainMaxLength" type="number" min="8" max="2048" value="64"></label></div>
+<div class="actions"><button id="start" type="button">学習開始</button><button id="stop" type="button" class="danger">停止</button></div>
+<div id="runStatus" class="status">状態を確認しています…</div>
+<div class="actions"><button id="copyLogs" class="secondary" type="button">ログをコピー</button><button id="saveLogs" class="secondary" type="button">ログをファイルに保存</button><button id="selectLogs" class="secondary" type="button">表示ログを選択</button></div>
+<pre id="logs" tabindex="0">学習ログはここに表示されます。</pre>
+<p class="hint">新規ルームの既定はTinyStories-1Mの公式configからランダム重みを安全に生成し、共有Genesisを作成します（学習済み重みは読み込みません）。Embedding・Position Embedding・LM Head・Attention・MLPにLoHaを適用し、共有Embedding/Headは二重更新しません。参加者が異なる初期重みを使用すると更新は互換になりません。既存ピアがオンラインなら署名付きモデルシャードを同期してから学習を開始します。同期中は「JOIN WAIT」になります。旧形式のルーム・SQLite履歴とは互換性がありません。継続FedSumはピア数で割らず実効更新差分を足します。ピア数が増えると発散しやすくなるため学習率に注意してください。LoHa因子・AdamWは設定した件数（既定20件）のローカル公開ごとに再初期化します。公開済み更新は学習済みベースに残ります。周期やプロトコルが異なるルーム・ジャーナルとは互換性がないので新規作成してください。</p></section>
+<section id="benchmarkPanel"><div class="section-title"><h2>05 · 分散学習の有効性検証</h2><span>OFFLINE / TINYSTORIES-1M / CONTINUAL LoHa</span></div>
+<p class="hint">中央集権と分散で同じoptimizerを使用します。LoHa+AdamWまたはLoRA+LoRA-Muonを比較できます。同じ初期重み・トークン予算・入力データで測定。分散側はFedSum（更新差分の総和・ピア数で割らない）です。rank 16 / Attention+MLP のみ / LR 1e-4 / warmup+cosine / 勾配clip 1.0。TinyStories-1Mと同じ構造をランダム初期化し、本体を固定してLoHaだけで学習します（GPT-Neo、8層、隠れ幅64）。TinyStories は実データをネットワークから取得します。学習時のWebRTC通信は行いません。</p>
+<div class="fields">
+<label>学習モデル <select id="benchModel"><option value="tinystories-1m" selected>TinyStories-1M構造（GPT-Neo）</option><option value="toy">独自小型モデル（旧ベンチマーク）</option></select></label>
+<label>本体初期化 <select id="benchInitialization"><option value="random" selected>ランダム（本体固定・LoHaのみ）</option><option value="pretrained">学習済み重み（比較用）</option></select></label>
+<label>データ <select id="benchDataset"><option value="builtin">簡易ストーリー（動作確認）</option><option value="tinystories" selected>TinyStories（実データ・学習/検証分離）</option></select></label>
+<label>ピア数 <select id="benchPeers"><option>2</option><option selected>4</option><option>8</option><option>16</option></select></label>
+<label>通信ラウンド <input id="benchRounds" type="number" min="1" max="200" value="40"></label>
+<label>学習系列 / ピア <input id="benchSequences" type="number" min="1" max="8192" step="1" value="2048"></label>
+<label>検証系列 <input id="benchValidationSequences" type="number" min="16" max="8192" step="1" value="1024"></label>
+<label>各ピアのローカルステップ <input id="benchSteps" type="number" min="1" max="40" value="2"></label>
+<label>LoHa再初期化 (Nラウンドごと・0で無効) <input id="benchReinitEvery" type="number" min="0" max="200" value="20"></label>
+<label>Optimizer <select id="benchOptimizer"><option value="adamw" selected>AdamW（LoHa / LoRA）</option><option value="lora-muon">LoRA-Muon（論文Algorithm 1）</option></select></label>
+<label>Adapter <select id="benchKind"><option value="loha">LoHa</option><option value="lora">LoRA</option></select></label>
+<label>Rank <select id="benchRank"><option>2</option><option>4</option><option>8</option><option selected>16</option></select></label>
+<label>学習率 <select id="benchLr"><option>0.00003</option><option selected>0.0001</option><option>0.0003</option><option>0.001</option><option>0.01</option><option>0.03</option><option>0.1</option></select></label>
+</div>
+<div class="actions"><button id="benchStart" type="button">比較実験を開始</button></div>
+<div id="benchStatus" class="status" aria-live="polite">未実行</div>
+<div id="benchResults" class="benchmark-summary" aria-live="polite"></div>
+<p class="hint">計算時間（補正）= ピア側の実測計算時間合計 ÷ ピア数。これは理想的な並列処理の推定値であり、実際の経過時間ではありません。通信時間、NAT、実機差、Gossipは未計測です。ReLoRA型の定期再初期化では学習済み更新をベースへ確定しAdamWの状態をリセットします。Embedding・Positional Embedding・LM HeadにもLoHaを適用します（共有重みは一回のみ）。学習2,048系列/ピア・検証1,024系列を既定とし、分離したTinyStories train/validation splitを使います。ロードには通信時間がかかります。CSV・グラフ・JSONを保存します。</p>
+<pre id="benchLog" tabindex="0">ベンチマークのログと出力先がここに表示されます。</pre>
+</section>
+<section class="footer"><div id="feedback" role="status" aria-live="polite">Pythonブリッジを初期化中…</div><button id="retryBridge" type="button" class="secondary">Python接続を再試行</button><div id="fingerprint" class="fingerprint"></div></section>
+</main>
+</body></html>

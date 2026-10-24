@@ -1,0 +1,132 @@
+bootstrap: downloading / loading packaged HF model sshleifer/tiny-gpt2 revision main
+Could not reach the Hub ([Errno 8] nodename nor servname provided, or not known). Using cached commit hash for 'sshleifer/tiny-gpt2'.
+2026-10-22 23:00:03,668 huggingface_hub.hf_api Could not reach the Hub ([Errno 8] nodename nor servname provided, or not known). Using cached commit hash for 'sshleifer/tiny-gpt2'.
+W1022 23:00:03.723000 42663 site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
+Traceback (most recent call last):
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_transports/default.py", line 250, in handle_request
+    resp = self._pool.handle_request(req)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpcore/_sync/connection_pool.py", line 256, in handle_request
+    raise exc from None
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpcore/_sync/connection_pool.py", line 236, in handle_request
+    response = connection.handle_request(
+        pool_request.request
+    )
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpcore/_sync/connection.py", line 101, in handle_request
+    raise exc
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpcore/_sync/connection.py", line 78, in handle_request
+    stream = self._connect(request)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpcore/_sync/connection.py", line 124, in _connect
+    stream = self._network_backend.connect_tcp(**kwargs)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpcore/_backends/sync.py", line 207, in connect_tcp
+    with map_exceptions(exc_map):
+         ~~~~~~~~~~~~~~^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpcore/_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ConnectError: [Errno 8] nodename nor servname provided, or not known
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/transformers/modeling_utils.py", line 687, in _get_resolved_checkpoint_files
+    resolved_archive_file, revision, is_sharded = auto_conversion(
+                                                  ~~~~~~~~~~~~~~~^
+        pretrained_model_name_or_path, **cached_file_kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/transformers/safetensors_conversion.py", line 116, in auto_conversion
+    raise e
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/transformers/safetensors_conversion.py", line 96, in auto_conversion
+    sha = get_conversion_pr_reference(api, pretrained_model_name_or_path, **cached_file_kwargs)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/transformers/safetensors_conversion.py", line 60, in get_conversion_pr_reference
+    private = api.model_info(model_id).private
+              ~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_validators.py", line 91, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/hf_api.py", line 3319, in model_info
+    r = get_session().get(path, headers=headers, timeout=timeout, params=params)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_client.py", line 1053, in get
+    return self.request(
+           ~~~~~~~~~~~~^
+        "GET",
+        ^^^^^^
+    ...<7 lines>...
+        extensions=extensions,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_client.py", line 825, in request
+    return self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_client.py", line 914, in send
+    response = self._send_handling_auth(
+        request,
+    ...<2 lines>...
+        history=[],
+    )
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_client.py", line 942, in _send_handling_auth
+    response = self._send_handling_redirects(
+        request,
+        follow_redirects=follow_redirects,
+        history=history,
+    )
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_client.py", line 979, in _send_handling_redirects
+    response = self._send_single_request(request)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_client.py", line 1014, in _send_single_request
+    response = transport.handle_request(request)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_transports/default.py", line 249, in handle_request
+    with map_httpcore_exceptions():
+         ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ConnectError: [Errno 8] nodename nor servname provided, or not known
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 969, in <module>
+    main()
+    ~~~~^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 876, in main
+    ensure_state(args, load_model=load_model)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/bootstrap.py", line 92, in ensure_state
+    model, revision = load_model(local,use_adapter=False)
+                      ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 130, in load_model
+    mdl = cls.from_pretrained(args.model, revision=args.revision,
+                trust_remote_code=custom,
+                local_files_only=custom,
+                use_safetensors=not args.allow_legacy_bin)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/transformers/models/auto/auto_factory.py", line 411, in from_pretrained
+    return model_class.from_pretrained(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        pretrained_model_name_or_path, *model_args, config=config, **hub_kwargs, **kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/transformers/modeling_utils.py", line 4251, in from_pretrained
+    checkpoint_files, sharded_metadata = _get_resolved_checkpoint_files(
+                                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+        tqdm_class=tqdm_class,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/transformers/modeling_utils.py", line 753, in _get_resolved_checkpoint_files
+    raise OSError(
+    ...<4 lines>...
+    ) from e
+OSError: Can't load the model for 'sshleifer/tiny-gpt2'. If you were trying to load it from 'https://huggingface.co/models', make sure you don't have a local directory with the same name. Otherwise, make sure 'sshleifer/tiny-gpt2' is the correct path to a directory containing a file named pytorch_model.bin.

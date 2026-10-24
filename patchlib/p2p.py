@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 import secrets
 import os
 import tempfile
@@ -18,10 +19,27 @@ from pathlib import Path
 
 from .core import MAX_PATCH, PatchError, decode_patch
 from .state import inspect_state
+from .transport_keepalive import signaling_keepalive
 
 log = logging.getLogger('fedpara.p2p')
 CHUNK = 16 * 1024
 WINDOW = 256 * 1024
+
+
+async def wait_send_window(channel, *, stall_seconds: float = 45.0):
+    """Fail a half-open SCTP transport whose outgoing buffer never drains."""
+    previous=None
+    deadline=time.monotonic()+stall_seconds
+    while channel.readyState == 'open' and channel.bufferedAmount > WINDOW:
+        remaining=channel.bufferedAmount
+        if previous is None or remaining < previous:
+            deadline=time.monotonic()+stall_seconds
+        if time.monotonic()>=deadline:
+            raise TimeoutError('SCTP send buffer stalled; reconnect transport')
+        previous=remaining
+        await asyncio.sleep(.015)
+    if channel.readyState!='open':
+        raise ConnectionError('DataChannel closed during transfer')
 
 
 class FrameReceiver:
@@ -85,15 +103,9 @@ async def transmit(channel, data: bytes, max_bytes: int = MAX_PATCH, signer=None
     channel.send(json.dumps(head))
     # SCTP messages are modestly sized for compatibility with browsers.
     for start in range(0, len(data), CHUNK):
-        while channel.readyState == 'open' and channel.bufferedAmount > WINDOW:
-            await asyncio.sleep(0.015)
-        if channel.readyState != 'open':
-            raise ConnectionError('DataChannel closed during patch transfer')
+        await wait_send_window(channel)
         channel.send(data[start:start + CHUNK])
-    while channel.readyState == 'open' and channel.bufferedAmount > WINDOW:
-        await asyncio.sleep(0.015)
-    if channel.readyState != 'open':
-        raise ConnectionError('DataChannel closed before end marker')
+    await wait_send_window(channel)
     channel.send(json.dumps({'v':1,'type':'end','id':patch_id}))
 
 
@@ -103,25 +115,22 @@ async def transmit_file(channel, path: Path, max_bytes: int, signer=None):
     size = path.stat().st_size
     if not 0 < size <= max_bytes:
         raise PatchError('state archive is too large')
-    checksum = hashlib.sha256()
-    with path.open('rb') as fp:
-        for chunk in iter(lambda: fp.read(1024*1024), b''):
-            checksum.update(chunk)
+    def digest_file():
+        checksum = hashlib.sha256()
+        with path.open('rb') as fp:
+            for chunk in iter(lambda: fp.read(1024*1024), b''):
+                checksum.update(chunk)
+        return checksum.hexdigest()
+    digest=await asyncio.to_thread(digest_file)
     head = {'v':1,'type':'start','id':secrets.token_hex(12), 'size':size,
-            'sha256':checksum.hexdigest()}
+            'sha256':digest}
     if signer is not None: head['sig'] = signer(size, head['sha256'])
     channel.send(json.dumps(head))
     with path.open('rb') as fp:
         while chunk := fp.read(CHUNK):
-            while channel.readyState == 'open' and channel.bufferedAmount > WINDOW:
-                await asyncio.sleep(.015)
-            if channel.readyState != 'open':
-                raise ConnectionError('DataChannel closed during state transfer')
+            await wait_send_window(channel)
             channel.send(chunk)
-    while channel.readyState == 'open' and channel.bufferedAmount > WINDOW:
-        await asyncio.sleep(.015)
-    if channel.readyState != 'open':
-        raise ConnectionError('DataChannel closed before state end marker')
+    await wait_send_window(channel)
     channel.send(json.dumps({'v':1,'type':'end','id':head['id']}))
 
 
@@ -211,11 +220,28 @@ class PatchNode:
         self.outgoing: asyncio.Queue[bytes | Path] = asyncio.Queue(maxsize=1)
         self.incoming: asyncio.Queue[bytes | Path] = asyncio.Queue(maxsize=8)
         self.connected = asyncio.Event()
+        # A closed SCTP channel must wake the signaling loop immediately.
+        # Otherwise ws.recv() can keep the old peer task alive for 120 seconds.
+        self.link_closed = asyncio.Event()
         self.stopped = asyncio.Event()
+        self.protocol_failure = asyncio.Event()
         self.last_error: Exception | None = None
         self._channel = None
         self._send_task = None
         self.sent = asyncio.Event()
+        # Observable finite-state negotiation. A slow ICE gather is not a dead link.
+        self.phase = 'created'
+        self.phase_since = time.monotonic()
+        self.role = None
+        self.rtc_state = 'new'
+        self.ice_state = 'new'
+
+    def set_phase(self, phase: str):
+        if phase != self.phase:
+            self.phase = phase
+            self.phase_since = time.monotonic()
+            log.info('P2P room=%s phase=%s role=%s ice=%s rtc=%s',
+                     self.room, phase, self.role, self.ice_state, self.rtc_state)
 
     def publish(self, data: bytes) -> None:
         """Keep only newest complete snapshot; avoids unbounded send queues."""
@@ -251,21 +277,37 @@ class PatchNode:
             self.sent.set()
 
     def _attach_channel(self, ch):
+        if self._channel is not ch:
+            self.connected.clear()
+            if self._send_task is not None:
+                self._send_task.cancel()
+                self._send_task=None
         self._channel = ch
+        self.link_closed.clear()
+        opened_once = False
         framer = (DiskFrameReceiver(self.state_dir,self.max_bytes,self.verifier)
                   if self.state_dir is not None
                   else FrameReceiver(self.max_bytes,self.verifier))
 
         @ch.on('open')
         def on_open():
+            nonlocal opened_once
+            if self._channel is not ch or opened_once:
+                return
+            opened_once=True
             self.connected.set()
             log.info('WebRTC DataChannel open')
             self._send_task = asyncio.create_task(self._pump())
 
         @ch.on('close')
         def on_close():
+            if self._channel is not ch:
+                return
             if isinstance(framer, DiskFrameReceiver): framer.close()
             self.connected.clear()
+            self.link_closed.set()
+            if self.last_error is None:
+                self.last_error=ConnectionError('patch DataChannel closed')
             if self._send_task:
                 self._send_task.cancel()
 
@@ -283,6 +325,10 @@ class PatchNode:
                 self.last_error = e
                 log.warning('Rejected incoming patch: %s', e)
 
+        # Remote-created aiortc channels are often already open here; no
+        # second 'open' event is emitted after we install listeners.
+        if ch.readyState == 'open':
+            on_open()
 
     async def run(self):
         # Lazy dependencies: standalone math/test code doesn't need aiortc.
@@ -293,9 +339,13 @@ class PatchNode:
 
         pc = None
         try:
-            async with websockets.connect(self.url, max_size=200_000, ping_interval=20) as ws:
+            self.set_phase('signaling-connect')
+            async with websockets.connect(self.url, max_size=200_000,
+                                          open_timeout=10, close_timeout=4,
+                                          **signaling_keepalive(self.url)) as ws:
+                self.set_phase('signaling-join')
                 await ws.send(json.dumps({'type':'join','mode':'p2p','room':self.room,'token':self.token}))
-                first = json.loads(await ws.recv())
+                first = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
                 if first.get('type') != 'joined':
                     raise ConnectionError('join failed: '+str(first))
                 servers = []
@@ -307,6 +357,13 @@ class PatchNode:
                 pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=servers))
                 pending = []
                 role = first['role']
+                self.role = role
+                self.set_phase('waiting-offer' if role == 'answerer' else 'waiting-peer')
+
+                @pc.on('iceconnectionstatechange')
+                async def ice_change():
+                    self.ice_state = pc.iceConnectionState
+                    log.info('P2P room=%s ICE=%s role=%s', self.room, self.ice_state, role)
 
                 def attach_channel(ch):
                     self._attach_channel(ch)
@@ -315,39 +372,76 @@ class PatchNode:
                 def datachannel(ch):
                     if ch.label == 'fedpara-patch':
                         attach_channel(ch)
+                    elif ch.label == 'fedpara-state' and hasattr(self, '_attach_extra_channel'):
+                        self._attach_extra_channel(ch)
                     else:
                         ch.close()
 
                 @pc.on('connectionstatechange')
                 async def connection_change():
-                    log.info('ICE/DTLS connection state: %s', pc.connectionState)
+                    self.rtc_state = pc.connectionState
+                    log.info('P2P room=%s ICE/DTLS=%s role=%s', self.room, self.rtc_state, role)
+                    if pc.connectionState == 'connected':
+                        self.set_phase('rtc-connected')
+                    if pc.connectionState == 'failed':
+                        # The recv loop wakes within one second and owns
+                        # connection teardown. Never re-close the WebSocket
+                        # from a late callback on an already-closed aiortc pc.
+                        self.last_error=ConnectionError('ICE/DTLS failed')
+                        self.link_closed.set()
 
                 async def signal(message):
                     await ws.send(json.dumps(message))
 
+                offer_sent = False
                 async def offer():
+                    nonlocal offer_sent
+                    if offer_sent:
+                        return
+                    offer_sent = True
+                    self.set_phase('gathering-offer')
                     await pc.setLocalDescription(await pc.createOffer())
                     # aiortc gathers all candidates into localDescription.sdp;
                     # this is compatible with Mummy and browser Trickle ICE.
+                    self.set_phase('offer-sent')
                     await signal({'type':'offer','sdp':pc.localDescription.sdp})
 
                 if role == 'initiator':
                     attach_channel(pc.createDataChannel('fedpara-patch', ordered=True))
+                    if hasattr(self, '_attach_extra_channel'):
+                        self._attach_extra_channel(pc.createDataChannel('fedpara-state', ordered=True))
 
                 peer_left = False
+                last_signal_ping=time.monotonic()
                 try:
-                    async for raw in ws:
+                    while True:
+                        if self.link_closed.is_set():
+                            raise ConnectionError('P2P DataChannel closed; retrying transport')
+                        if self.protocol_failure.is_set():
+                            raise ConnectionError('signed peer handshake failed: '+str(self.last_error))
+                        if time.monotonic()-last_signal_ping>=30.0:
+                            # Application-level ping avoids relying on pong
+                            # timeouts delayed by competing GPU/CPU workers.
+                            await ws.send('{"type":"ping"}')
+                            last_signal_ping=time.monotonic()
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(),timeout=1.0)
+                        except asyncio.TimeoutError:
+                            continue
                         msg = json.loads(raw)
                         kind = msg.get('type')
                         if kind == 'peer-joined' and role == 'initiator':
                             await offer()
                         elif kind == 'offer' and role == 'answerer':
+                            self.set_phase('answering-offer')
                             await pc.setRemoteDescription(RTCSessionDescription(sdp=msg['sdp'], type='offer'))
                             for cand in pending: await pc.addIceCandidate(cand)
                             pending.clear()
                             await pc.setLocalDescription(await pc.createAnswer())
+                            self.set_phase('answer-sent')
                             await signal({'type':'answer', 'sdp':pc.localDescription.sdp})
                         elif kind == 'answer' and role == 'initiator':
+                            self.set_phase('processing-answer')
                             await pc.setRemoteDescription(RTCSessionDescription(sdp=msg['sdp'], type='answer'))
                             for cand in pending: await pc.addIceCandidate(cand)
                             pending.clear()
@@ -366,7 +460,10 @@ class PatchNode:
                             else:
                                 await pc.addIceCandidate(candidate)
                         elif kind == 'peer-left':
-                            log.warning('Remote peer left the room')
+                            # Losing signaling does not necessarily terminate an
+                            # already established direct transport; preserve it.
+                            log.warning('P2P signaling peer-left room=%s channel_open=%s',
+                                        self.room, self.connected.is_set())
                             peer_left = True
                             break
                         elif kind == 'error':
@@ -376,14 +473,25 @@ class PatchNode:
                         raise
                 # Once ICE/DTLS is established, signaling is no longer required.
                 # Continue over the already-open SCTP DataChannel in emergency.
-                if not peer_left and self.connected.is_set():
+                if self.connected.is_set():
                     log.warning("Signaling unavailable; retaining live WebRTC DataChannel")
                     while self.connected.is_set():
+                        if self.protocol_failure.is_set():
+                            raise ConnectionError('signed peer handshake failed: '+str(self.last_error))
+                        if self.link_closed.is_set():
+                            raise ConnectionError('P2P DataChannel closed after signaling outage')
                         await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self.last_error = exc
+            # Keep the original authenticated-control error, not the later
+            # generic "signaling aborted" wrapper, for GUI diagnostics.
+            if not self.protocol_failure.is_set() or self.last_error is None:
+                self.last_error = exc
+            log.error('WebRTC link failure room=%s role=%s phase=%s ice=%s rtc=%s: %s: %s',
+                      self.room,self.role,self.phase,self.ice_state,self.rtc_state,
+                      type(exc).__name__,exc)
+            self.set_phase('error')
             raise
         finally:
             self.connected.clear()

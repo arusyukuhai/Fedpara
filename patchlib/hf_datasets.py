@@ -4,7 +4,6 @@ Only data repositories are read; no dataset loading scripts or transforms run.
 Every peer fetches data directly from Hugging Face, not from Mummy.
 """
 from __future__ import annotations
-import hashlib
 import itertools
 import random
 from typing import Iterable
@@ -37,8 +36,8 @@ def rows_from_room(manifest: dict, *, peer_id: str='', loader=None, shuffle_buff
     sources=manifest['datasets']['sources']
     if loader is None:
         loader=_datasets_package().load_dataset
-    peer_hash=int.from_bytes(hashlib.sha256(peer_id.encode('utf-8')).digest()[:4],'big')
-    seed=manifest['datasets']['seed'] ^ peer_hash
+    from .data_sampling import peer_sampling_seed
+    seed=peer_sampling_seed(peer_id, manifest['datasets']['seed'])
     rng=random.Random(seed)
     streams=[]
     for i, source in enumerate(sources):
@@ -101,7 +100,8 @@ def batches_from_room(args, manifest: dict, *, rows=None):
             raise ValueError('tokenizer must have pad or eos token')
         tokenizer.pad_token=tokenizer.eos_token
     if rows is None:
-        rows=rows_from_room(manifest,peer_id=getattr(args,'peer_id',None) or '')
+        rows=rows_from_room(manifest,peer_id=getattr(args,'peer_id',None) or '',
+                            shuffle_buffer=getattr(args,'hf_shuffle_buffer',512))
     mlm=task=='masked-lm'
     collator=(DataCollatorForLanguageModeling(tokenizer,mlm=mlm,mlm_probability=0.15)
               if task in ('causal-lm','masked-lm') else None)

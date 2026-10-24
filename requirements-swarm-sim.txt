@@ -1,0 +1,2 @@
+-r requirements-patches.txt
+numpy>=1.26

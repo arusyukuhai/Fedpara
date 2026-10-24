@@ -8,9 +8,11 @@ receive the same set of events. Offline peers are NEVER part of a quorum.
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import math
 import os
+import errno
 import sqlite3
 import struct
 from dataclasses import dataclass
@@ -20,6 +22,7 @@ import torch
 
 from .core import PEER_ID, FactorDelta, PatchError, UniversalAdapter, _canonical_json, decode_patch
 from .livefed import HEX64, _delta_block
+from .numerics import squared_l2
 
 MAGIC = b'FPEL1\0'
 MAX_ENVELOPE_HEADER = 4096
@@ -95,6 +98,33 @@ class EventJournal:
             raise ValueError('invalid genesis / log cap')
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # SQLite permits multiple writers, but two trainers MUST NOT share an
+        # identity and append conflicting gradients to the same peer journal.
+        self._lock_fd = None
+        # Preserve the explicit immutable-genesis diagnostic even if a live
+        # trainer currently holds the exclusive write lock.
+        if self.path.exists():
+            try:
+                lookup=sqlite3.connect(self.path.as_uri()+'?mode=ro',uri=True,timeout=2)
+                try:
+                    row=lookup.execute("SELECT value FROM meta WHERE name='genesis'").fetchone()
+                finally:
+                    lookup.close()
+                if row and row[0] != genesis:
+                    raise PatchError('local update journal belongs to a DIFFERENT genesis checkpoint')
+            except sqlite3.OperationalError:
+                pass  # A new DB may not yet have initialized its meta table.
+        try:
+            import fcntl
+            lockfile = Path(str(self.path)+'.train.lock')
+            self._lock_fd = os.open(lockfile, os.O_RDWR|os.O_CREAT|getattr(os,'O_NOFOLLOW',0),0o600)
+            try: fcntl.flock(self._lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except OSError as e:
+                if e.errno in (errno.EWOULDBLOCK,errno.EAGAIN,errno.EACCES):
+                    raise PatchError(f'peer journal is already used by a live trainer: {self.path}') from e
+                raise
+        except ImportError:
+            raise RuntimeError('safe journal locking requires POSIX flock')
         self.db = sqlite3.connect(self.path, timeout=30)
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA synchronous=FULL')
@@ -106,6 +136,8 @@ class EventJournal:
         self.db.execute('CREATE INDEX IF NOT EXISTS event_origin_seq ON events(origin,seq)')
         old = self.db.execute("SELECT value FROM meta WHERE name='genesis'").fetchone()
         if old and old[0] != genesis:
+            self.db.close()
+            if self._lock_fd is not None: os.close(self._lock_fd)
             raise PatchError('local update journal belongs to a DIFFERENT genesis checkpoint')
         with self.db:
             self.db.execute("INSERT OR IGNORE INTO meta(name,value) VALUES('genesis',?)", (genesis,))
@@ -114,6 +146,9 @@ class EventJournal:
 
     def close(self):
         self.db.close()
+        if self._lock_fd is not None:
+            os.close(self._lock_fd)
+            self._lock_fd = None
 
     def total_bytes(self):
         return self.db.execute('SELECT COALESCE(SUM(wire_len),0) FROM events').fetchone()[0]
@@ -147,6 +182,30 @@ class EventJournal:
         rows = self.db.execute('SELECT origin,seq,digest FROM events ORDER BY rowid LIMIT ? OFFSET ?',
                                (limit+1,offset)).fetchall()
         return [list(x) for x in rows[:limit]], len(rows) <= limit
+
+    def frontiers(self):
+        """Compact per-origin high water marks for gap-aware anti-entropy.
+
+        The full inventory remains the authority for digest/equivocation checks.
+        This is only an *advertisement*, never proof that intermediate events
+        exist at the advertiser. In particular it cannot authorize an update.
+        """
+        return [[origin, int(seq)] for origin, seq in self.db.execute(
+            'SELECT origin, MAX(seq) FROM events GROUP BY origin ORDER BY origin')]
+
+    def missing_range(self, origin: str, first: int, last: int):
+        """Find absent sequences inside a bounded, advertised interval.
+
+        Query the indexed origin/seq key once instead of issuing a SQLite
+        lookup for every sequence number. Callers must enforce a small window.
+        """
+        if (not PEER_ID.fullmatch(origin) or not 1 <= first <= last < 2**63 or
+                last - first >= 256):
+            raise ValueError('invalid frontier reconciliation range')
+        present = {int(row[0]) for row in self.db.execute(
+            'SELECT seq FROM events WHERE origin=? AND seq BETWEEN ? AND ?',
+            (origin, first, last))}
+        return [(origin, seq) for seq in range(first, last + 1) if seq not in present]
 
     def events(self):
         cursor = self.db.execute('SELECT wire FROM events ORDER BY rowid')
@@ -202,7 +261,7 @@ class ElasticEngine:
                     delta = _delta_block(spec,d,lo,min(lo+rows,n0))
                     if not torch.isfinite(delta).all().item():
                         raise PatchError('nonfinite reconstructed elastic update')
-                    power += delta.double().square().sum().item()
+                    power += squared_l2(delta)
                 rms = math.sqrt(power/math.prod(g.shape))
                 if not math.isfinite(rms) or rms > self.max_delta_rms:
                     raise PatchError('excessive elastic update RMS')
@@ -256,6 +315,43 @@ class ElasticEngine:
         if max_wire_bytes is not None and len(wire)>max_wire_bytes:
             raise PatchError('outgoing elastic event exceeds --max-patch-mb')
         if not self.ingest(wire):
+            raise PatchError('new local update had duplicate sequence')
+        return wire
+
+    async def ingest_responsive(self, wire: bytes) -> bool:
+        """Ingest a signed event without starving aiortc's asyncio loop.
+
+        Ed25519 checks and dense tensor reconstruction can take seconds on a
+        contended laptop. SQLite access stays on the trainer/event-loop thread
+        (default sqlite3 check_same_thread=True); only tensor operations move
+        to a worker. Awaiting each stage serializes all model mutations.
+        """
+        info, parts = await asyncio.to_thread(self._check, wire)
+        ident = (info.origin, info.seq)
+        if ident in self.applied:
+            existing = self.journal.has(*ident)
+            if not existing or existing[0] != info.digest:
+                raise PatchError('conflicting event ID')
+            return False
+        self.journal.append(info.origin, info.seq, wire)
+        await asyncio.to_thread(self._apply_checked, info, parts)
+        return True
+
+    async def seal_local_responsive(self, denominator: int, *, dtype='float16',
+                                    max_wire_bytes: int | None = None) -> bytes:
+        """Export/validate/apply model deltas off-loop; SQLite stays on-loop."""
+        if type(denominator) is not int or not 1 <= denominator <= self.max_denominator:
+            raise PatchError('invalid live peer count')
+        seq = self.journal.next_seq(self.self_id)
+        patch = await asyncio.to_thread(
+            self.adapter.export, self.self_id, seq=seq, dtype=dtype,
+            extra_meta={'elastic_protocol': PROTOCOL, 'genesis': self.genesis,
+                        'denominator': denominator})
+        wire = await asyncio.to_thread(pack_event, patch, self.self_id,
+                                       self.signer, public_key=self.event_public)
+        if max_wire_bytes is not None and len(wire) > max_wire_bytes:
+            raise PatchError('outgoing elastic event exceeds --max-patch-mb')
+        if not await self.ingest_responsive(wire):
             raise PatchError('new local update had duplicate sequence')
         return wire
 

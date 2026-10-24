@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "model": {
+    "id": "sshleifer/tiny-gpt2",
+    "revision": "main",
+    "architecture": "causal-lm",
+    "description": ""
+  },
+  "datasets": {
+    "seed": 42,
+    "sources": [
+      {
+        "repo": "roneneldan/TinyStories",
+        "revision": "main",
+        "config": null,
+        "split": "train",
+        "columns": {
+          "text": "text"
+        },
+        "weight": 1.0
+      }
+    ]
+  },
+  "code": {
+    "sha256": null,
+    "source": ""
+  }
+}

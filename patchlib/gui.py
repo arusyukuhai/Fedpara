@@ -41,14 +41,22 @@ class DesktopController:
         return path
 
     @staticmethod
-    def build_command(*,room,model,revision,base,manifest,ws,task,kind,rank,journal):
+    def build_command(*,room,model,revision,base,manifest,ws,task,kind,rank,journal,auto_state=False,room_public=False,optimizer='adamw',reinit_every=20,
+                      initialization=None,initial_seed=None,lr=1e-4,local_steps=64,max_length=64):
         from .room_manifest import load_manifest
         validate_room(room)
         desc=load_manifest(Path(manifest))
         if desc['version'] != 2 or desc['model']['id'] != model or desc['model']['revision'] != revision:
             raise ValueError('selected manifest and local model/revision disagree')
-        if not Path(base).is_file():
-            raise FileNotFoundError('initial .fstate checkpoint not found: '+str(base))
+        if not str(base).strip():
+            raise ValueError('初期状態ファイルを指定してください (.fstate)。')
+        base = Path(base).expanduser()
+        if base.is_dir():
+            raise IsADirectoryError('初期状態に指定されたのはフォルダです。.fstate ファイルを指定してください: '+str(base))
+        if base.suffix.lower() != '.fstate':
+            raise ValueError('初期状態ファイルは .fstate 形式で指定してください: '+str(base))
+        if not base.is_file() and not auto_state:
+            raise FileNotFoundError('initial .fstate checkpoint not found: '+str(base)+'。state-export コマンドで生成するか、既存ファイルを指定してください。')
         if not ws.startswith(('ws://','wss://')) or len(ws)>512:
             raise ValueError('invalid signaling address')
         p=urlsplit(ws)
@@ -58,16 +66,40 @@ class DesktopController:
             raise ValueError('HF dataset UI currently supports text tasks only')
         if desc['model']['architecture'] != task:
             raise ValueError('manifest architecture differs from task')
+        from .live_initialization import room_initialization
+        room_init=room_initialization(desc)
+        if initialization is not None and initialization != room_init:
+            raise ValueError('初期化方式はルーム定義に固定されています。変更するには新規ルームが必要です。')
+        room_seed=desc['datasets']['seed']
+        if initial_seed is not None and initial_seed != room_seed:
+            raise ValueError('モデル初期化seedはルーム定義と一致する必要があります')
+        if not isinstance(lr,(float,int)) or isinstance(lr,bool) or not 1e-7 <= lr <= .1:
+            raise ValueError('invalid live learning rate')
+        if type(local_steps) is not int or not 1 <= local_steps <= 10000:
+            raise ValueError('local_steps must be 1..10000')
+        if type(max_length) is not int or not 8 <= max_length <= 2048:
+            raise ValueError('max_length must be 8..2048')
+        if optimizer not in ('adamw','lora-muon') or (optimizer=='lora-muon' and kind!='lora'):
+            raise ValueError('LoRA-Muon requires LoRA factorization')
         if kind not in ('lora','loha') or rank not in (4,8,16,32,64):
             raise ValueError('invalid adapter settings')
+        if type(reinit_every) is not int or not 0 <= reinit_every <= 100000:
+            raise ValueError('reinit_every must be 0..100000')
         if not str(journal).endswith('.sqlite3'):
             raise ValueError('journal must be a .sqlite3 path')
         return [sys.executable,'-m','patchlib.cli','train-live',
                 '--room-id',room,'--model',model,'--revision',revision,
                 '--hf-task',task,'--state-base',str(base),
+                '--initialization',room_init,'--initial-seed',str(room_seed),
                 '--room-manifest',str(manifest),'--ws',ws,
-                '--kind',kind,'--rank',str(rank),
-                '--journal',str(journal),'--rounds','0']
+                '--kind',kind,'--optimizer',optimizer,'--rank',str(rank),
+                '--reinit-every',str(reinit_every),
+                '--target-scope','gpt_neo_linear' if optimizer=='lora-muon' else 'auto',
+                '--init-style','balanced' if kind=='loha' else 'legacy',
+                '--lr',str(0.01 if optimizer=='lora-muon' else lr),
+                '--local-steps',str(local_steps),'--max-length',str(max_length),
+                '--device','auto',
+                '--journal',str(journal),'--rounds','0'] + (['--auto-state'] if auto_state else []) + (['--room-public'] if room_public else []) + (['--hf-shuffle-buffer',str(int(os.environ['FEDPARA_HF_SHUFFLE_BUFFER']))] if os.environ.get('FEDPARA_HF_SHUFFLE_BUFFER','').isdigit() else [])
 
     def start(self, command, logfile):
         if self.proc is not None and self.proc.poll() is None:
@@ -77,8 +109,22 @@ class DesktopController:
         fd=os.open(self.logfile,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
         self.log_handle=os.fdopen(fd,'ab',buffering=0)
         try:
-            self.proc=subprocess.Popen(command,cwd=ROOT,
+            # Two simultaneous training windows must not starve the WebView.
+            # Limits apply to the CHILD only; the UI keeps its own CPU budget.
+            env=os.environ.copy()
+            threads=max(1,min(4,(os.cpu_count() or 4)//4))
+            if os.environ.get('FEDPARA_WORKER_THREADS','').isdigit():
+                threads=max(1,min(64,int(os.environ['FEDPARA_WORKER_THREADS'])))
+            for name in ('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS',
+                         'VECLIB_MAXIMUM_THREADS','NUMEXPR_NUM_THREADS'):
+                env[name]=str(threads)
+            env.setdefault('TOKENIZERS_PARALLELISM','false')
+            self.proc=subprocess.Popen(command,cwd=ROOT,env=env,
                        stdout=self.log_handle,stderr=subprocess.STDOUT)
+            # Deprioritize heavy worker compared to native Cocoa/WebKit UI.
+            if hasattr(os,'setpriority') and hasattr(os,'PRIO_PROCESS'):
+                try: os.setpriority(os.PRIO_PROCESS,self.proc.pid,10)
+                except (OSError,PermissionError): pass
         except BaseException:
             self.log_handle.close()
             raise
@@ -87,9 +133,15 @@ class DesktopController:
     def status(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def stop(self):
+    def stop(self, wait=False):
         if self.status():
             self.proc.terminate()
+            if wait:
+                try:
+                    self.proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    # Never silently SIGKILL and discard unpublished training.
+                    raise RuntimeError('training has not stopped after 30s; check logs; peer profile remains locked')
         if self.log_handle:
             self.log_handle.flush()
 
@@ -113,6 +165,22 @@ class FederatedDesktop:
         self.imported_manifest=None
         root.title('Fedpara — P2P Training')
         root.geometry('900x820')
+        try:
+            root.configure(bg='#080e0b')
+            theme=ttk.Style(root)
+            theme.theme_use('clam')
+            theme.configure('.',background='#080e0b',foreground='#e5f6ec',font=('Courier',11))
+            theme.configure('TFrame',background='#080e0b')
+            theme.configure('TLabel',background='#080e0b',foreground='#e5f6ec')
+            theme.configure('TButton',background='#10b981',foreground='#062016',bordercolor='#10b981')
+            theme.map('TButton',background=[('active','#34d399')])
+            theme.configure('TEntry',fieldbackground='#0e1b13',foreground='#e5f6ec',insertcolor='#34d399')
+            theme.configure('TCombobox',fieldbackground='#0e1b13',foreground='#e5f6ec')
+            theme.configure('Treeview',background='#0e1b13',fieldbackground='#0e1b13',foreground='#e5f6ec')
+            theme.configure('Treeview.Heading',background='#164630',foreground='#e5f6ec')
+        except Exception:
+            pass  # older Tk on macOS: do not prevent opening the legacy GUI
+
         frame=ttk.Frame(root,padding=14)
         frame.pack(fill='both',expand=True)
         self.v={name:tk.StringVar(value=default) for name,default in {

@@ -1,0 +1,123 @@
+{
+  "status": "OFFLINE_LOHA_EFFECTIVENESS",
+  "scope": "in-process, synchronous ideal-peer simulation; NOT live P2P/WebRTC/real TinyStories",
+  "configuration": {
+    "peers": 4,
+    "rounds": 5,
+    "local_steps": 2,
+    "batch_size": 4,
+    "seed": 20261023,
+    "lr": 0.003,
+    "kind": "loha",
+    "rank": 4,
+    "width": 24,
+    "context": 12,
+    "vocab": 32,
+    "sequences_per_peer": 64,
+    "threads": 1,
+    "dataset": {
+      "type": "synthetic-non-iid-markov",
+      "heldout_disjoint": true
+    },
+    "heldout_disjoint": true
+  },
+  "fairness": {
+    "identical_genesis": true,
+    "identical_total_tokens": true,
+    "identical_training_samples": true,
+    "identical_initial_adapter_factors_at_round_1": true,
+    "peer_factors_seeded_identically_at_initialization": true,
+    "central_optimizer": "one continuing AdamW adapter",
+    "peer_optimizer": "persistent AdamW moments and LoHa factors across all rounds",
+    "compute_time_rule": "sum(sequentially measured peer training seconds) / peers",
+    "caveat": "dividing by peers ASSUMES perfectly parallel equal-speed devices; not measured wall time. Max-per-round is an alternative lower-bound estimate; communication excluded."
+  },
+  "loss": {
+    "initial": 3.638090133666992,
+    "central": 3.579768180847168,
+    "p2p": 3.623376210530599,
+    "central_perplexity": 35.86522563706421,
+    "p2p_perplexity": 37.46384035309972
+  },
+  "compute": {
+    "central_s": 0.16065516797243617,
+    "p2p_serial_s": 0.10470933601027355,
+    "p2p_divided_by_peers_s": 0.026177334002568386,
+    "p2p_max_peer_critical_path_s": 0.027400334016419947,
+    "p2p_aggregation_s": 0.003967125987401232,
+    "network_s": "not measured",
+    "approx_dense_update_bytes_no_network": 528000,
+    "estimated_before_after_factor_patch_bytes": 814320
+  },
+  "trace": [
+    {
+      "round": 1,
+      "tokens_seen": 384,
+      "central_valid_loss": 3.6248960494995117,
+      "p2p_valid_loss": 3.6347907384236655,
+      "central_compute_s": 0.08649449999211356,
+      "p2p_total_compute_s": 0.023333292978350073,
+      "p2p_compute_s_div_peers": 0.005833323244587518,
+      "p2p_max_peer_s_sum": 0.006823000003350899,
+      "p2p_aggregation_s": 0.0008410000009462237
+    },
+    {
+      "round": 2,
+      "tokens_seen": 768,
+      "central_valid_loss": 3.6139039993286133,
+      "p2p_valid_loss": 3.631781895955404,
+      "central_compute_s": 0.1054102499911096,
+      "p2p_total_compute_s": 0.04427675195620395,
+      "p2p_compute_s_div_peers": 0.011069187989050988,
+      "p2p_max_peer_s_sum": 0.012209999986225739,
+      "p2p_aggregation_s": 0.001653374987654388
+    },
+    {
+      "round": 3,
+      "tokens_seen": 1152,
+      "central_valid_loss": 3.6033620834350586,
+      "p2p_valid_loss": 3.628933588663737,
+      "central_compute_s": 0.1240636249713134,
+      "p2p_total_compute_s": 0.06450429497635923,
+      "p2p_compute_s_div_peers": 0.01612607374408981,
+      "p2p_max_peer_s_sum": 0.01728770899353549,
+      "p2p_aggregation_s": 0.0024271669681183994
+    },
+    {
+      "round": 4,
+      "tokens_seen": 1536,
+      "central_valid_loss": 3.592820167541504,
+      "p2p_valid_loss": 3.6261440912882485,
+      "central_compute_s": 0.14232583399279974,
+      "p2p_total_compute_s": 0.08455046199378558,
+      "p2p_compute_s_div_peers": 0.021137615498446394,
+      "p2p_max_peer_s_sum": 0.022341709001921117,
+      "p2p_aggregation_s": 0.0032056259806267917
+    },
+    {
+      "round": 5,
+      "tokens_seen": 1920,
+      "central_valid_loss": 3.579768180847168,
+      "p2p_valid_loss": 3.623376210530599,
+      "central_compute_s": 0.16065516797243617,
+      "p2p_total_compute_s": 0.10470933601027355,
+      "p2p_compute_s_div_peers": 0.026177334002568386,
+      "p2p_max_peer_s_sum": 0.027400334016419947,
+      "p2p_aggregation_s": 0.003967125987401232
+    }
+  ],
+  "limitations": [
+    "No actual network or churn; this is not a Fedpara signed-event Gossip benchmark.",
+    "Uses synthetic Markov sequences unless --text-file supplies a small real local byte corpus.",
+    "Live asynchronous gossip does not use this offline benchmark synchronization barrier.",
+    "Compute / peers is an idealized figure; parallelism and network overhead excluded."
+  ],
+  "chart_created": true,
+  "time_chart_created": true,
+  "artifacts": {
+    "effectiveness-result.json": "/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/benchmarks/run-20261023T055710Z-a826d41e/effectiveness-result.json",
+    "effectiveness-trace.csv": "/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/benchmarks/run-20261023T055710Z-a826d41e/effectiveness-trace.csv",
+    "effectiveness-loss.png": "/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/benchmarks/run-20261023T055710Z-a826d41e/effectiveness-loss.png",
+    "effectiveness-time.png": "/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/benchmarks/run-20261023T055710Z-a826d41e/effectiveness-time.png"
+  }
+}

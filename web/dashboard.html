@@ -2,16 +2,22 @@
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Fedpara | P2P Console</title>
 <style>
-:root{font-family:system-ui,-apple-system,sans-serif;color-scheme:dark;background:#0b1020;color:#e6ebf8}
-body{max-width:1050px;margin:28px auto;padding:0 20px}h1{font-size:28px;letter-spacing:-.8px}h2{font-size:16px}
-section{border:1px solid #293449;padding:19px;border-radius:15px;background:#131c2d;margin:16px 0}
+:root{font-family:"Courier Prime","Courier New",Courier,monospace;color-scheme:light;background:#fff;color:#0b0b0b}
+*{box-sizing:border-box}body{max-width:1050px;margin:25px auto;padding:0 22px 36px;border-top:6px solid #000}
+h1{font-family:"Chicago","ChicagoFLF","Geneva","Courier New",monospace;font-size:32px;letter-spacing:-.05em;border-bottom:3px solid #000;padding:12px 0 15px}
+h2{font-size:17px;font-weight:900;letter-spacing:-.03em;border-bottom:2px solid #000;padding-bottom:8px;margin:0 0 15px}
+section{border:1px solid #000;padding:20px;background:#fff;margin:16px 0;box-shadow:4px 4px 0 #eee}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:13px}
-label{font-size:13px;display:block;color:#acbad4;margin:12px 0 3px}input,select{background:#0c1527;color:#f5f8ff;border:1px solid #394a65;border-radius:7px;width:100%;padding:9px;box-sizing:border-box}
-button{background:#3f6ee6;color:white;border:0;border-radius:9px;padding:10px 14px;margin:8px 7px 4px 0;cursor:pointer}
-button.alt{background:#31415c}button.danger{background:#a83d51}small,.sub{color:#a3b5ce}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#090e1a;padding:14px;border-radius:9px;max-height:280px;overflow-y:auto}
-.notice{color:#dbd39b}
+label{font-size:12px;font-weight:700;display:block;color:#000;margin:12px 0 3px}
+input,select{font:13px "Courier New",Courier,monospace;background:#fff;color:#000;border:1px solid #000;border-radius:0;width:100%;padding:10px}
+input:focus-visible,select:focus-visible,button:focus-visible{outline:3px double #000;outline-offset:2px}
+button{font:700 12px "Courier New",Courier,monospace;background:#000;color:#fff;border:1px solid #000;border-radius:0;padding:10px 14px;margin:8px 7px 4px 0;cursor:pointer}
+button:hover{background:#fff;color:#000}button.alt{background:#fff;color:#000}button.alt:hover{background:#000;color:#fff}
+button.danger{background:repeating-linear-gradient(135deg,#fff 0,#fff 7px,#eaeaea 7px,#eaeaea 10px);border:2px solid #000;color:#000}
+small,.sub,.notice{color:#555;line-height:1.7}pre{font:12px/1.6 "Courier New",Courier,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#000;color:#fff;padding:15px;border:1px solid #000;max-height:280px;overflow-y:auto}
+@media(max-width:680px){body{padding:0 12px 30px}section{padding:15px}}
 </style></head><body>
-<h1>Fedpara <span style="color:#83aaff">P2P Console</span></h1>
+<h1>Fedpara <span>P2P Console</span></h1>
 <p class="sub">ローカル管理画面。モデル重みや学習データをシグナリングサーバーへアップロードしません。</p>
 <section><h2>① ルームとモデルの設定</h2>
 <div class="grid"><div><label>ルームID</label><input id="room" placeholder="安全なランダムID"><button class="alt" onclick="newRoom()">新しいルームIDを生成</button></div>

@@ -127,7 +127,8 @@ def test_roster_file_late_join(tmp_path):
     with pytest.raises(ValueError):read_roster(roster,'alice')
 
 
-def test_real_train_loop_with_permanently_absent_peer(tmp_path,monkeypatch):
+@pytest.mark.parametrize("reinit_every",[0,1,20])
+def test_real_train_loop_with_permanently_absent_peer(tmp_path,monkeypatch,reinit_every):
     import asyncio
     from types import SimpleNamespace
     from patchlib import elasticnet
@@ -149,6 +150,7 @@ def test_real_train_loop_with_permanently_absent_peer(tmp_path,monkeypatch):
     argv=SimpleNamespace(
         trust_remote_code=False,factory_file=None,allow_legacy_bin=False,resume=None,
         state_base='initial.fstate',grad_accum=1,local_steps=2,rounds=3,
+        reinit_every=reinit_every,
         signing_key=None,unsafe_unsigned=True,ws='ws://127.0.0.1:8080/ws',
         link=['bob=pair_room_123456789'],peer_id='alice',trusted_peer_key=[],
         roster_file=None,model_id='one-base',journal=tmp_path/'online.db',
@@ -163,13 +165,16 @@ def test_real_train_loop_with_permanently_absent_peer(tmp_path,monkeypatch):
         __import__('patchlib.core',fromlist=['_canonical_json'])._canonical_json({
         'model_id':'one-base','revision':'fstate-sha256:seed',
         'layout':UniversalAdapter(initial,'one-base','fstate-sha256:seed',rank=3).layout,
-        'kind':'loha','rank':3,'alpha':3.0})).hexdigest())
+        'kind':'loha','rank':3,'alpha':3.0,
+        'optimizer_protocol':'continual-elastic-fedsum-relora-v4',
+        'reinit_every':reinit_every})).hexdigest())
     assert j.count()==3
     assert len(list((tmp_path/"ck").glob("*.fmanifest")))>=1
     assert len(list((tmp_path/"ck").glob("*.checkpoint.json")))>=1
     for wire in j.events():
         _,meta,_,_=unpack_event(wire,{},unsafe=True)
         assert meta['denominator']==1
+        assert meta['reinit_after'] == bool(reinit_every and meta['seq'] % reinit_every == 0)
     j.close()
 
 
@@ -177,7 +182,7 @@ def test_authenticated_fake_datachannel_gossip(tmp_path):
     import asyncio
     from patchlib.elasticnet import ElasticNode
     class Channel:
-        readyState='open';bufferedAmount=0
+        readyState='connecting';bufferedAmount=0
         def __init__(self):
             self.events={};self.other=None
         def on(self,name):
@@ -195,6 +200,7 @@ def test_authenticated_fake_datachannel_gossip(tmp_path):
                       signer=signers['bob'],verifier=verifiers['alice'])
         ac=Channel();bc=Channel();ac.other=bc;bc.other=ac
         a._attach_channel(ac);b._attach_channel(bc)
+        ac.readyState=bc.readyState='open'
         ac.events['open']();bc.events['open']()
         await asyncio.sleep(.01)
         assert a.controls.get_nowait()['type']=='hello'

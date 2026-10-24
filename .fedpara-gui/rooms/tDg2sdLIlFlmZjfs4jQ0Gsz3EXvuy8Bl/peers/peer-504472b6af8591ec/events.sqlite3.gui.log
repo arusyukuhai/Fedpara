@@ -1,0 +1,1432 @@
+bootstrap: downloading / loading packaged HF model sshleifer/tiny-gpt2 revision main
+2026-10-22 19:58:34,027 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+W1022 19:58:34.120000 7672 site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
+2026-10-22 19:58:35,362 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2 "HTTP/1.1 200 OK"
+2026-10-22 19:58:35,903 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/main "HTTP/1.1 200 OK"
+2026-10-22 19:58:36,407 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/discussions?p=0 "HTTP/1.1 200 OK"
+2026-10-22 19:58:36,939 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/refs%2Fpr%2F2 "HTTP/1.1 200 OK"
+2026-10-22 19:58:37,436 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+2026-10-22 19:58:37,944 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors "HTTP/1.1 302 Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 19:58:37,944 huggingface_hub.utils._http Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 14696.60it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+bootstrap: saved /Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/tDg2sdLIlFlmZjfs4jQ0Gsz3EXvuy8Bl/genesis.fstate semantic_sha256=0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5
+adaptive local policy: {"device": "mps", "batch_size": 1, "grad_accum": 4, "gradient_checkpointing": true, "wire_dtype": "float16", "local_steps": 64, "preferred_neighbors": 2, "memory_fraction": 0.35}
+2026-10-22 19:58:38,506 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+2026-10-22 19:58:39,327 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2 "HTTP/1.1 200 OK"
+2026-10-22 19:58:40,047 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/main "HTTP/1.1 200 OK"
+2026-10-22 19:58:40,281 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/discussions?p=0 "HTTP/1.1 200 OK"
+2026-10-22 19:58:40,513 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/refs%2Fpr%2F2 "HTTP/1.1 200 OK"
+2026-10-22 19:58:40,786 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+2026-10-22 19:58:41,077 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors "HTTP/1.1 302 Found"
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 7705.56it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+adapter: {
+  "original": 102714,
+  "patch": 102714,
+  "groups": 28,
+  "dense_fallback": 28,
+  "layout": "003e3a9e0e6caed95f532c92fa8e05f9727a21048d70a28ac7f09d7ac08ba12c",
+  "resolved_revision": "fstate-sha256:0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5"
+}
+elastic peer=p4e5ea9e787b41e4af665ff175405d846 genesis=b272504c874178f699fa11bf76b5b1d750906b30f198b8b41645fb1953d1db99 recovered=0 events; log=/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/tDg2sdLIlFlmZjfs4jQ0Gsz3EXvuy8Bl/peers/peer-504472b6af8591ec/events.sqlite3
+JOIN WAIT: waiting-for-room-signaling: check Mummy /ws URL, version and port; lobby_online=False living=1 active=1 journal_events=0 neighbors=0 peer_errors={} snapshot_progress={}
+2026-10-22 19:58:41,628 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-members living=1
+ROOM FOUNDER READY: existing model is authoritative; new arrivals will download OUR verified snapshot
+JOIN READY: room-founder-from-first-roster; synced_events=0 living=1 active=1 peer=p4e5ea9e787b41e4af665ff175405d846
+DATA SAMPLING peer=p4e5ea9e787b41e4af665ff175405d846 seed=4596794570233841868 source=huggingface
+2026-10-22 19:58:45,954 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+2026-10-22 19:58:46,283 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-10-22 19:58:46,600 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-22 19:58:47,850 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+2026-10-22 19:58:47,930 httpx HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/roneneldan/TinyStories/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/README.md?%2Fdatasets%2Froneneldan%2FTinyStories%2Fresolve%2Fmain%2FREADME.md=&etag=%22852d1e5307bae52dd2fd3fb7650b7c90b233297f%22 "HTTP/1.1 200 OK"
+2026-10-22 19:58:48,253 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/TinyStories.py "HTTP/1.1 404 Not Found"
+2026-10-22 19:58:49,385 httpx HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/roneneldan/TinyStories/roneneldan/TinyStories.py "HTTP/1.1 404 Not Found"
+2026-10-22 19:58:49,675 httpx HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/revision/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64 "HTTP/1.1 200 OK"
+2026-10-22 19:58:49,970 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/.huggingface.yaml "HTTP/1.1 404 Not Found"
+2026-10-22 19:58:50,565 httpx HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=roneneldan/TinyStories "HTTP/1.1 200 OK"
+2026-10-22 19:58:50,757 httpx HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-22 19:58:51,000 httpx HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64?recursive=false&expand=false "HTTP/1.1 200 OK"
+2026-10-22 19:58:51,229 httpx HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/dataset_infos.json "HTTP/1.1 404 Not Found"
+2026-10-22 19:58:51,645 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00002-of-00004-a26307300439e943.parquet "HTTP/1.1 302 Found"
+2026-10-22 19:58:52,959 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/ce9ad676862e2a01f4b1dd0649b2d29440f5fca57b14530c0a9d739033d4e065?X-Xet-Cas-Uid=public&xip=6LMmE6pGjeo&user_id=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00002-of-00004-a26307300439e943.parquet%3B+filename%3D%22train-00002-of-00004-a26307300439e943.parquet%22%3B&Expires=1792670331&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2NlOWFkNjc2ODYyZTJhMDFmNGIxZGQwNjQ5YjJkMjk0NDBmNWZjYTU3YjE0NTMwYzBhOWQ3MzkwMzNkNGUwNjVcXD9YLVhldC1DYXMtVWlkPXB1YmxpYyZ4aXA9NkxNbUU2cEdqZW8mdXNlcl9pZD1wdWJsaWMmcmVzcG9uc2UtY29udGVudC1kaXNwb3NpdGlvbj1pbmxpbmUlM0IrZmlsZW5hbWUlMkElM0RVVEYtOCUyNyUyN3RyYWluLTAwMDAyLW9mLTAwMDA0LWEyNjMwNzMwMDQzOWU5NDMucGFycXVldCUzQitmaWxlbmFtZSUzRCUyMnRyYWluLTAwMDAyLW9mLTAwMDA0LWEyNjMwNzMwMDQzOWU5NDMucGFycXVldCUyMiUzQiIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwMzMxfX19XX0_&Signature=MEYCIQCOET3Y93xa2Ri5GVSIYOP9%7Es-IqhEB2zPpns9p3LRTFgIhANzXaUb9NSzZp4y2O4M3tR1OUF0ROAWtrYjmFitXsFmc&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+2026-10-22 19:58:53,734 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00002-of-00004-a26307300439e943.parquet "HTTP/1.1 302 Found"
+2026-10-22 19:58:54,450 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/ce9ad676862e2a01f4b1dd0649b2d29440f5fca57b14530c0a9d739033d4e065?user_id=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00002-of-00004-a26307300439e943.parquet%3B+filename%3D%22train-00002-of-00004-a26307300439e943.parquet%22%3B&xip=6LMmE6pGjeo&X-Xet-Cas-Uid=public&Expires=1792670333&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2NlOWFkNjc2ODYyZTJhMDFmNGIxZGQwNjQ5YjJkMjk0NDBmNWZjYTU3YjE0NTMwYzBhOWQ3MzkwMzNkNGUwNjVcXD91c2VyX2lkPXB1YmxpYyZyZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTIyJTNCJnhpcD02TE1tRTZwR2plbyZYLVhldC1DYXMtVWlkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwMzMzfX19XX0_&Signature=MEUCICBe-fcbcZIskFuKealQ9LpolgTIRxJ273L67YBFOYCCAiEAmd3R21s1R3djyCeEJplV6OXZlQMx2UL6hh1e54Mrl-Y_&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+2026-10-22 19:58:56,422 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00002-of-00004-a26307300439e943.parquet "HTTP/1.1 302 Found"
+2026-10-22 19:58:57,115 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/ce9ad676862e2a01f4b1dd0649b2d29440f5fca57b14530c0a9d739033d4e065?X-Xet-Cas-Uid=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00002-of-00004-a26307300439e943.parquet%3B+filename%3D%22train-00002-of-00004-a26307300439e943.parquet%22%3B&xip=6LMmE6pGjeo&user_id=public&Expires=1792670336&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2NlOWFkNjc2ODYyZTJhMDFmNGIxZGQwNjQ5YjJkMjk0NDBmNWZjYTU3YjE0NTMwYzBhOWQ3MzkwMzNkNGUwNjVcXD9YLVhldC1DYXMtVWlkPXB1YmxpYyZyZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTIyJTNCJnhpcD02TE1tRTZwR2plbyZ1c2VyX2lkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwMzM2fX19XX0_&Signature=MEUCIGckMAPUPJ6%7EQYDnmdn%7ETaiWsoc%7E0M4Y2WiVtpWbZ7wkAiEAxgevekp5TdzWgibJZh616psHXpv5cT9M4z%7ElzVRTGfI_&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+2026-10-22 19:59:09,374 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-peer-joined living=2
+2026-10-22 19:59:48,852 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-peer-left living=1
+[transformers] `loss_type=None` was set in the config but it is unrecognized. Using the default loss: `ForCausalLMLoss`.
+elastic steps=1 emitted=0 loss=10.825 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=0 loss=10.825 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 19:59:50,325 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00002-of-00004-a26307300439e943.parquet "HTTP/1.1 302 Found"
+elastic steps=20 emitted=0 loss=10.825 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=0 loss=10.82 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=0 loss=10.826 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 19:59:51,106 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/ce9ad676862e2a01f4b1dd0649b2d29440f5fca57b14530c0a9d739033d4e065?X-Xet-Cas-Uid=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00002-of-00004-a26307300439e943.parquet%3B+filename%3D%22train-00002-of-00004-a26307300439e943.parquet%22%3B&xip=6LMmE6pGjeo&user_id=public&Expires=1792670390&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2NlOWFkNjc2ODYyZTJhMDFmNGIxZGQwNjQ5YjJkMjk0NDBmNWZjYTU3YjE0NTMwYzBhOWQ3MzkwMzNkNGUwNjVcXD9YLVhldC1DYXMtVWlkPXB1YmxpYyZyZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTIyJTNCJnhpcD02TE1tRTZwR2plbyZ1c2VyX2lkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwMzkwfX19XX0_&Signature=MEUCIQDP0i0sizR45CVWWaEpJLhCxug2Kdy-jofV17j9x80KuwIgL5MvZbF1zkJAVUw2fqCAk2PGzLRvtdJR9NSEOOKL-D0_&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic steps=50 emitted=0 loss=10.814 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=0 loss=10.819 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=1, living=1, active=1, bytes=211104
+elastic steps=0 emitted=1 loss=10.817 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=1 loss=10.816 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=1 loss=10.808 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=1 loss=10.805 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=1 loss=10.795 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=1 loss=10.783 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=1 loss=10.783 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=1 loss=10.786 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=2, living=1, active=1, bytes=211104
+elastic steps=0 emitted=2 loss=10.77 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=2 loss=10.76 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=2 loss=10.764 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=2 loss=10.753 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=2 loss=10.739 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=2 loss=10.731 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=2 loss=10.727 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=2 loss=10.725 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=3, living=1, active=1, bytes=211104
+elastic steps=0 emitted=3 loss=10.718 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=3 loss=10.719 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=3 loss=10.708 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=3 loss=10.696 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=3 loss=10.685 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=3 loss=10.685 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=3 loss=10.676 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=3 loss=10.656 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=4, living=1, active=1, bytes=211104
+elastic steps=0 emitted=4 loss=10.675 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=4 loss=10.635 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=4 loss=10.644 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=4 loss=10.654 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=4 loss=10.629 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=4 loss=10.608 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=4 loss=10.612 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=4 loss=10.611 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=5, living=1, active=1, bytes=211104
+elastic steps=0 emitted=5 loss=10.596 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=5 loss=10.592 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=5 loss=10.601 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=5 loss=10.587 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=5 loss=10.561 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=5 loss=10.551 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=5 loss=10.56 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=5 loss=10.527 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=6, living=1, active=1, bytes=211104
+elastic steps=0 emitted=6 loss=10.552 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=6 loss=10.554 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=6 loss=10.525 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=6 loss=10.535 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=6 loss=10.535 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=6 loss=10.483 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=6 loss=10.513 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=6 loss=10.486 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=7, living=1, active=1, bytes=211104
+elastic steps=0 emitted=7 loss=10.47 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=7 loss=10.463 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=7 loss=10.452 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:00:01,628 fedpara.roomid discovery endpoint ws://127.0.0.1:8080/ws unavailable: sent 1011 (internal error) keepalive ping timeout; no close frame received
+elastic steps=20 emitted=7 loss=10.46 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=7 loss=10.464 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=7 loss=10.441 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=7 loss=10.443 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=7 loss=10.465 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:00:02,635 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-members living=1
+elastic local event=8, living=1, active=1, bytes=211104
+elastic steps=0 emitted=8 loss=10.462 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=8 loss=10.437 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=8 loss=10.415 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=8 loss=10.406 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=8 loss=10.359 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=8 loss=10.385 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=8 loss=10.397 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=8 loss=10.333 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=9, living=1, active=1, bytes=211104
+elastic steps=0 emitted=9 loss=10.316 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=9 loss=10.376 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=9 loss=10.333 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=9 loss=10.345 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=9 loss=10.283 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=9 loss=10.342 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=9 loss=10.306 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=9 loss=10.322 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=10, living=1, active=1, bytes=211105
+elastic steps=0 emitted=10 loss=10.247 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=10 loss=10.295 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=10 loss=10.285 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=10 loss=10.289 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=10 loss=10.272 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=10 loss=10.23 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=10 loss=10.251 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=10 loss=10.242 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=11, living=1, active=1, bytes=211105
+elastic steps=0 emitted=11 loss=10.155 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=11 loss=10.129 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=11 loss=10.254 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=11 loss=10.176 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=11 loss=10.226 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=11 loss=10.232 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=11 loss=10.197 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=11 loss=10.109 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=12, living=1, active=1, bytes=211105
+elastic steps=0 emitted=12 loss=10.114 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=12 loss=10.179 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=12 loss=10.148 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=12 loss=10.139 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=12 loss=10.062 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=12 loss=10.063 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=12 loss=10.065 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=12 loss=10.048 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=13, living=1, active=1, bytes=211105
+elastic steps=0 emitted=13 loss=10.071 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=13 loss=10.058 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=13 loss=10.09 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=13 loss=10.03 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=13 loss=9.9948 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=13 loss=9.9557 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=13 loss=9.9911 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=13 loss=9.9672 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=14, living=1, active=1, bytes=211105
+elastic steps=0 emitted=14 loss=9.9623 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:00:12,390 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-peer-joined living=2
+elastic steps=1 emitted=14 loss=9.9187 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=14 loss=9.9518 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=14 loss=9.8972 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=14 loss=9.9392 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=14 loss=9.8218 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=14 loss=9.835 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=14 loss=9.856 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=15, living=2, active=1, bytes=211105
+elastic steps=0 emitted=15 loss=9.9538 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+peer registered: p3dc1d57308a570c6d4376fb699851285
+2026-10-22 20:00:13,991 fedpara.elastic connecting peer=p3dc1d57308a570c6d4376fb699851285 pair=35d0eb961015 retry=0
+2026-10-22 20:00:14,459 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-connect role=None ice=new rtc=new
+elastic steps=1 emitted=15 loss=9.8856 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:00:14,462 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-join role=None ice=new rtc=new
+2026-10-22 20:00:14,473 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=waiting-peer role=initiator ice=new rtc=new
+2026-10-22 20:00:14,474 fedpara.snapshot full-model state DataChannel attached; awaiting open state=connecting
+2026-10-22 20:00:14,544 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=gathering-offer role=initiator ice=new rtc=new
+elastic steps=10 emitted=15 loss=9.9462 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=15 loss=9.8984 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=15 loss=9.9308 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=15 loss=9.8278 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=15 loss=9.887 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=15 loss=9.9245 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=16, living=2, active=1, bytes=211105
+elastic steps=0 emitted=16 loss=9.7435 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=16 loss=9.8566 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=16 loss=9.8735 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=16 loss=9.9075 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=16 loss=9.943 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=16 loss=9.859 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=16 loss=9.7328 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=16 loss=9.7163 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=17, living=2, active=1, bytes=211105
+elastic steps=0 emitted=17 loss=9.7077 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=17 loss=9.9196 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=17 loss=9.902 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=17 loss=9.7581 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=17 loss=9.7794 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=17 loss=9.7286 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=17 loss=9.7509 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=17 loss=9.7926 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=18, living=2, active=1, bytes=211105
+elastic steps=0 emitted=18 loss=9.8528 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=18 loss=9.8069 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=18 loss=9.802 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:00:19,562 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=offer-sent role=initiator ice=new rtc=new
+elastic steps=20 emitted=18 loss=9.7834 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=18 loss=9.7681 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=18 loss=9.7352 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=18 loss=9.681 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=18 loss=9.743 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=19, living=2, active=1, bytes=211105
+elastic steps=0 emitted=19 loss=9.7229 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=19 loss=9.7736 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=19 loss=9.6758 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=19 loss=9.829 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=19 loss=9.7776 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=19 loss=9.6283 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=19 loss=9.6407 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=19 loss=9.6446 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=20, living=2, active=1, bytes=211105
+elastic steps=0 emitted=20 loss=9.745 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=20 loss=9.803 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=20 loss=9.6295 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=20 loss=9.6095 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=20 loss=9.6855 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=20 loss=9.6274 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=20 loss=9.5641 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=20 loss=9.6686 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=21, living=2, active=1, bytes=211105
+elastic steps=0 emitted=21 loss=9.5893 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=21 loss=9.5644 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=21 loss=9.669 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:00:24,569 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=processing-answer role=initiator ice=new rtc=new
+2026-10-22 20:00:24,570 aioice.ice Connection(0) Check CandidatePair(('2408:212:44f6:d300:820:6787:cc34:e564', 59130) -> ('2408:212:44f6:d300:820:6787:cc34:e564', 56217)) State.FROZEN -> State.WAITING
+2026-10-22 20:00:24,570 aioice.ice Connection(0) Check CandidatePair(('192.168.53.152', 65050) -> ('192.168.53.152', 62430)) State.FROZEN -> State.WAITING
+2026-10-22 20:00:24,570 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE=checking role=initiator
+2026-10-22 20:00:24,570 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE/DTLS=connecting role=initiator
+2026-10-22 20:00:24,570 aioice.ice Connection(0) Check CandidatePair(('2408:212:44f6:d300:820:6787:cc34:e564', 59130) -> ('2408:212:44f6:d300:820:6787:cc34:e564', 56217)) State.WAITING -> State.IN_PROGRESS
+2026-10-22 20:00:24,571 aioice.ice Connection(0) Check CandidatePair(('2408:212:44f6:d300:820:6787:cc34:e564', 59130) -> ('2408:212:44f6:d300:820:6787:cc34:e564', 56217)) State.IN_PROGRESS -> State.SUCCEEDED
+2026-10-22 20:00:24,571 aioice.ice Connection(0) Check CandidatePair(('192.168.53.152', 65050) -> ('192.168.53.152', 62430)) State.WAITING -> State.FAILED
+2026-10-22 20:00:24,571 aioice.ice Connection(0) ICE completed
+2026-10-22 20:00:24,602 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE=completed role=initiator
+elastic steps=20 emitted=21 loss=9.5781 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:00:24,629 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE/DTLS=connected role=initiator
+2026-10-22 20:00:24,629 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=rtc-connected role=initiator ice=completed rtc=connected
+2026-10-22 20:00:24,631 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=datachannel-open role=initiator ice=completed rtc=connected
+2026-10-22 20:00:24,634 fedpara.elastic SIGNED HELLO OK peer=p3dc1d57308a570c6d4376fb699851285
+2026-10-22 20:00:24,634 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=authenticated role=initiator ice=completed rtc=connected
+2026-10-22 20:00:24,634 fedpara.snapshot full-model state DataChannel ready label=fedpara-state id=3
+SNAPSHOT RX REQUEST peer=p3dc1d57308a570c6d4376fb699851285 state_channel=True
+SNAPSHOT EXPORT START peer=p3dc1d57308a570c6d4376fb699851285
+elastic local event=22, living=2, active=2, bytes=211105
+SNAPSHOT OFFER peer=p3dc1d57308a570c6d4376fb699851285 events=22 manifest=c900bee1b64d72c0
+elastic steps=1 emitted=22 loss=9.5701 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=22 loss=9.6087 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=22 loss=9.5834 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=22 loss=9.6446 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=22 loss=9.6873 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=22 loss=9.5077 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=22 loss=9.5474 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=23, living=2, active=2, bytes=211105
+elastic steps=0 emitted=23 loss=9.5747 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=23 loss=9.6281 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=23 loss=9.4926 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=23 loss=9.5783 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=23 loss=9.4627 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=23 loss=9.5611 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=23 loss=9.5829 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=23 loss=9.6057 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=24, living=2, active=2, bytes=211105
+elastic steps=0 emitted=24 loss=9.531 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=24 loss=9.4906 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=24 loss=9.5805 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=24 loss=9.4944 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=24 loss=9.599 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=24 loss=9.4529 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=24 loss=9.4885 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=24 loss=9.5843 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=25, living=2, active=2, bytes=211105
+elastic steps=0 emitted=25 loss=9.5165 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=25 loss=9.6136 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=25 loss=9.3623 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=25 loss=9.3962 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=25 loss=9.4182 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=25 loss=9.4431 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=25 loss=9.3231 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=25 loss=9.3441 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=26, living=2, active=2, bytes=211105
+elastic steps=0 emitted=26 loss=9.3861 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=26 loss=9.438 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=26 loss=9.4035 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=26 loss=9.5384 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=26 loss=9.4138 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=26 loss=9.4231 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=26 loss=9.368 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=26 loss=9.2867 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=27, living=2, active=2, bytes=211105
+elastic steps=0 emitted=27 loss=9.3197 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=27 loss=9.3118 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=27 loss=9.3893 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=27 loss=9.4709 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=27 loss=9.3525 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=27 loss=9.3738 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=27 loss=9.3546 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=27 loss=9.267 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=28, living=2, active=2, bytes=211105
+elastic steps=0 emitted=28 loss=9.3285 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=28 loss=9.4462 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=28 loss=9.3332 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=28 loss=9.2457 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=28 loss=9.3059 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=28 loss=9.2517 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=28 loss=9.2345 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=28 loss=9.2593 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=29, living=2, active=2, bytes=211105
+elastic steps=0 emitted=29 loss=9.2566 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=29 loss=9.4053 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=29 loss=9.1463 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=29 loss=9.1935 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=29 loss=9.235 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=29 loss=9.1388 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=29 loss=9.166 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=29 loss=9.2829 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=30, living=2, active=2, bytes=211105
+elastic steps=0 emitted=30 loss=9.3228 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=30 loss=9.1836 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=30 loss=9.1571 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=30 loss=9.2271 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=30 loss=9.1422 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=30 loss=9.1935 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=30 loss=9.1343 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=30 loss=9.0695 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=31, living=2, active=2, bytes=211105
+elastic steps=0 emitted=31 loss=9.305 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=31 loss=9.3839 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=31 loss=9.2369 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=31 loss=9.1684 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=31 loss=9.0739 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=31 loss=9.2136 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=31 loss=8.9562 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=31 loss=9.1484 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=32, living=2, active=2, bytes=211105
+elastic steps=0 emitted=32 loss=9.0717 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=32 loss=9.1209 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=32 loss=9.0356 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=32 loss=9 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=32 loss=9.1184 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=32 loss=9.1055 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=32 loss=8.8913 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=32 loss=9.0238 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=33, living=2, active=2, bytes=211105
+elastic steps=0 emitted=33 loss=8.9873 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=33 loss=8.9529 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=33 loss=9.0975 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=33 loss=9.2134 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=33 loss=9.0079 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=33 loss=9.0918 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=33 loss=9.2799 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=33 loss=8.9314 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=34, living=2, active=2, bytes=211105
+elastic steps=0 emitted=34 loss=9.0666 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=34 loss=9.1943 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=34 loss=9.0459 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=34 loss=9.14 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=34 loss=8.8314 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=34 loss=8.7857 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=34 loss=9.0354 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=34 loss=9.0741 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=35, living=2, active=2, bytes=211105
+elastic steps=0 emitted=35 loss=8.8678 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=35 loss=8.9689 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=35 loss=8.8907 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=35 loss=8.9487 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=35 loss=8.9658 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=35 loss=8.7917 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=35 loss=8.8863 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=35 loss=8.807 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=36, living=2, active=2, bytes=211105
+elastic steps=0 emitted=36 loss=8.7999 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=36 loss=8.8203 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=36 loss=8.8927 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=36 loss=8.9109 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=36 loss=8.8256 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=36 loss=8.6239 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=36 loss=8.7576 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=36 loss=8.7728 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=37, living=2, active=2, bytes=211105
+elastic steps=0 emitted=37 loss=8.895 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=37 loss=8.6953 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=37 loss=8.9725 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=37 loss=8.8521 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=37 loss=8.8931 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=37 loss=8.832 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=37 loss=8.775 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=37 loss=8.8029 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=38, living=2, active=2, bytes=211105
+elastic steps=0 emitted=38 loss=8.6321 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=38 loss=8.683 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=38 loss=8.6025 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=38 loss=8.7504 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=38 loss=8.7724 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=38 loss=8.8745 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=38 loss=8.6346 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=38 loss=8.5936 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=39, living=2, active=2, bytes=211105
+elastic steps=0 emitted=39 loss=8.7316 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=39 loss=8.6897 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=39 loss=8.5258 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=39 loss=8.5497 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=39 loss=8.6836 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=39 loss=8.6633 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=39 loss=8.6604 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=39 loss=8.5071 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=40, living=2, active=2, bytes=211105
+elastic steps=0 emitted=40 loss=8.9652 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=40 loss=8.4131 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=40 loss=8.6672 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=40 loss=8.4927 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=40 loss=8.6156 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=40 loss=8.4454 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=40 loss=8.7312 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=40 loss=8.601 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=41, living=2, active=2, bytes=211105
+elastic steps=0 emitted=41 loss=8.5569 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=41 loss=8.6076 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=41 loss=8.9314 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=41 loss=8.6482 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=41 loss=8.3347 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=41 loss=8.4249 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=41 loss=8.7295 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=41 loss=8.4951 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=42, living=2, active=2, bytes=211105
+elastic steps=0 emitted=42 loss=8.3808 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=42 loss=8.6143 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=42 loss=8.5838 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=42 loss=8.4404 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=42 loss=8.4515 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=42 loss=8.5326 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=42 loss=8.4009 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=42 loss=8.4282 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=43, living=2, active=2, bytes=211105
+elastic steps=0 emitted=43 loss=8.4164 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=43 loss=8.5155 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=43 loss=8.5817 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=43 loss=8.4217 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=43 loss=8.532 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=43 loss=8.4821 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=43 loss=8.3394 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=43 loss=8.423 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=44, living=2, active=2, bytes=211105
+elastic steps=0 emitted=44 loss=8.332 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=44 loss=8.4538 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=44 loss=8.3551 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=44 loss=8.5111 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=44 loss=8.4468 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=44 loss=8.4936 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=44 loss=8.5852 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=44 loss=8.4029 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=45, living=2, active=2, bytes=211105
+elastic steps=0 emitted=45 loss=8.4455 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=45 loss=8.6071 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=45 loss=8.2914 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=45 loss=8.5599 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=45 loss=8.4985 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=45 loss=8.2489 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=45 loss=8.271 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=45 loss=8.2558 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=46, living=2, active=2, bytes=211105
+elastic steps=0 emitted=46 loss=8.3869 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=46 loss=8.4886 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=46 loss=8.3657 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=46 loss=8.2297 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=46 loss=8.2859 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=46 loss=8.3496 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=46 loss=8.2109 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=46 loss=8.1265 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=47, living=2, active=2, bytes=211105
+elastic steps=0 emitted=47 loss=8.2079 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=47 loss=8.2691 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=47 loss=8.4767 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=47 loss=8.2037 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=47 loss=8.1011 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=47 loss=8.3276 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=47 loss=8.0697 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=47 loss=8.1527 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=48, living=2, active=2, bytes=211105
+elastic steps=0 emitted=48 loss=7.8708 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=48 loss=8.2403 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=48 loss=8.0354 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=48 loss=8.5017 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=48 loss=8.0741 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=48 loss=8.2212 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=48 loss=8.1732 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=48 loss=8.2755 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=49, living=2, active=2, bytes=211105
+elastic steps=0 emitted=49 loss=8.1423 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=49 loss=8.3356 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=49 loss=8.1213 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=49 loss=7.9859 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=49 loss=8.1637 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=49 loss=7.9714 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=49 loss=8.1927 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=49 loss=7.9501 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=50, living=2, active=2, bytes=211105
+elastic steps=0 emitted=50 loss=8.1474 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=50 loss=7.9744 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=50 loss=8.1057 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=50 loss=8.3414 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=50 loss=8.0796 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=50 loss=7.9242 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=50 loss=7.9279 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=50 loss=8.1235 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=51, living=2, active=2, bytes=211105
+elastic steps=0 emitted=51 loss=7.9442 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=51 loss=8.1966 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=51 loss=8.1237 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=51 loss=7.7759 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=51 loss=8.0955 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=51 loss=8.1055 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=51 loss=8.2275 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=51 loss=7.7639 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=52, living=2, active=2, bytes=211105
+elastic steps=0 emitted=52 loss=7.59 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=52 loss=8.3078 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=52 loss=8.1458 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=52 loss=8.0016 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=52 loss=7.9739 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=52 loss=8.1512 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=52 loss=8.0037 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=52 loss=7.7518 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=53, living=2, active=2, bytes=211105
+elastic steps=0 emitted=53 loss=7.6374 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=53 loss=7.5916 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=53 loss=7.8547 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=53 loss=8.0888 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=53 loss=7.7636 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=53 loss=7.4906 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=53 loss=7.8251 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=53 loss=7.9738 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=54, living=2, active=2, bytes=211105
+elastic steps=0 emitted=54 loss=7.9826 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=54 loss=7.8703 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:01:20,114 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00002-of-00004-a26307300439e943.parquet "HTTP/1.1 302 Found"
+elastic steps=10 emitted=54 loss=7.5427 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=54 loss=7.6909 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:01:20,807 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/ce9ad676862e2a01f4b1dd0649b2d29440f5fca57b14530c0a9d739033d4e065?X-Xet-Cas-Uid=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00002-of-00004-a26307300439e943.parquet%3B+filename%3D%22train-00002-of-00004-a26307300439e943.parquet%22%3B&xip=6LMmE6pGjeo&user_id=public&Expires=1792670480&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2NlOWFkNjc2ODYyZTJhMDFmNGIxZGQwNjQ5YjJkMjk0NDBmNWZjYTU3YjE0NTMwYzBhOWQ3MzkwMzNkNGUwNjVcXD9YLVhldC1DYXMtVWlkPXB1YmxpYyZyZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTIyJTNCJnhpcD02TE1tRTZwR2plbyZ1c2VyX2lkPXB1YmxpYyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwNDgwfX19XX0_&Signature=MEUCIB%7EFf7IWc6X5MTEVNUMbP1A7BkduniEsrF6KW9FhN5PuAiEA8neX-LTXdEwPgROVklPxMDSQNSvk5fkRq0GnlY2Fin4_&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic steps=30 emitted=54 loss=7.91 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=54 loss=7.6218 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=54 loss=7.54 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=54 loss=7.7808 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=55, living=2, active=2, bytes=211105
+elastic steps=0 emitted=55 loss=7.8614 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=55 loss=7.951 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=55 loss=7.6678 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=55 loss=7.6699 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=55 loss=7.6404 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=55 loss=7.3686 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:01:22,655 fedpara.roomid discovery endpoint ws://127.0.0.1:8080/ws unavailable: sent 1011 (internal error) keepalive ping timeout; no close frame received
+elastic steps=50 emitted=55 loss=7.5592 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=55 loss=7.5824 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=56, living=2, active=2, bytes=211105
+elastic steps=0 emitted=56 loss=7.8762 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=56 loss=7.9265 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=56 loss=7.6892 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:01:23,664 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-members living=2
+elastic steps=20 emitted=56 loss=7.7345 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=56 loss=7.6736 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=56 loss=7.6914 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=56 loss=7.4622 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=56 loss=7.6212 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=57, living=2, active=2, bytes=211105
+elastic steps=0 emitted=57 loss=7.6584 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=57 loss=7.9125 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=57 loss=7.7359 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=57 loss=7.2601 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=57 loss=7.452 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=57 loss=7.7864 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=57 loss=7.4184 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=57 loss=7.2526 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=58, living=2, active=2, bytes=211105
+elastic steps=0 emitted=58 loss=7.7216 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=58 loss=7.5633 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=58 loss=7.3195 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=58 loss=7.2812 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=58 loss=7.7023 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=58 loss=7.431 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=58 loss=7.3104 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=58 loss=7.4924 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=59, living=2, active=2, bytes=211105
+elastic steps=0 emitted=59 loss=7.5081 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=59 loss=7.9484 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=59 loss=7.3319 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=59 loss=7.6275 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=59 loss=7.273 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=59 loss=7.4194 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=59 loss=7.3122 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=59 loss=7.3291 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=60, living=2, active=2, bytes=211105
+elastic steps=0 emitted=60 loss=7.2698 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=60 loss=7.6292 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=60 loss=7.6795 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=60 loss=7.7084 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=60 loss=7.3749 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=60 loss=7.2304 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=60 loss=7.2899 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=60 loss=7.4549 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=61, living=2, active=2, bytes=211105
+elastic steps=0 emitted=61 loss=7.1479 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=61 loss=7.4282 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=61 loss=7.8108 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=61 loss=7.3758 active=2 living=2 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:01:32,548 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-peer-left living=1
+elastic steps=30 emitted=61 loss=7.3484 active=2 living=1 channels=1 authed=1 synced=2 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:01:32,835 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=datachannel-closed role=initiator ice=completed rtc=connected
+2026-10-22 20:01:32,836 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE=closed role=initiator
+2026-10-22 20:01:32,836 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE/DTLS=closed role=initiator
+elastic steps=40 emitted=61 loss=7.441 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=61 loss=6.9675 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:01:33,327 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-peer-joined living=2
+elastic steps=60 emitted=61 loss=7.0797 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=62, living=2, active=1, bytes=211105
+elastic steps=0 emitted=62 loss=7.2613 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=62 loss=7.3655 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=62 loss=7.5782 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=62 loss=7.1567 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=62 loss=8.1544 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=62 loss=7.5811 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=62 loss=7.507 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:01:34,850 fedpara.elastic connecting peer=p3dc1d57308a570c6d4376fb699851285 pair=35d0eb961015 retry=0
+2026-10-22 20:01:34,851 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-connect role=None ice=new rtc=new
+2026-10-22 20:01:34,854 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-join role=None ice=new rtc=new
+2026-10-22 20:01:34,872 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=waiting-peer role=initiator ice=new rtc=new
+2026-10-22 20:01:34,873 fedpara.snapshot full-model state DataChannel attached; awaiting open state=connecting
+elastic steps=60 emitted=62 loss=7.6459 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=63, living=2, active=1, bytes=211105
+elastic steps=0 emitted=63 loss=7.2943 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=63 loss=7.4548 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=63 loss=7.1397 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=63 loss=7.3954 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=63 loss=7.5463 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=63 loss=7.3151 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=63 loss=7.4988 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=63 loss=7.3948 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=64, living=2, active=1, bytes=211105
+elastic steps=0 emitted=64 loss=7.1658 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=64 loss=7.2054 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=64 loss=7.5467 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=64 loss=7.8981 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=64 loss=7.3909 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=64 loss=7.0907 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=64 loss=7.0916 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=64 loss=7.3308 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=65, living=2, active=1, bytes=211105
+elastic steps=0 emitted=65 loss=7.25 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=65 loss=7.2493 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=65 loss=7.3088 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=65 loss=7.0524 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=65 loss=7.3104 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=65 loss=6.8293 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=65 loss=7.0005 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=65 loss=7.21 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=66, living=2, active=1, bytes=211105
+elastic steps=0 emitted=66 loss=7.2694 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=66 loss=7.0511 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=66 loss=7.3423 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=66 loss=6.9434 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=66 loss=6.9728 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=66 loss=6.6665 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=66 loss=7.6868 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=66 loss=7.1077 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=67, living=2, active=1, bytes=211105
+elastic steps=0 emitted=67 loss=7.258 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=67 loss=7.1107 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=67 loss=7.2371 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=67 loss=7.4104 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=67 loss=7.0773 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=67 loss=7.0649 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=67 loss=7.2093 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=67 loss=6.9886 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=68, living=2, active=1, bytes=211105
+elastic steps=0 emitted=68 loss=7.019 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=68 loss=6.7464 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=68 loss=6.9749 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=68 loss=6.9965 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=68 loss=7.0329 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=68 loss=7.2544 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=68 loss=6.9239 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=68 loss=7.0696 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=69, living=2, active=1, bytes=211105
+elastic steps=0 emitted=69 loss=7.1343 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=69 loss=7.1406 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=69 loss=6.9071 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=69 loss=6.9559 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=69 loss=6.9852 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=69 loss=7.2901 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=69 loss=7.0067 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=69 loss=6.9136 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=70, living=2, active=1, bytes=211105
+elastic steps=0 emitted=70 loss=7.3975 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=70 loss=7.005 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=70 loss=7.1491 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=70 loss=6.9109 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=70 loss=7.2795 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=70 loss=6.8224 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=70 loss=7.2733 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=70 loss=6.8496 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=71, living=2, active=1, bytes=211105
+elastic steps=0 emitted=71 loss=7.1864 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=71 loss=6.7423 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=71 loss=6.8061 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=71 loss=6.8561 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=71 loss=6.8846 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=71 loss=6.704 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=71 loss=6.8958 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=71 loss=6.4761 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=72, living=2, active=1, bytes=211105
+elastic steps=0 emitted=72 loss=6.541 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=72 loss=6.7694 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=72 loss=6.9479 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=72 loss=7.0932 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=72 loss=6.7898 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=72 loss=6.439 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=72 loss=6.5469 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=72 loss=7.1257 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=73, living=2, active=1, bytes=211105
+elastic steps=0 emitted=73 loss=6.6545 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=73 loss=6.893 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=73 loss=6.8094 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=73 loss=6.6954 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=73 loss=6.9383 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=73 loss=6.6355 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=73 loss=6.6256 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=73 loss=6.4008 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=74, living=2, active=1, bytes=211105
+elastic steps=0 emitted=74 loss=7.1072 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=74 loss=6.8595 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=74 loss=6.4511 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=74 loss=6.7467 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=74 loss=6.2379 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=74 loss=6.6741 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=74 loss=6.7164 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=74 loss=6.5696 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=75, living=2, active=1, bytes=211105
+elastic steps=0 emitted=75 loss=6.2164 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=75 loss=6.4306 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=75 loss=7.0458 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=75 loss=7.0663 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=75 loss=6.761 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=75 loss=6.9247 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=75 loss=6.9784 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=75 loss=6.5142 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=76, living=2, active=1, bytes=211105
+elastic steps=0 emitted=76 loss=6.3673 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=76 loss=7.0042 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=76 loss=6.8023 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=76 loss=6.8389 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=76 loss=7.0619 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=76 loss=6.7339 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=76 loss=6.9994 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=76 loss=6.4012 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=77, living=2, active=1, bytes=211105
+elastic steps=0 emitted=77 loss=6.4194 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=77 loss=6.6725 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=77 loss=7.3626 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=77 loss=6.3746 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=77 loss=6.721 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=77 loss=6.6315 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=77 loss=6.4899 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=77 loss=6.2944 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=78, living=2, active=1, bytes=211105
+elastic steps=0 emitted=78 loss=6.3892 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=78 loss=6.8019 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=78 loss=6.3483 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=78 loss=6.6628 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=78 loss=6.6126 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=78 loss=6.6345 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=78 loss=6.5791 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=78 loss=6.9539 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=79, living=2, active=1, bytes=211105
+elastic steps=0 emitted=79 loss=6.5366 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=79 loss=6.4301 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=79 loss=6.4658 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=79 loss=6.4809 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=79 loss=6.3622 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=79 loss=6.0658 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=79 loss=6.5216 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=79 loss=6.6564 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=80, living=2, active=1, bytes=211105
+elastic steps=0 emitted=80 loss=6.2475 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=80 loss=6.1317 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=80 loss=6.6661 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=80 loss=6.747 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=80 loss=6.5437 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=80 loss=6.7043 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=80 loss=6.3745 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=80 loss=6.1229 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=81, living=2, active=1, bytes=211105
+elastic steps=0 emitted=81 loss=6.4186 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=81 loss=6.3388 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=81 loss=6.4585 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=81 loss=6.0681 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=81 loss=7.192 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=81 loss=6.2736 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=81 loss=6.2857 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=81 loss=6.8379 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=82, living=2, active=1, bytes=211105
+elastic steps=0 emitted=82 loss=6.3299 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=82 loss=6.673 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=82 loss=6.6591 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=82 loss=6.892 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=82 loss=6.3298 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=82 loss=7.0954 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=82 loss=6.2283 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=82 loss=6.8922 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=83, living=2, active=1, bytes=211105
+elastic steps=0 emitted=83 loss=6.7482 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=83 loss=6.3569 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=83 loss=6.4947 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=83 loss=6.593 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=83 loss=6.116 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=83 loss=6.8004 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=83 loss=6.5908 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=83 loss=6.3082 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=84, living=2, active=1, bytes=211105
+elastic steps=0 emitted=84 loss=6.4158 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=84 loss=6.2312 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=84 loss=6.3087 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=84 loss=6.0684 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=84 loss=6.2674 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=84 loss=6.2307 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=84 loss=6.0547 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=84 loss=5.892 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=85, living=2, active=1, bytes=211105
+elastic steps=0 emitted=85 loss=6.3168 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=85 loss=6.1254 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=85 loss=6.6431 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=85 loss=6.3586 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=85 loss=6.1493 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=85 loss=6.4722 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=85 loss=6.058 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=85 loss=6.5651 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=86, living=2, active=1, bytes=211105
+elastic steps=0 emitted=86 loss=6.2847 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=86 loss=6.0916 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=86 loss=6.7092 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=86 loss=5.8585 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=86 loss=6.0337 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=86 loss=6.4202 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=86 loss=6.2349 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=86 loss=6.3964 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=87, living=2, active=1, bytes=211105
+elastic steps=0 emitted=87 loss=6.4958 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=87 loss=6.1835 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=87 loss=6.7351 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=87 loss=6.0509 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=87 loss=6.4717 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=87 loss=6.7492 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=87 loss=6.0175 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=87 loss=6.5157 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=88, living=2, active=1, bytes=211105
+elastic steps=0 emitted=88 loss=6.6232 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=88 loss=5.9346 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=88 loss=6.1365 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=88 loss=6.4177 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=88 loss=6.0448 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=88 loss=6.0629 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=88 loss=6.2678 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=88 loss=6.2966 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=89, living=2, active=1, bytes=211105
+elastic steps=0 emitted=89 loss=6.5012 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=89 loss=6.445 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=89 loss=5.6739 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=89 loss=6.7759 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=89 loss=6.2821 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=89 loss=6.6461 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=89 loss=6.9797 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=89 loss=6.4386 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=90, living=2, active=1, bytes=211105
+elastic steps=0 emitted=90 loss=6.5461 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=90 loss=6.4443 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=90 loss=6.2855 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=90 loss=6.4004 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=90 loss=5.983 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=90 loss=6.3386 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=90 loss=6.135 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=90 loss=6.3738 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=91, living=2, active=1, bytes=211105
+elastic steps=0 emitted=91 loss=6.1015 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=91 loss=5.9 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=91 loss=6.7493 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=91 loss=5.8991 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=91 loss=5.91 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=91 loss=6.0092 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=91 loss=6.0318 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=91 loss=6.3866 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=92, living=2, active=1, bytes=211105
+elastic steps=0 emitted=92 loss=6.4321 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=92 loss=6.4202 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=92 loss=5.8057 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=92 loss=6.6423 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=92 loss=5.6695 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=92 loss=6.2569 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=92 loss=6.3685 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=92 loss=5.9013 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:02:30,781 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-peer-left living=1
+elastic local event=93, living=1, active=1, bytes=211105
+elastic steps=0 emitted=93 loss=5.7696 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=93 loss=6.3879 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=93 loss=5.7985 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=93 loss=6.4661 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=93 loss=6.0091 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=93 loss=6.6266 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=93 loss=6.2086 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:02:32,357 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE=closed role=initiator
+2026-10-22 20:02:32,357 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE/DTLS=closed role=initiator
+elastic steps=60 emitted=93 loss=6.0151 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=94, living=1, active=1, bytes=211105
+elastic steps=0 emitted=94 loss=6.111 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=94 loss=6.3056 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=94 loss=6.3436 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=94 loss=6.7758 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=94 loss=6.6992 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=94 loss=6.483 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=94 loss=5.8536 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=94 loss=6.5474 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=95, living=1, active=1, bytes=211105
+elastic steps=0 emitted=95 loss=6.2399 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=95 loss=6.67 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=95 loss=6.4494 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=95 loss=6.1547 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=95 loss=5.7046 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=95 loss=6.1991 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=95 loss=6.4093 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=95 loss=5.8814 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=96, living=1, active=1, bytes=211105
+elastic steps=0 emitted=96 loss=6.1535 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=96 loss=6.4789 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=96 loss=6.483 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=96 loss=6.8466 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=96 loss=5.9867 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=96 loss=6.4421 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=96 loss=6.3566 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=96 loss=6.5396 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=97, living=1, active=1, bytes=211105
+elastic steps=0 emitted=97 loss=5.7104 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=97 loss=6.5243 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=97 loss=6.3803 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=97 loss=5.9924 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=97 loss=6.2416 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=97 loss=6.2964 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=97 loss=6.4426 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=97 loss=6.4433 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=98, living=1, active=1, bytes=211105
+elastic steps=0 emitted=98 loss=6.1627 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=98 loss=6.1218 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=98 loss=6.4594 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=98 loss=5.5805 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=98 loss=5.8075 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=98 loss=6.4265 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=98 loss=5.9024 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=98 loss=6.3348 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=99, living=1, active=1, bytes=211105
+elastic steps=0 emitted=99 loss=6.2565 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=99 loss=6.0889 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=99 loss=6.5289 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=99 loss=6.1221 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=99 loss=5.7557 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=99 loss=6.0261 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=99 loss=6.0549 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=99 loss=6.3851 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=100, living=1, active=1, bytes=211106
+elastic steps=0 emitted=100 loss=5.7683 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=100 loss=6.3068 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=100 loss=6.0802 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=100 loss=6.2082 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:02:43,668 fedpara.roomid discovery endpoint ws://127.0.0.1:8080/ws unavailable: sent 1011 (internal error) keepalive ping timeout; no close frame received
+elastic steps=30 emitted=100 loss=6.6652 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=100 loss=5.8006 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:02:44,316 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00002-of-00004-a26307300439e943.parquet "HTTP/1.1 302 Found"
+elastic steps=50 emitted=100 loss=5.7614 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=100 loss=5.5993 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:02:44,672 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-members living=1
+elastic local event=101, living=1, active=1, bytes=211106
+elastic steps=0 emitted=101 loss=6.7069 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=101 loss=6.5322 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=101 loss=6.1923 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:02:45,140 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/ce9ad676862e2a01f4b1dd0649b2d29440f5fca57b14530c0a9d739033d4e065?X-Xet-Cas-Uid=public&user_id=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00002-of-00004-a26307300439e943.parquet%3B+filename%3D%22train-00002-of-00004-a26307300439e943.parquet%22%3B&xip=6LMmE6pGjeo&Expires=1792670564&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2NlOWFkNjc2ODYyZTJhMDFmNGIxZGQwNjQ5YjJkMjk0NDBmNWZjYTU3YjE0NTMwYzBhOWQ3MzkwMzNkNGUwNjVcXD9YLVhldC1DYXMtVWlkPXB1YmxpYyZ1c2VyX2lkPXB1YmxpYyZyZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTIyJTNCJnhpcD02TE1tRTZwR2plbyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwNTY0fX19XX0_&Signature=MEUCIQChGTAwQbtpTY1VEzjPQ8r%7EylLP1f%7E%7EWB1yrc-lC8a0ygIgNGMiUaO6j4ErrGOPUkmmygn%7EScjC5p2BKUiJywIdVDM_&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic steps=20 emitted=101 loss=5.8203 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=101 loss=6.2761 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=101 loss=6.1685 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=101 loss=6.4936 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=101 loss=6.1071 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=102, living=1, active=1, bytes=211106
+elastic steps=0 emitted=102 loss=6.1548 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=102 loss=5.5239 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=102 loss=6.0738 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=102 loss=6.4421 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=102 loss=6.1504 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=102 loss=6.1786 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=102 loss=6.3398 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=102 loss=6.3002 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=103, living=1, active=1, bytes=211106
+elastic steps=0 emitted=103 loss=6.5288 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=103 loss=6.0278 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=103 loss=5.9097 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=103 loss=6.3256 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=103 loss=5.7867 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=103 loss=6.4807 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=103 loss=6.1113 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=103 loss=6.5652 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=104, living=1, active=1, bytes=211106
+elastic steps=0 emitted=104 loss=6.3996 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=104 loss=6.6549 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=104 loss=6.0793 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=104 loss=6.0799 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=104 loss=6.4444 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=104 loss=6.2155 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=104 loss=5.8776 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=104 loss=6.5187 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=105, living=1, active=1, bytes=211106
+elastic steps=0 emitted=105 loss=6.1223 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=105 loss=6.1527 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=105 loss=6.099 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=105 loss=6.3872 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=105 loss=6.4461 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=105 loss=5.7524 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=105 loss=6.2291 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=105 loss=5.9758 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=106, living=1, active=1, bytes=211106
+elastic steps=0 emitted=106 loss=6.352 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=106 loss=6.2468 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=106 loss=6.1655 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=106 loss=6.2134 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=106 loss=6.6268 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=106 loss=5.9278 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=106 loss=5.9908 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=106 loss=5.6923 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=107, living=1, active=1, bytes=211106
+elastic steps=0 emitted=107 loss=6.2544 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=107 loss=6.7593 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=107 loss=6.4656 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=107 loss=6.8229 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=107 loss=6.6717 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=107 loss=5.8777 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=107 loss=6.1209 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=107 loss=6.0828 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=108, living=1, active=1, bytes=211106
+elastic steps=0 emitted=108 loss=5.7485 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=108 loss=5.7933 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=108 loss=5.9058 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=108 loss=6.1657 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=108 loss=5.9098 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=108 loss=6.4361 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=108 loss=6.0807 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=108 loss=6.1194 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=109, living=1, active=1, bytes=211106
+elastic steps=0 emitted=109 loss=6.1469 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=109 loss=6.022 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=109 loss=5.9754 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=109 loss=6.2749 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=109 loss=5.9549 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=109 loss=6.4555 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=109 loss=5.9944 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=109 loss=6.559 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=110, living=1, active=1, bytes=211106
+elastic steps=0 emitted=110 loss=5.9684 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=110 loss=5.9319 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=110 loss=6.2791 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=110 loss=6.1328 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=110 loss=7.125 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=110 loss=6.3879 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=110 loss=6.3693 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=110 loss=5.8628 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=111, living=1, active=1, bytes=211106
+elastic steps=0 emitted=111 loss=6.1987 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=111 loss=6.1953 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=111 loss=6.0686 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=111 loss=6.2407 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=111 loss=6.0502 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=111 loss=6.1967 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=111 loss=6.0204 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=111 loss=6.1778 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=112, living=1, active=1, bytes=211106
+elastic steps=0 emitted=112 loss=5.435 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=112 loss=5.7001 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=112 loss=5.84 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=112 loss=5.9587 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=112 loss=5.8414 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=112 loss=6.1136 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=112 loss=6.4704 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=112 loss=6.347 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=113, living=1, active=1, bytes=211106
+elastic steps=0 emitted=113 loss=6.2321 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=113 loss=6.3163 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=113 loss=5.7923 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=113 loss=6.0137 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=113 loss=6.2465 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=113 loss=6.3503 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=113 loss=6.7498 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=113 loss=5.9145 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=114, living=1, active=1, bytes=211106
+elastic steps=0 emitted=114 loss=5.8685 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=114 loss=5.8284 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=114 loss=5.7789 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=114 loss=6.3453 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=114 loss=6.427 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=114 loss=5.6841 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=114 loss=6.2572 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=114 loss=6.658 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=115, living=1, active=1, bytes=211106
+elastic steps=0 emitted=115 loss=5.9222 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=115 loss=7.0368 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=115 loss=5.6625 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=115 loss=6.5581 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=115 loss=6.2044 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=115 loss=6.1952 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=115 loss=6.1095 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=115 loss=6.1237 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=116, living=1, active=1, bytes=211106
+elastic steps=0 emitted=116 loss=5.351 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=116 loss=5.959 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=116 loss=6.4721 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=116 loss=6.1386 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=116 loss=5.6987 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=116 loss=5.5764 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=116 loss=6.3568 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=116 loss=6.9088 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=117, living=1, active=1, bytes=211106
+elastic steps=0 emitted=117 loss=6.0256 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=117 loss=6.5145 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=117 loss=6.385 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=117 loss=6.6889 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=117 loss=6.0185 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=117 loss=6.3318 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=117 loss=6.3533 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=117 loss=6.3723 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=118, living=1, active=1, bytes=211106
+elastic steps=0 emitted=118 loss=5.9103 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=118 loss=6.2513 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=118 loss=6.1388 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=118 loss=5.6605 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=118 loss=6.2521 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=118 loss=6.0438 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=118 loss=5.9474 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=118 loss=5.9631 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=119, living=1, active=1, bytes=211106
+elastic steps=0 emitted=119 loss=6.0275 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=119 loss=5.6038 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=119 loss=6.0687 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=119 loss=6.4359 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=119 loss=6.2328 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=119 loss=6.1245 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=119 loss=6.1411 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=119 loss=6.5036 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=120, living=1, active=1, bytes=211106
+elastic steps=0 emitted=120 loss=6.0393 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=120 loss=6.1978 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=120 loss=6.3819 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=120 loss=7.223 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=120 loss=6.1493 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=120 loss=6.3548 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=120 loss=5.9305 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=120 loss=6.0789 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=121, living=1, active=1, bytes=211106
+elastic steps=0 emitted=121 loss=5.5044 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=121 loss=5.9495 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=121 loss=5.6622 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=121 loss=6.3995 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=121 loss=5.6722 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=121 loss=6.023 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=121 loss=6.1936 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=121 loss=5.8022 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=122, living=1, active=1, bytes=211106
+elastic steps=0 emitted=122 loss=6.4902 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=122 loss=5.5495 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=122 loss=6.0714 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=122 loss=6.2874 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=122 loss=5.7346 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=122 loss=5.7818 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=122 loss=5.9222 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=122 loss=6.4913 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=123, living=1, active=1, bytes=211106
+elastic steps=0 emitted=123 loss=6.3329 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=123 loss=5.5306 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=123 loss=5.8653 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=123 loss=6.1388 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=123 loss=6.4663 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=123 loss=6.5324 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=123 loss=5.9168 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=123 loss=6.1175 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=124, living=1, active=1, bytes=211106
+elastic steps=0 emitted=124 loss=6.2363 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=124 loss=5.6092 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=124 loss=6.2608 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=124 loss=5.8108 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=124 loss=6.0228 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=124 loss=6.591 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=124 loss=6.0312 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=124 loss=6.4041 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=125, living=1, active=1, bytes=211106
+elastic steps=0 emitted=125 loss=6.9432 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=125 loss=6.2391 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=125 loss=7.0259 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=125 loss=6.1279 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=125 loss=6.4059 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=125 loss=6.284 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=125 loss=6.4474 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=125 loss=6.2822 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=126, living=1, active=1, bytes=211106
+elastic steps=0 emitted=126 loss=6.2293 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=126 loss=5.7422 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=126 loss=5.8256 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=126 loss=6.0164 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=126 loss=6.6562 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=126 loss=5.5138 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=126 loss=5.6458 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=126 loss=6.0754 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=127, living=1, active=1, bytes=211106
+elastic steps=0 emitted=127 loss=6.3696 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=127 loss=5.9105 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=127 loss=5.3581 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=127 loss=5.5252 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=127 loss=6.0623 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=127 loss=6.3263 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=127 loss=6.4292 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=127 loss=5.6505 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=128, living=1, active=1, bytes=211106
+elastic steps=0 emitted=128 loss=6.2593 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=128 loss=5.1854 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=128 loss=5.8438 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=128 loss=5.7416 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=128 loss=6.5277 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=128 loss=6.0981 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=128 loss=6.2078 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=128 loss=5.9939 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=129, living=1, active=1, bytes=211106
+elastic steps=0 emitted=129 loss=5.8775 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=129 loss=6.752 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=129 loss=6.6916 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=129 loss=6.0691 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=129 loss=6.3296 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=129 loss=6.0202 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=129 loss=5.9658 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=129 loss=6.4893 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=130, living=1, active=1, bytes=211106
+elastic steps=0 emitted=130 loss=5.9819 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=130 loss=6.2014 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=130 loss=5.7803 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=130 loss=5.7257 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=130 loss=5.8693 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=130 loss=6.5895 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=130 loss=6.0218 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=130 loss=6.1271 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=131, living=1, active=1, bytes=211106
+elastic steps=0 emitted=131 loss=6.3069 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=131 loss=5.8734 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=131 loss=5.8309 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=131 loss=5.8999 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=131 loss=6.099 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=131 loss=7.035 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=131 loss=6.0101 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=131 loss=5.7301 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=132, living=1, active=1, bytes=211106
+elastic steps=0 emitted=132 loss=6.2796 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=132 loss=6.4211 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=132 loss=6.5014 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=132 loss=6.1625 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=132 loss=6.0007 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=132 loss=6.295 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=132 loss=5.9158 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=132 loss=6.0681 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=133, living=1, active=1, bytes=211106
+elastic steps=0 emitted=133 loss=6.3104 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=133 loss=6.8181 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=133 loss=6.4129 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=133 loss=5.5997 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=133 loss=5.5974 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=133 loss=5.8964 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=133 loss=6.2615 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=133 loss=5.7661 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=134, living=1, active=1, bytes=211106
+elastic steps=0 emitted=134 loss=5.9274 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=134 loss=6.1605 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=134 loss=5.7814 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=134 loss=6.8026 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=134 loss=6.1017 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=134 loss=5.9256 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=134 loss=6.1455 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=134 loss=6.5485 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=135, living=1, active=1, bytes=211106
+elastic steps=0 emitted=135 loss=6.2978 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=135 loss=5.7726 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=135 loss=6.3203 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=135 loss=6.0462 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=135 loss=6.4763 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=135 loss=6.0898 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=135 loss=5.92 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=135 loss=6.2896 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=136, living=1, active=1, bytes=211106
+elastic steps=0 emitted=136 loss=6.8295 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=136 loss=6.0941 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=136 loss=6.01 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=136 loss=6.6082 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=136 loss=5.8043 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=136 loss=6.8922 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=136 loss=6.6076 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=136 loss=6.0392 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=137, living=1, active=1, bytes=211106
+elastic steps=0 emitted=137 loss=6.0423 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=137 loss=6.1003 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=137 loss=6.0521 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=137 loss=6.125 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=137 loss=5.5537 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=137 loss=5.8379 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=137 loss=6.1601 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=137 loss=6.8489 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=138, living=1, active=1, bytes=211106
+elastic steps=0 emitted=138 loss=6.1553 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=138 loss=5.9675 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=138 loss=5.8011 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=138 loss=6.6992 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=138 loss=6.4651 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=138 loss=5.921 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=138 loss=6.3792 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=138 loss=5.9261 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=139, living=1, active=1, bytes=211106
+elastic steps=0 emitted=139 loss=6.6307 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=139 loss=6.4189 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:04:03,125 httpx HTTP Request: GET https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data/train-00002-of-00004-a26307300439e943.parquet "HTTP/1.1 302 Found"
+elastic steps=10 emitted=139 loss=6.4742 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=139 loss=6.0993 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=139 loss=6.2522 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:04:03,846 httpx HTTP Request: GET https://us.aws.cdn.hf.co/xet-bridge-us/645e8da96320b0efe40ade7a/ce9ad676862e2a01f4b1dd0649b2d29440f5fca57b14530c0a9d739033d4e065?user_id=public&X-Xet-Cas-Uid=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27train-00002-of-00004-a26307300439e943.parquet%3B+filename%3D%22train-00002-of-00004-a26307300439e943.parquet%22%3B&xip=6LMmE6pGjeo&Expires=1792670643&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly91cy5hd3MuY2RuLmhmLmNvL3hldC1icmlkZ2UtdXMvNjQ1ZThkYTk2MzIwYjBlZmU0MGFkZTdhL2NlOWFkNjc2ODYyZTJhMDFmNGIxZGQwNjQ5YjJkMjk0NDBmNWZjYTU3YjE0NTMwYzBhOWQ3MzkwMzNkNGUwNjVcXD91c2VyX2lkPXB1YmxpYyZYLVhldC1DYXMtVWlkPXB1YmxpYyZyZXNwb25zZS1jb250ZW50LWRpc3Bvc2l0aW9uPWlubGluZSUzQitmaWxlbmFtZSUyQSUzRFVURi04JTI3JTI3dHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTNCK2ZpbGVuYW1lJTNEJTIydHJhaW4tMDAwMDItb2YtMDAwMDQtYTI2MzA3MzAwNDM5ZTk0My5wYXJxdWV0JTIyJTNCJnhpcD02TE1tRTZwR2plbyIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiRXBvY2hUaW1lIjoxNzkyNjcwNjQzfX19XX0_&Signature=MEYCIQCMwQ%7EjcOiDbDtI260KBuT2WT8MtvwrcDEPFk%7EgxfRR9wIhALzSp17dxr9nKOITseqsgCjWp%7ECOaBhlHOT3u-1slY2g&Key-Pair-Id=01KXEF4KZ1B6FV465MAWR4M21F&Hash-Algorithm=SHA256 "HTTP/1.1 206 Partial Content"
+elastic steps=40 emitted=139 loss=5.9694 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=139 loss=6.4188 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=139 loss=5.7287 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=140, living=1, active=1, bytes=211106
+elastic steps=0 emitted=140 loss=6.0627 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=140 loss=5.7864 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:04:04,681 fedpara.roomid discovery endpoint ws://127.0.0.1:8080/ws unavailable: sent 1011 (internal error) keepalive ping timeout; no close frame received
+elastic steps=10 emitted=140 loss=5.674 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=140 loss=5.6391 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=140 loss=6.1288 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=140 loss=6.2007 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:04:05,687 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-members living=1
+elastic steps=50 emitted=140 loss=6.2413 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=140 loss=5.8043 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=141, living=1, active=1, bytes=211106
+elastic steps=0 emitted=141 loss=6.2391 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=141 loss=6.1687 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=141 loss=6.3387 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=141 loss=5.9002 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=141 loss=6.34 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=141 loss=6.7446 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=141 loss=6.075 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=141 loss=5.6366 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=142, living=1, active=1, bytes=211106
+elastic steps=0 emitted=142 loss=5.6642 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=142 loss=5.8888 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=142 loss=6.4081 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:04:08,196 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-peer-joined living=2
+peer registered: p3dc1d57308a570c6d4376fb699851285
+2026-10-22 20:04:08,355 fedpara.elastic connecting peer=p3dc1d57308a570c6d4376fb699851285 pair=35d0eb961015 retry=0
+2026-10-22 20:04:08,356 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-connect role=None ice=new rtc=new
+2026-10-22 20:04:08,358 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=signaling-join role=None ice=new rtc=new
+2026-10-22 20:04:08,370 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 phase=waiting-peer role=initiator ice=new rtc=new
+2026-10-22 20:04:08,372 fedpara.snapshot full-model state DataChannel attached; awaiting open state=connecting
+elastic steps=20 emitted=142 loss=6.0559 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=30 emitted=142 loss=6.1197 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=40 emitted=142 loss=6.4672 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=142 loss=5.8783 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=142 loss=5.6835 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=143, living=2, active=1, bytes=211106
+elastic steps=0 emitted=143 loss=6.4798 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=143 loss=6.3776 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=10 emitted=143 loss=5.4468 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=20 emitted=143 loss=6.1593 active=1 living=2 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:04:10,203 fedpara.roomid room presence: peer=p4e5ea9e787b41e4af665ff175405d846 type=group-peer-left living=1
+elastic steps=30 emitted=143 loss=6.3408 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+2026-10-22 20:04:10,370 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE=closed role=initiator
+2026-10-22 20:04:10,370 fedpara.p2p P2P room=35d0eb9610151fa89b04ad96089ee702d4b4d1cdd14b40c9fa83ff0d34559761 ICE/DTLS=closed role=initiator
+elastic steps=40 emitted=143 loss=5.9515 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=50 emitted=143 loss=5.9351 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=60 emitted=143 loss=6.4348 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=144, living=1, active=1, bytes=211106
+elastic steps=0 emitted=144 loss=6.7505 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic steps=1 emitted=144 loss=5.9566 active=1 living=1 channels=0 authed=0 synced=1 peer=p4e5ea9e787b41e4af665ff175405d846
+elastic local event=145, living=1, active=1, bytes=211106

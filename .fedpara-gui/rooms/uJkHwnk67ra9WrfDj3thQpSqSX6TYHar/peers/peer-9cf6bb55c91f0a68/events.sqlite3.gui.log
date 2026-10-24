@@ -1,0 +1,41 @@
+bootstrap: downloading / loading packaged HF model sshleifer/tiny-gpt2 revision main
+W1023 14:56:56.234000 55034 site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-23 14:56:58,331 huggingface_hub.utils._http Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 11570.49it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+bootstrap: saved /Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/uJkHwnk67ra9WrfDj3thQpSqSX6TYHar/genesis.fstate semantic_sha256=0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5
+adaptive local policy: {"device": "mps", "batch_size": 1, "grad_accum": 4, "gradient_checkpointing": true, "wire_dtype": "float16", "local_steps": 64, "preferred_neighbors": 2, "memory_fraction": 0.35}
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 10092.86it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+adapter: {
+  "original": 102714,
+  "patch": 102714,
+  "groups": 28,
+  "dense_fallback": 28,
+  "layout": "003e3a9e0e6caed95f532c92fa8e05f9727a21048d70a28ac7f09d7ac08ba12c",
+  "resolved_revision": "fstate-sha256:0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5"
+}
+elastic optimization=continual-anchor-delta-v2
+elastic peer=p7f9328ee98c776ba79ec54ffc2568844 genesis=f5aef58ea31b544194a9f231759dda8c19c30c00b3005b1bbd2463b9f3558531 recovered=0 events; log=/Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/uJkHwnk67ra9WrfDj3thQpSqSX6TYHar/peers/peer-9cf6bb55c91f0a68/events.sqlite3
+JOIN WAIT: waiting-for-room-signaling: check Mummy /ws URL, version and port; lobby_online=False living=1 active=1 journal_events=0 neighbors=0 peer_errors={} snapshot_progress={}
+2026-10-23 14:57:00,680 fedpara.roomid room presence: peer=p7f9328ee98c776ba79ec54ffc2568844 type=group-members living=1
+ROOM GENESIS READY (no permanent admin): baseline is verified; new arrivals will download OUR verified snapshot
+JOIN READY: room-founder-from-first-roster; synced_events=0 living=1 active=1 peer=p7f9328ee98c776ba79ec54ffc2568844
+DATA SAMPLING peer=p7f9328ee98c776ba79ec54ffc2568844 seed=3059985866299050957 source=huggingface
+DATA BATCH READY fetch_s=10.0
+[transformers] `loss_type=None` was set in the config but it is unrecognized. Using the default loss: `ForCausalLMLoss`.
+elastic steps=1 emitted=0 loss=10.824 active=1 living=1 channels=0 authed=0 synced=1 peer=p7f9328ee98c776ba79ec54ffc2568844
+elastic local event=1, living=1, active=1, bytes=829206

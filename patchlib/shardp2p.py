@@ -13,6 +13,7 @@ import logging
 import os
 import secrets
 import tempfile
+import time
 from pathlib import Path
 
 from .core import PatchError
@@ -34,14 +35,27 @@ def ctrl(kind, **kwargs) -> str:
     return result
 
 
-async def _wait_buffer(channel):
+async def _wait_buffer(channel, *, stall_seconds: float = 45.0):
+    """Bound an SCTP buffer stall independently of RTC's open/closed state.
+
+    Progress extends the deadline; queued bytes that never drain MUST fail
+    rather than leaving a snapshot sender silently suspended forever.
+    """
+    previous=None
+    deadline=time.monotonic()+stall_seconds
     while channel.readyState == 'open' and channel.bufferedAmount > WINDOW:
+        amount=channel.bufferedAmount
+        if previous is None or amount < previous:
+            deadline=time.monotonic()+stall_seconds
+        if time.monotonic() >= deadline:
+            raise TimeoutError('snapshot SCTP send buffer made no progress')
+        previous=amount
         await asyncio.sleep(.015)
     if channel.readyState != 'open':
         raise ConnectionError('WebRTC DataChannel closed')
 
 
-async def send_manifest(channel, payload: bytes, signer=None):
+async def send_manifest(channel, payload: bytes, signer=None, on_progress=None):
     if not 0 < len(payload) <= MAX_SHARD_MANIFEST:
         raise PatchError('bad outgoing manifest')
     digest = hashlib.sha256(payload).hexdigest()
@@ -52,20 +66,24 @@ async def send_manifest(channel, payload: bytes, signer=None):
     for off in range(0,len(payload),CHUNK):
         await _wait_buffer(channel)
         channel.send(payload[off:off+CHUNK])
+        if on_progress: on_progress()
     await _wait_buffer(channel)
     channel.send(ctrl('manifest-end',sha256=digest))
 
 
-async def send_shard(channel, store: Path, digest: str, size: int):
+async def send_shard(channel, store: Path, digest: str, size: int, on_progress=None):
     path = _blob_path(store,digest)
     # Detect poisoned/corrupt local store before emitting even a header.
-    if not _check_object(path,digest,size):
+    # Hashing a 64 MiB shard can block SCTP keepalives if executed on the
+    # asyncio thread. Authentication/integrity stays mandatory, but runs offloop.
+    if not await asyncio.to_thread(_check_object,path,digest,size):
         raise PatchError('requested local shard absent/corrupted')
     channel.send(ctrl('shard-start',sha256=digest,size=size))
     with path.open('rb') as f:
         while data := f.read(CHUNK):
             await _wait_buffer(channel)
             channel.send(data)
+            if on_progress: on_progress()
     await _wait_buffer(channel)
     channel.send(ctrl('shard-end',sha256=digest))
 
@@ -74,8 +92,10 @@ class ShardSession:
     """Synchronous ordered DataChannel receiver state machine; fake-channel testable."""
     def __init__(self, store: Path, recv_dir: Path, *, local_manifest: Path | None = None,
                  max_state_bytes: int = 32*1024**3, verifier=None,
-                 require_model_match: bool = True, request_remote: bool = True):
+                 require_model_match: bool = True, request_remote: bool = True,
+                 defer_verify: bool = False):
         self.store, self.recv_dir = Path(store),Path(recv_dir)
+        self.defer_verify = bool(defer_verify)
         self.max_state_bytes,self.verifier = max_state_bytes,verifier
         self.require_model_match = require_model_match
         self.request_remote = request_remote
@@ -140,6 +160,11 @@ class ShardSession:
         if self.remote_meta is None or self.outstanding or self.remote_iterator is not None:
             return []
         if not self.remote_complete:
+            # LiveSnapshotLink runs the final hash verification in a worker
+            # thread: multi-GB synchronous hashing would stall all aiortc
+            # callbacks, keepalives, and peer event processing.
+            if self.defer_verify:
+                return []
             verify_shards(self.remote_meta,self.store)
             path = self.recv_dir / f'{self.remote_hash}.fmanifest'
             _atomic_write(path,self.remote_data)

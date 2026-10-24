@@ -50,11 +50,15 @@ def _cp(factors: list[torch.Tensor]) -> torch.Tensor:
 
 class FactorDelta(nn.Module):
     """Trainable factors. Base tensors are never modified by this class."""
-    def __init__(self, shape: tuple[int, ...], kind: str, rank: int, alpha: float):
+    def __init__(self, shape: tuple[int, ...], kind: str, rank: int, alpha: float,
+                 init_style: str = 'balanced'):
         super().__init__()
         if kind not in ("lora", "loha") or rank <= 0 or alpha <= 0:
             raise ValueError("kind must be lora/loha; rank and alpha must be positive")
         self.shape = tuple(int(x) for x in shape)
+        if init_style not in ('legacy','balanced'):
+            raise ValueError('invalid factor initialization')
+        self.init_style = init_style
         self.kind, self.rank, self.alpha = kind, rank, float(alpha)
         self.dense = len(shape) < 2 or min(shape) < rank
         self.parts = nn.ParameterList()
@@ -71,6 +75,13 @@ class FactorDelta(nn.Module):
                     # CP branch is nonzero, preventing the dead-gradient pitfall.
                     if (kind == "lora" and axis == len(shape)-1) or (kind == "loha" and group == 1 and axis == len(shape)-1):
                         nn.init.zeros_(x)
+                    elif init_style == 'balanced' and len(shape) == 2 and kind == 'loha':
+                        # The first CP product has RMS~1; the *other* product
+                        # is exactly zero at step zero but has a nonzero
+                        # derivative wrt its last factor. Legacy std=.02 in
+                        # BOTH branches made the LoHa startup gradient tiny.
+                        std = rank ** (-.25) if group == 0 else rank ** (-.5)
+                        nn.init.normal_(x, mean=0, std=std)
                     else:
                         nn.init.normal_(x, mean=0, std=0.2 if len(shape) > 2 else 0.02)
                     self.parts.append(nn.Parameter(x))
@@ -131,6 +142,11 @@ class Overlay(nn.Module):
     def forward(self, base: torch.Tensor) -> torch.Tensor:
         # Crucially average the *updates*, NOT the LoRA/LoHA factor matrices.
         delta = self.local.delta()
+        # Continual elastic mode keeps optimizer/factors across commits. A frozen
+        # low-rank anchor is subtracted so previously committed local factors
+        # cannot be counted twice. Legacy overlays have no anchor.
+        if hasattr(self, 'anchor'):
+            delta = delta - self.anchor.delta()
         for remote in self.remotes.values():
             delta = delta + remote.delta()
         delta = delta / (1 + len(self.remotes))
@@ -148,7 +164,8 @@ class Group:
 class UniversalAdapter:
     def __init__(self, model: nn.Module, model_id: str, revision: str, *,
                  kind: str = 'loha', rank: int = 16, alpha: float | None = None,
-                 max_peers: int = 8):
+                 max_peers: int = 8, target_scope: str = 'all',
+                 init_style: str = 'balanced'):
         if rank <= 0 or max_peers < 1:
             raise ValueError('rank and max_peers must be positive')
         if kind not in ('lora', 'loha'):
@@ -156,11 +173,24 @@ class UniversalAdapter:
         self.model, self.model_id, self.revision = model, model_id, revision
         self.kind, self.rank = kind, rank
         self.alpha = float(rank if alpha is None else alpha)
+        if target_scope not in ('all','gpt_neo_linear','gpt_neo_full'):
+            raise ValueError('unsupported target_scope')
+        self.target_scope = target_scope
+        self.init_style = init_style
         self.max_peers = max_peers
         self.lock = threading.RLock()
         self.groups: list[Group] = []
         self.remote_versions: dict[str, int] = {}
         self._attach()
+        if self.target_scope in ('gpt_neo_linear','gpt_neo_full'):
+            # Filtering adapter targets is NOT enough: excluded pretrained
+            # parameters must be frozen too. Otherwise autograd still computes
+            # embedding/LM head/LayerNorm gradients (and optimizer scope is
+            # misleading), wasting memory and potentially leaking grads.
+            trainable_ids={id(param) for g in self.groups for param in g.overlay.local.parts}
+            for param in self.model.parameters():
+                if id(param) not in trainable_ids:
+                    param.requires_grad_(False)
         if not self.groups:
             raise ValueError('No trainable floating-point PyTorch Parameters found')
         self.layout = self._layout_digest()
@@ -173,6 +203,21 @@ class UniversalAdapter:
             for pname, param in list(module.named_parameters(recurse=False)):
                 if not isinstance(param, nn.Parameter) or not param.is_floating_point() or param.is_sparse:
                     continue
+                if self.target_scope in ('gpt_neo_linear','gpt_neo_full'):
+                    # GPT-Neo selected layers. Full mode additionally includes
+                    # token/position embeddings and the LM head. Tied token
+                    # embedding + LM head are grouped by Parameter identity,
+                    # then registered with the SAME Overlay (no double update).
+                    linear = (pname == 'weight' and isinstance(module, nn.Linear)
+                              and re.fullmatch(r'transformer\.h\.\d+\.(?:attn\.attention\.(?:q_proj|k_proj|v_proj|out_proj)|mlp\.(?:c_fc|c_proj))', module_path))
+                    word_or_position = (pname == 'weight' and isinstance(module, nn.Embedding)
+                                        and module_path in ('transformer.wte','transformer.wpe'))
+                    head = (pname == 'weight' and isinstance(module, nn.Linear)
+                            and module_path == 'lm_head')
+                    selected = linear or (self.target_scope == 'gpt_neo_full'
+                                          and (word_or_position or head))
+                    if not (selected and len(param.shape) == 2 and min(param.shape) >= self.rank):
+                        continue
                 if param.device.type == 'meta':
                     raise ValueError(f'Meta-device param {module_path}.{pname} must be materialized first')
                 fullname = (module_path + '.' + pname).lstrip('.')
@@ -181,7 +226,11 @@ class UniversalAdapter:
         for owner_entries in owners.values():
             name, _, _, param = owner_entries[0]
             aliases = tuple(item[0] for item in owner_entries)
-            overlay = Overlay(FactorDelta(tuple(param.shape), self.kind, self.rank, self.alpha))
+            # Parameters are instantiated on CPU by default; the model may already
+            # have been placed on MPS/CUDA. Keep factors in fp32, on the SAME
+            # device as the original weight (also important for tied weights).
+            overlay = Overlay(FactorDelta(tuple(param.shape), self.kind, self.rank, self.alpha,
+                                          init_style=self.init_style)).to(device=param.device)
             # One overlay object and one original Parameter for tied aliases.
             param.requires_grad_(False)
             for _, module, pname, _ in owner_entries:

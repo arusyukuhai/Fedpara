@@ -1,0 +1,193 @@
+{
+  "status": "SYNTHETIC_OPTIMIZER_BENCHMARK",
+  "peers": 8,
+  "epochs": 24,
+  "seed": 20261022,
+  "lr": 0.04,
+  "local_steps": 4,
+  "ridge": 0.0,
+  "loss_first": {
+    "legacy": 4.396352767944336,
+    "v2": 3.936054229736328
+  },
+  "loss_last": {
+    "legacy": 6.831040082033724e-05,
+    "v2": 5.9537673223530874e-05
+  },
+  "optimizer_time_s": {
+    "legacy": 0.06259858299745247,
+    "v2": 0.04587491700658575
+  },
+  "elapsed_s": 0.12078441699850373,
+  "trace": [
+    {
+      "epoch": 1,
+      "online": 8,
+      "legacy_heldout_mse": 4.396352767944336,
+      "v2_heldout_mse": 3.936054229736328,
+      "v2_event_set_hash": "f760a7f76d9266df8f9af9306f031af5b01744e3168cdd6e19b36f1c35635ca7"
+    },
+    {
+      "epoch": 2,
+      "online": 8,
+      "legacy_heldout_mse": 2.3559370040893555,
+      "v2_heldout_mse": 1.909700870513916,
+      "v2_event_set_hash": "9a19a790b133e191695580678bde2fa3253396e9e64c4bd2e1411f6439d5d328"
+    },
+    {
+      "epoch": 3,
+      "online": 6,
+      "legacy_heldout_mse": 1.2648515701293945,
+      "v2_heldout_mse": 0.9444902539253235,
+      "v2_event_set_hash": "616c741ef1469d65e855ea96e14a870d307a983463476c7a610c844ae631e611"
+    },
+    {
+      "epoch": 4,
+      "online": 8,
+      "legacy_heldout_mse": 0.6971412897109985,
+      "v2_heldout_mse": 0.4796728193759918,
+      "v2_event_set_hash": "49d569340878f99eafbb736fc9f053433bf1bc52bbc2ce4ae583cd06a05128a3"
+    },
+    {
+      "epoch": 5,
+      "online": 8,
+      "legacy_heldout_mse": 0.39151298999786377,
+      "v2_heldout_mse": 0.2505117356777191,
+      "v2_event_set_hash": "cff9b5f6fcf3f61d33f6dd868b892c0094c02d385f3d542971e35949d6a0befa"
+    },
+    {
+      "epoch": 6,
+      "online": 8,
+      "legacy_heldout_mse": 0.21941575407981873,
+      "v2_heldout_mse": 0.1302172988653183,
+      "v2_event_set_hash": "7d385b2cfd77de2a685609bdcbd07d8d56e4311f90c9f3940a6c2b9b934df356"
+    },
+    {
+      "epoch": 7,
+      "online": 8,
+      "legacy_heldout_mse": 0.12513437867164612,
+      "v2_heldout_mse": 0.06939587742090225,
+      "v2_event_set_hash": "bec4a391ce9e5756e29920015e18cded97c3695182f987aaac138cf0edd53823"
+    },
+    {
+      "epoch": 8,
+      "online": 6,
+      "legacy_heldout_mse": 0.07149286568164825,
+      "v2_heldout_mse": 0.03722979873418808,
+      "v2_event_set_hash": "5c1b43d461fb1b878b59a1ceaee5443f78d42219fddcb203217625815cfe63a3"
+    },
+    {
+      "epoch": 9,
+      "online": 8,
+      "legacy_heldout_mse": 0.04132690280675888,
+      "v2_heldout_mse": 0.020181557163596153,
+      "v2_event_set_hash": "f215cce731d5966343eae994750d9eb55551fa8b5fbf1d172adb1260542d6a2a"
+    },
+    {
+      "epoch": 10,
+      "online": 8,
+      "legacy_heldout_mse": 0.02367360144853592,
+      "v2_heldout_mse": 0.010798817500472069,
+      "v2_event_set_hash": "caf377d97877bf6aa86522981544acdfcca23d3b8d3a7ee59e45dd4dc554712c"
+    },
+    {
+      "epoch": 11,
+      "online": 8,
+      "legacy_heldout_mse": 0.013869846239686012,
+      "v2_heldout_mse": 0.005959903821349144,
+      "v2_event_set_hash": "1556dbe69fc036475637294d4ccfeacfdfbdf796d3437c28ee94725d33843b36"
+    },
+    {
+      "epoch": 12,
+      "online": 8,
+      "legacy_heldout_mse": 0.007992645725607872,
+      "v2_heldout_mse": 0.0032152500934898853,
+      "v2_event_set_hash": "67c1afbc1e1aab0e2da9476d93d3efaddbad6e744fafcfba0fe15d4e59162948"
+    },
+    {
+      "epoch": 13,
+      "online": 6,
+      "legacy_heldout_mse": 0.0049142371863126755,
+      "v2_heldout_mse": 0.0019169114530086517,
+      "v2_event_set_hash": "2d5854e8768161457f7946626d79e8faebed350382162c6fa18823e57644069f"
+    },
+    {
+      "epoch": 14,
+      "online": 8,
+      "legacy_heldout_mse": 0.002850267104804516,
+      "v2_heldout_mse": 0.0010522058000788093,
+      "v2_event_set_hash": "29171b9e8c3e950f8cb793cd711b6fdc2a068c34e671707686028865c40fa9ba"
+    },
+    {
+      "epoch": 15,
+      "online": 8,
+      "legacy_heldout_mse": 0.0017312727868556976,
+      "v2_heldout_mse": 0.0006120562320575118,
+      "v2_event_set_hash": "6c425a54b2ba33faeebc804fe5b7cd972995be974ed75430b575817a99e1e0a1"
+    },
+    {
+      "epoch": 16,
+      "online": 8,
+      "legacy_heldout_mse": 0.001015491783618927,
+      "v2_heldout_mse": 0.000352270231815055,
+      "v2_event_set_hash": "cdfe549b68503b00e57f921e698884eab4507416f4a75da52135bdf8de122930"
+    },
+    {
+      "epoch": 17,
+      "online": 8,
+      "legacy_heldout_mse": 0.0006399871781468391,
+      "v2_heldout_mse": 0.00021991509129293263,
+      "v2_event_set_hash": "cf143b5cbdfbf99bba6b52c1a32c11b742ec9333afdaa7032593ae198bf38e9f"
+    },
+    {
+      "epoch": 18,
+      "online": 6,
+      "legacy_heldout_mse": 0.00037993944715708494,
+      "v2_heldout_mse": 0.0001367423392366618,
+      "v2_event_set_hash": "1d85e7356fa4e2e61ddd14ce9de3491e87395e6a013c4b21bcdd322476fbb9ff"
+    },
+    {
+      "epoch": 19,
+      "online": 8,
+      "legacy_heldout_mse": 0.00025496879243291914,
+      "v2_heldout_mse": 9.562271588947624e-05,
+      "v2_event_set_hash": "6955bd3f57cdf1971931f6f8d84760bd5ff207067c0b0bcf3e19e076493ed213"
+    },
+    {
+      "epoch": 20,
+      "online": 8,
+      "legacy_heldout_mse": 0.00016846295329742134,
+      "v2_heldout_mse": 8.057557715801522e-05,
+      "v2_event_set_hash": "c3a7550402749f3a66579591b0a663a553fcf8fa08739ad1c7c8b871d2d4ab0a"
+    },
+    {
+      "epoch": 21,
+      "online": 8,
+      "legacy_heldout_mse": 0.0001246775354957208,
+      "v2_heldout_mse": 6.297635263763368e-05,
+      "v2_event_set_hash": "dd7340cbed35d7de884d3e4eff9a224e8495300216a75cbc79c2d745c23a6260"
+    },
+    {
+      "epoch": 22,
+      "online": 8,
+      "legacy_heldout_mse": 9.730302554089576e-05,
+      "v2_heldout_mse": 6.645220855716616e-05,
+      "v2_event_set_hash": "f26d44d3375e4c78218ca09211c070c4b5c2659cfddca1aaaaeba0ba288a9bd3"
+    },
+    {
+      "epoch": 23,
+      "online": 6,
+      "legacy_heldout_mse": 6.845246389275417e-05,
+      "v2_heldout_mse": 4.5003540435573086e-05,
+      "v2_event_set_hash": "fefd2216cf72c4e3cad827847705e932bb374ba60d217b384909263d5bd4a083"
+    },
+    {
+      "epoch": 24,
+      "online": 8,
+      "legacy_heldout_mse": 6.831040082033724e-05,
+      "v2_heldout_mse": 5.9537673223530874e-05,
+      "v2_event_set_hash": "b914b0c5f576f95701f5ce4b24fa8a4425ed3282f874add8a64848bc22cc0fe9"
+    }
+  ],
+  "warning": "In-process synthetic SGD study, NOT WebRTC and NOT real LLM training. No quality advantage is assumed."
+}

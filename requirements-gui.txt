@@ -1,0 +1,3 @@
+# Optional OS-native WebView UI; requires a desktop session.
+# Install with: python -m pip install -r requirements-gui.txt
+pywebview>=5,<7

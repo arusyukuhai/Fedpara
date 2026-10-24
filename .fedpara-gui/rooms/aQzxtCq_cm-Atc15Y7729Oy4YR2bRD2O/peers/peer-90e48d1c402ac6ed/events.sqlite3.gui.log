@@ -1,0 +1,38 @@
+bootstrap: downloading / loading packaged HF model sshleifer/tiny-gpt2 revision main
+2026-10-22 21:12:44,447 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+W1022 21:12:44.543000 28705 site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
+2026-10-22 21:12:45,469 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2 "HTTP/1.1 200 OK"
+2026-10-22 21:12:45,663 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/main "HTTP/1.1 200 OK"
+2026-10-22 21:12:45,860 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/discussions?p=0 "HTTP/1.1 200 OK"
+2026-10-22 21:12:46,065 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/refs%2Fpr%2F2 "HTTP/1.1 200 OK"
+2026-10-22 21:12:46,251 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+2026-10-22 21:12:46,433 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors "HTTP/1.1 302 Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-22 21:12:46,434 huggingface_hub.utils._http Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 9342.92it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+bootstrap: saved /Users/al/Documents/GitHub/Fedpara/.fedpara-gui/rooms/aQzxtCq_cm-Atc15Y7729Oy4YR2bRD2O/genesis.fstate semantic_sha256=0b90522d21fe49645219c21d4f2f0ffa17c2ab1d1775299441c80b1bf23041f5
+adaptive local policy: {"device": "mps", "batch_size": 1, "grad_accum": 4, "gradient_checkpointing": true, "wire_dtype": "float16", "local_steps": 64, "preferred_neighbors": 2, "memory_fraction": 0.35}
+2026-10-22 21:12:46,780 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/revision/main "HTTP/1.1 200 OK"
+2026-10-22 21:12:46,967 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2 "HTTP/1.1 200 OK"
+2026-10-22 21:12:47,161 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/main "HTTP/1.1 200 OK"
+2026-10-22 21:12:47,351 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/discussions?p=0 "HTTP/1.1 200 OK"
+2026-10-22 21:12:47,561 httpx HTTP Request: GET https://huggingface.co/api/models/sshleifer/tiny-gpt2/commits/refs%2Fpr%2F2 "HTTP/1.1 200 OK"
+2026-10-22 21:12:47,741 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+2026-10-22 21:12:47,926 httpx HTTP Request: HEAD https://huggingface.co/sshleifer/tiny-gpt2/resolve/refs%2Fpr%2F2/model.safetensors "HTTP/1.1 302 Found"
+Loading weights:   0%|          | 0/28 [00:00<?, ?it/s]Loading weights: 100%|██████████| 28/28 [00:00<00:00, 15333.66it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: sshleifer/tiny-gpt2
+Key                                   | Status     |  | 
+--------------------------------------+------------+--+-
+transformer.h.{0, 1}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+/Users/al/.pyenv/versions/3.13.15/lib/python3.13/multiprocessing/resource_tracker.py:479: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/mp-ot66nvzw'}
+  warnings.warn(

@@ -220,6 +220,19 @@ def verify_state(path: str | Path, *, max_bytes: int = 32 * 1024**3) -> dict:
     return meta
 
 
+def semantic_state_sha256(path: str | Path, *, verify: bool = False) -> str:
+    """Stable identity for tensor contents irrespective of ZIP timestamps/peer_id.
+
+    verify=True checks actual shard bytes against tensor SHA-256 values; callers
+    importing untrusted data must verify before trusting the identity.
+    """
+    meta = verify_state(path) if verify else inspect_state(path)
+    tensors = [{'name':t['name'],'dtype':t['dtype'],'shape':t['shape'],
+                'sha256':t['sha256']} for t in meta['tensors']]
+    return hashlib.sha256(_canonical_json({'model_id':meta['model_id'],
+                   'revision':meta['revision'],'tensors':tensors})).hexdigest()
+
+
 def apply_state(model: torch.nn.Module, path: str | Path, *, model_id: str,
                 revision: str, max_bytes: int = 32 * 1024**3) -> dict:
     """Verify complete incoming archive *before* mutating model parameters.
@@ -260,4 +273,61 @@ def apply_state(model: torch.nn.Module, path: str | Path, *, model_id: str,
                         raise PatchError('unexpected EOF applying snapshot')
                     src = torch.frombuffer(bytearray(raw), dtype=torch.uint8).view(t.dtype)
                     dest[offset:offset+count].copy_(src.to(t.device))
+    return meta
+
+
+def apply_effective_state(model: torch.nn.Module, adapter: 'UniversalAdapter', path: str | Path, *,
+                          model_id: str, revision: str, max_bytes: int = 32*1024**3) -> dict:
+    """Apply a *fully verified* peer snapshot to parametrized model base tensors.
+
+    This is only safe at a quiescent training boundary and after checking the
+    signed snapshot event tip matches the local durable event journal. The
+    snapshot includes effective LoRA/LoHA weights, not internal factor tensors.
+    """
+    meta=verify_state(path,max_bytes=max_bytes)
+    if (meta['model_id'],meta['revision'])!=(model_id,revision):
+        raise PatchError('incoming snapshot has wrong model or revision')
+    own=model.state_dict(keep_vars=True)
+    mapped={k:v for k,v in own.items() if '.parametrizations.' not in ('.'+k+'.')
+            and not k.startswith('parametrizations.')}
+    with adapter.lock:
+        for group in adapter.groups:
+            for alias in group.aliases:
+                module,_,attr=alias.rpartition('.')
+                mapped[alias]=model.get_submodule(module).parametrizations[attr].original
+        if set(mapped)!={x['name'] for x in meta['tensors']}:
+            raise PatchError('snapshot state names differ from local model')
+        for spec in meta['tensors']:
+            dest=mapped[spec['name']]
+            if tuple(dest.shape)!=tuple(spec['shape']) or str(dest.dtype)!=spec['dtype']:
+                raise PatchError('snapshot dtype/shape mismatch: '+spec['name'])
+        with zipfile.ZipFile(path) as z,torch.no_grad():
+            for spec in meta['tensors']:
+                dest=mapped[spec['name']]
+                # Bounded copies for common contiguous tensors.
+                if dest.is_contiguous():
+                    flat=dest.reshape(-1)
+                    block=max(1,CHUNK_BYTES//dest.element_size())
+                    with z.open(spec['entry']) as inp:
+                        for start in range(0,flat.numel(),block):
+                            length=min(block,flat.numel()-start)
+                            data=inp.read(length*dest.element_size())
+                            if len(data)!=length*dest.element_size():
+                                raise PatchError('truncated snapshot tensor')
+                            src=torch.frombuffer(bytearray(data),dtype=torch.uint8).view(dest.dtype)
+                            flat[start:start+length].copy_(src.to(device=dest.device))
+                else:
+                    data=z.read(spec['entry'])
+                    src=torch.frombuffer(bytearray(data),dtype=torch.uint8).view(dest.dtype).reshape(dest.shape)
+                    dest.copy_(src.to(device=dest.device))
+        # Snapshot already includes all committed deltas. Newly initialized
+        # factors must not re-add an old local update.
+        from .core import FactorDelta
+        with torch.no_grad():
+            for group in adapter.groups:
+                factor=group.overlay.local
+                fresh=FactorDelta(group.shape,adapter.kind,adapter.rank,adapter.alpha)
+                for existing,new in zip(factor.parts,fresh.parts):
+                    existing.copy_(new.to(device=existing.device,dtype=existing.dtype))
+                    existing.grad=None
     return meta

@@ -1,6 +1,20 @@
-# Latest: room-scoped Hugging Face dataset collections + native desktop GUI
+**2026-10-23 LoHa rank16 audit:** [README_LOHA_RANK16_AUDIT_2026_10_23.md](README_LOHA_RANK16_AUDIT_2026_10_23.md). Balanced LoHa initialization, GPT-Neo target selection, AdamW LR schedule, baseline/training-loss diagnostics.
 
-See [README_HF_DATASETS_DESKTOP.md](README_HF_DATASETS_DESKTOP.md). The GUI now uses Tkinter, not a local HTTP server; room v2 descriptors contain actionable HF dataset repositories/splits/configs/column mappings/weights used by `train-live`.
+**新機能 — 分散学習の有効性ベンチマーク（同一トークン予算、LoHa、ピア数補正時間）＋黒背景/emerald-500 GUI:** [README_EFFECTIVENESS_BENCHMARK_2026_10_23.md](README_EFFECTIVENESS_BENCHMARK_2026_10_23.md)。
+
+**Two-window peer discovery and crash-resume fixes:** see [README_JOIN_RESUME_FIX.md](README_JOIN_RESUME_FIX.md). GUI windows now acquire independent persistent profiles; current local LoHA and AdamW tensors are snapshotted on each optimizer step.
+
+**Apple MPS update-validation fix:** See [README_MPS_FLOAT64_FIX.md](README_MPS_FLOAT64_FIX.md).
+
+# Automatic genesis and MPS/CUDA fix
+
+**New:** See [README_AUTOBOOT_DEVICE.md](README_AUTOBOOT_DEVICE.md). The WebView initial `.fstate` field is optional; automatic HF genesis creation runs in a child process. LoRA/LoHA parameter-device placement is fixed. This does NOT yet implement automatic peer-assisted initial model transfer.
+
+# Fedpara — WebView Desktop GUI + Hugging Face dataset collections
+
+Run `python -m patchlib.cli gui` after installing `requirements-gui.txt` to open a standalone desktop window rendered from bundled HTML/CSS/JavaScript with a Python bridge. **No localhost HTTP server or GUI port is used.** See [README_WEBVIEW.md](README_WEBVIEW.md).
+
+The room v2 manifest stores actionable Hugging Face dataset repo/config/split/revision/columns/weights, not just descriptive text. The training process directly consumes these via the Python `datasets` loader.
 
 # Fedpara Adaptive P2P
 
@@ -127,3 +141,17 @@ safetensors loading, signed P2P expert forward/backward primitives and demo,
 quantized expert bases, CPU/NVMe paging, packed-vs-unpacked MoE router support,
 and GUI custom source upload. These are intentionally NOT described as complete
 integration with the earlier asynchronous LoHA FedAvg trainer.
+
+## New: Verified live full-model catch-up
+
+See [README_LIVE_FULL_SNAPSHOT.md](README_LIVE_FULL_SNAPSHOT.md). A newly joined
+room peer now downloads a signed, sharded **current effective model** on a
+second DataChannel, checks the event vector clock, and only then may train.
+Diagnose persistent `active=1` with `scripts/check_live_p2p.py`.
+
+### Experimental Elastic v2 evaluation and redesigned room directory
+
+See [README_ELASTIC_V2.md](README_ELASTIC_V2.md) for the new deterministic
+buffered aggregation library, signed epoch proposal codec, reproducible optimizer
+A/B, opt-in Swarm counterfactual analysis and searchable room directory.
+Live training remains on the stable V1 protocol until epoch consensus is implemented.
