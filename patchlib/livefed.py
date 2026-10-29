@@ -197,11 +197,8 @@ class FedAvgRound:
                         raise PatchError('averaged model weights became nonfinite')
                     dest.copy_(accum.to(dest.dtype))
                 # Reset factor values in-place; no changes to graph structure.
-                fresh = FactorDelta(group.shape,self.adapter.kind,
-                                    self.adapter.rank,self.adapter.alpha)
-                for old,new in zip(spec.parts,fresh.parts):
-                    old.copy_(new.to(device=old.device,dtype=old.dtype))
-                    old.grad = None
+                from .relora import _refresh_spec
+                _refresh_spec(spec)
             result = RoundResult(
                 round=self.round,
                 anchor=round_anchor(self.anchor,self.round,self.patches),
@@ -239,7 +236,7 @@ def parse_peer_keys(raw_keys: list[str]) -> dict[str, Path]:
     return out
 
 
-async def train_live(args, *, load_model: Callable, training_batches: Callable,
+async def _train_live_impl(args, *, load_model: Callable, training_batches: Callable,
                      run_step: Callable):
     """Run one PatchNode per peer, train until a send or incoming contribution.
 
@@ -277,9 +274,11 @@ async def train_live(args, *, load_model: Callable, training_batches: Callable,
         raise ValueError('invalid kind')
     # Apply model state before adapter creation via load_model(). The resolved
     # revision is fstate-sha256:<digest> and binds base bytes unambiguously.
+    from .mixed_learning_v65 import spec as mixed_learning_spec
+    mixed_protocol=mixed_learning_spec(args)
     base_ref = _canonical_json({'model_id':adapter.model_id, 'revision':adapter.revision,
                                 'layout':adapter.layout, 'kind':adapter.kind,
-                                'rank':adapter.rank, 'alpha':adapter.alpha})
+                                'rank':adapter.rank, 'alpha':adapter.alpha, **({'mixed_learning_protocol':mixed_protocol} if mixed_protocol is not None else {})})
     anchor = hashlib.sha256(base_ref).hexdigest()
     engine = FedAvgRound(adapter,args.peer_id,roster,anchor,
                          max_delta_rms=args.max_delta_rms)
@@ -397,3 +396,13 @@ async def train_live(args, *, load_model: Callable, training_batches: Callable,
                     await asyncio.sleep(.03)
         for task in tasks.values(): task.cancel()
         await asyncio.gather(*tasks.values(),return_exceptions=True)
+
+
+async def train_live(args, *, load_model, training_batches, run_step):
+    """Always release mixed-data workers and persist the latest local Critic."""
+    try:
+        return await _train_live_impl(args,load_model=load_model,
+                                     training_batches=training_batches,run_step=run_step)
+    finally:
+        from .cli import _close_mixed_trainer
+        await asyncio.to_thread(_close_mixed_trainer,args)

@@ -10,6 +10,7 @@ import pytest
 from patchlib.swarm_sim import LocalSignaling, SwarmRunner, inventory_report, compare_fstates
 from patchlib.room_manifest import make_manifest
 from patchlib.state import export_state
+from patchlib.topology import neighbors
 
 
 def run(coro):return asyncio.run(coro)
@@ -26,28 +27,40 @@ async def signaled_group_roundtrip():
             for i in range(8):
                 c=await websockets.connect(server.url)
                 ws.append(c)
-                m={'type':'group-join','room':room,'peer':identities[i]}
+                m={'type':'group-join','room':room,'peer':identities[i],
+                   'topology_v2':True,'topology_degree':8}
                 if i==0:m['manifest']=mani
                 await c.send(json.dumps(m))
                 reply=json.loads(await asyncio.wait_for(c.recv(),2))
                 assert reply['type']=='group-members'
-                assert reply['peers']==identities[:i]
+                assert reply['topology']=='bounded-v2'
+                assert set(reply['peers'])==neighbors(identities[i],identities[:i+1])
                 assert reply['manifest']==mani
                 assert reply['existing_room']==(i>0)
                 if i>0:
                     for previous in ws[:-1]:
-                        notification=json.loads(await asyncio.wait_for(previous.recv(),2))
-                        assert notification=={'type':'group-peer-joined','peer':identities[i]}
+                        old_peer=identities[ws.index(previous)]
+                        old_set=neighbors(old_peer,identities[:i])
+                        new_set=neighbors(old_peer,identities[:i+1])
+                        if old_set!=new_set:
+                            notification=json.loads(await asyncio.wait_for(previous.recv(),2))
+                            assert notification['type']=='group-neighbors'
+                            assert set(notification['peers'])==new_set
             # Genuine TCP close, not mocked membership event.
             await ws[4].close()
             for idx, previous in enumerate(ws):
                 if idx==4:continue
-                notification=json.loads(await asyncio.wait_for(previous.recv(),2))
-                assert notification=={'type':'group-peer-left','peer':identities[4]}
+                old_set=neighbors(identities[idx],identities)
+                new_set=neighbors(identities[idx],[p for j,p in enumerate(identities) if j!=4])
+                if old_set!=new_set:
+                    notification=json.loads(await asyncio.wait_for(previous.recv(),2))
+                    assert notification['type']=='group-neighbors'
+                    assert set(notification['peers'])==new_set
             ws[4]=await websockets.connect(server.url)
-            await ws[4].send(json.dumps({'type':'group-join','room':room,'peer':identities[4]}))
+            await ws[4].send(json.dumps({'type':'group-join','room':room,'peer':identities[4],
+                                          'topology_v2':True,'topology_degree':8}))
             reply=json.loads(await asyncio.wait_for(ws[4].recv(),2))
-            assert set(reply['peers'])==set(identities)-{identities[4]}
+            assert set(reply['peers'])==neighbors(identities[4],identities)
             assert server.stats['group_joins']==9
         finally:
             for c in ws:await c.close()

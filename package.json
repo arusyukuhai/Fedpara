@@ -1,0 +1,13 @@
+{
+  "name": "fedpara-desktop-gui",
+  "private": true,
+  "version": "15.0.0",
+  "description": "Offline-built Tailwind CSS for Fedpara pywebview (no runtime CDN)",
+  "scripts": {
+    "build:css": "node scripts/build_tailwind.mjs",
+    "check:css": "node scripts/build_tailwind.mjs --check"
+  },
+  "devDependencies": {
+    "tailwindcss": "4.1.10"
+  }
+}

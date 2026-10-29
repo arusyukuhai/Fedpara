@@ -1,0 +1,965 @@
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,7 @@
++# Kagami v81 — reproducible old-Actor checkpoint verification
++
++See [README_V81.md](README_V81.md) for the v81 implementation, mathematics, and operational limits.
++
+ # Kagami v53 update
+ 
+ See **README_V53_STATUS.md** for automatic certified-epoch trainer adoption, signed adjacent-epoch P2P update repair, verified zero-copy checkpoint views, validation and remaining limitations. This is not complete 4,096-peer automatic finalization.
+
+--- /dev/null
++++ b/README_V81.md
+@@ -0,0 +1,49 @@
++# Kagami v81 — Reproducible Old-Actor Probability Checkpoints
++
++## What changed
++
++The v80 `behavior_logp` **signed claims** are not accepted as sufficient evidence for a recipient-side Critic update. v81 adds a NEW, room-policy-pinned, checkpoint-verification protocol:
++
++1. Immediately **before** a new PPO rollout samples its first token, the source Actor copies **all trainable model parameter tensors** under the existing `adapter.lock`. The source also hashes *every nontrainable model parameter and buffer*, including dtype, shape and stable tensor name. The resulting safetensors blob includes the frozen-base fingerprint and is SHA-256 content-addressed.
++2. `KCP81` signed, bounded 48-KiB checkpoint pages are persisted by the separate durable trajectory journal; `KTR81` contains the source's complete signed rollout and checkpoint digest. Both bind to the room's v81 trajectory genesis and a certified Actor epoch. Each event is signed by its origin; relays cannot change event payloads. No Critic gradient/head delta is received.
++3. Existing bounded `trajectory-frontier/trajectory-need` anti-entropy retransmits missing pages, even across reconnects. Exact-repeat snapshots are reused within the same source Actor epoch. Journal persistence and a rebuildable SQLite page index tolerate interrupted index transactions.
++4. A recipient waits until all signed checkpoint pages are present, concatenates them, checks the signed provenance and **full** content SHA-256, verifies the certified Actor epoch, and validates all trainable names/dtypes/shapes/finite values *before* touching its current Actor.
++5. The recipient **requires its own frozen-base tensors and buffers to have an identical hash**, temporarily loads the old trainable Actor tensors, does an `eval()` full-forward pass on the exact prompt and chosen-token prefixes, computes `log(mu(a_t | s_t))`, compares to signed reported values (2e-3 absolute per-token guard), and **uses the independently recomputed values** in the unclipped trajectory IS Critic objective. The current Actor is restored in `finally`; its gradients/optimizer are not updated during imported-Critic replay.
++6. The local Critic value head/AdamW state and applied receipt remain stored atomically as in v80. Checkpoint-missing, mismatched, corrupted, unrepresentable and legacy-v80 events never generate successful Critic update receipts.
++
++## Conditional math
++
++For actions `a_0...a_(T-1)` sampled from the recorded old Actor `mu`, current recipient Actor `pi`, and terminal reward `R`, let
++
++`w_<t = exp(sum_(j<t) [log pi(a_j|s_j) - log mu(a_j|s_j)])` and
++`W = exp(sum_(j<T) [log pi(a_j|s_j) - log mu(a_j|s_j)])`.
++
++The existing v79 loss is
++
++`L = 1/(2T) * sum_t [ w_<t * V(s_t)^2 - 2*W*V(s_t)*G_t + W*G_t^2 ]`, with `G_t = gamma^(T-1-t) * R`.
++
++With genuinely sampled trajectories, a fixed target Actor per receiver step, a common prompt distribution/tokenizer/action space, identical reward semantics, exact probabilities, support and integrability, its Critic **gradient is unbiased in expectation** for the target-policy Monte Carlo value objective. In v81 **the recipient can now validate/recalculate the denominator policy probabilities from an immutable tensor commitment**, rather than taking signed decimal values at face value. Floating-point backend differences and the explicit bounded numerical guard mean this is a conditional mathematical result, not exact real-number computation.
++
++**What v81 DOES NOT prove:** A sender's signature and reproducible weights do not cryptographically prove it actually sampled its reported actions from that Actor or submitted an unbiased prompt population. Arbitrary fabricated trajectories can still bias empirical training. This is not a proof of arbitrary Byzantine data honesty, global Critic convergence, exact PPO Actor replay, or finite-variance IS. Weight clipping is intentionally absent; numeric overflow aborts the update rather than silently introducing a clipped IS bias.
++
++## Important limits / operator expectations
++
++- **v81 is a new protocol and new room**, pinned by `version=pt-sft-clipped-ppo-v81`, `critic_distribution=checkpoint-verified-trajectory-is-v81`, and `behavior_policy_proof=content-addressed-trainable-checkpoint-frozen-base-sha256-v81`. Old v80 rooms/events cannot be silently upgraded.
++- **Common frozen base required.** This version cannot reconstruct a previous epoch with different *frozen* base tensors on the recipient. It rejects such samples. For cross-base migration, a future version must add durable, separately verified, immutable full-base snapshot archives and compatible-model execution replay. Merely knowing the actor journal cursor is insufficient.
++- **Max per behavior snapshot: 64 MiB**, 48-KiB chunks, max 2,048 pages. Large adapters fail closed rather than weakening authenticity. This can be a major bandwidth/disk/time cost: approximately checkpoint-size bytes per new changed Actor rollout per receiving edge, plus fanout/retries. Snapshots are only deduplicated when identical *within the same epoch*. No delta compression or safe distributed archival GC is implemented yet. The v80 512-MiB trajectory journal cap remains; long-running use can exhaust storage.
++- **Byte-identical model base is necessary but not sufficient** to guarantee matching execution. The root model revision, forward implementation, tokenizer IDs, operator semantics and nondeterministic GPU behavior must also be compatible. v81 uses 2e-3 tolerance to distinguish ordinary low-precision backend discrepancies from a false reported probability; it always trains from its *recomputed* log probabilities.
++- **Receiver verification is expensive**: load actor adapter, compute frozen-base fingerprint, replay full-forward selected actions, restore current adapter, then run its current Actor and Critic again. Existing event loop currently performs this synchronously under the lock, and should be moved to a bounded accelerator-aware worker for production clusters.
++- Existing v80 caveats persist for privacy of tokenized prompts and reference labels, unbounded un-clipped IS variance, independent peers' optimization orders, and lack of real WAN/GPU/long-duration distributed fault-injection tests.
++- This is a **strict opt-in** distributed Critic PPO feature. Local/non-trajectory training is unchanged.
++
++## Main files
++
++- `patchlib/behavior_checkpoint_v81.py`: immutable trainable snapshot and frozen-base tensor digest, safe temporary restoration and independent log-probability replay.
++- `patchlib/trajectory_gossip_v81.py`: checkpoint-page and trajectory signed protocols, content-addressed replay, reconstruction and resilient receiving.
++- `patchlib/mixed_learning_v65.py`, `patchlib/cli.py`, `patchlib/elasticnet.py`: pinned v81 policy, pre-sampling capture and signed publication/anti-entropy/fenced replay.
++- `web/desktop_webview.js`, `web/desktop_webview.html`: v81 GUI support and explicit size/cost warning.
++- `tests/test_behavior_checkpoint_v81.py`: working two-peer CPU toy PPO replay; forged logp, source/recipient divergence, frozen-base mismatch, cross-restart gaps, tampering, conflict, page reindexing and unchanged-checkpoint reuse.
++
++## Validation
++
++Targeted CPU tests: `PYTEST_V81_FOCUSED.log` (**71 passed**; run before the final probability-substitution adjustment), and a subsequent 28-test subset **passed** after that adjustment. Full `pytest tests` started but exceeded the environment's execution time cap at 15% with no failure printed in the partial log; do NOT interpret this as a full-suite pass. No multi-host real-network stress test performed.
+
+--- /dev/null
++++ b/patchlib/behavior_checkpoint_v81.py
+@@ -0,0 +1,133 @@
++"""Byte-committed, reproducible behavior-policy adapter checkpoints.
++
++Every trainable tensor that can affect the model forward is captured; all other
++parameter and buffer bytes are committed as an immutable-base SHA-256. Replay
++is permitted only on a recipient whose own frozen base is exactly identical.
++This is an exact-value commitment, NOT a proof the sender sampled honestly.
++"""
++from __future__ import annotations
++import hashlib
++import json
++import math
++from contextlib import contextmanager
++
++import torch
++from safetensors.torch import save as safe_save, load as safe_load
++from .core import PatchError, _canonical_json
++
++MAX_CHECKPOINT_BYTES = 64 * 1024**2
++MAX_CHECKPOINT_PAGES = 2048
++PAGE_BYTES = 48 * 1024
++LOGP_ATOL = 2e-3  # cached-vs-full forward and cross-device floating point tolerance
++
++
++def _tensor_digest(items):
++    h=hashlib.sha256(b'KAGAMI-V81-MODEL-TENSOR-COMMITMENT\0')
++    for name, tensor in sorted(items, key=lambda x:x[0]):
++        x=tensor.detach().to('cpu').contiguous()
++        if x.layout != torch.strided:
++            raise PatchError('non-dense actor tensor cannot be replayed')
++        header=_canonical_json([name,str(x.dtype),list(x.shape)])
++        h.update(len(header).to_bytes(4,'big'));h.update(header)
++        h.update(memoryview(x.reshape(-1).view(torch.uint8).numpy()))
++    return h.hexdigest()
++
++
++def _parts(model):
++    all_params=list(model.named_parameters())
++    if len({id(p) for _,p in all_params})!=len(all_params):
++        raise PatchError('tied/shared parameters require an explicit behavior replay contract')
++    live=[(n,p) for n,p in all_params if p.requires_grad]
++    frozen=[('parameter:'+n,p) for n,p in all_params if not p.requires_grad]
++    frozen.extend(('buffer:'+n,b) for n,b in model.named_buffers())
++    if not live:
++        raise PatchError('no trainable Actor parameters to checkpoint')
++    return live,frozen
++
++
++def capture(model):
++    """Capture under the SAME model/adapter lock, before the first rollout token."""
++    live,frozen=_parts(model)
++    tensors={n:p.detach().to('cpu').contiguous().clone() for n,p in live}
++    if not all(bool(torch.isfinite(t).all()) for t in tensors.values()):
++        raise PatchError('nonfinite sampled Actor weights')
++    meta={'version':'actor-trainable-and-frozen-sha256-v81',
++          'base_sha256':_tensor_digest(frozen),
++          'weights':sorted(tensors)}
++    blob=safe_save(tensors,metadata={'behavior':_canonical_json(meta).decode('utf8')})
++    if len(blob)>MAX_CHECKPOINT_BYTES:
++        raise PatchError('Actor behavior checkpoint exceeds 64MiB v81 bound')
++    return blob
++
++
++def digest(blob):
++    if not isinstance(blob,bytes) or not 0<len(blob)<=MAX_CHECKPOINT_BYTES:
++        raise PatchError('invalid behavior checkpoint size')
++    return hashlib.sha256(blob).hexdigest()
++
++
++def _validated(model,blob):
++    if not isinstance(blob,bytes) or not 0<len(blob)<=MAX_CHECKPOINT_BYTES:
++        raise PatchError('oversized behavior checkpoint')
++    # safetensors.load does not expose file metadata; use the in-memory safe_open
++    # equivalent via a tiny, strictly bounded header reader.
++    if len(blob)<8:raise PatchError('truncated behavior checkpoint')
++    size=int.from_bytes(blob[:8],'little')
++    if not 0<size<=1024*1024 or size>len(blob)-8:
++        raise PatchError('invalid behavior checkpoint header')
++    try:
++        hdr=json.loads(blob[8:8+size]);meta=json.loads(hdr['__metadata__']['behavior'])
++        tensors=safe_load(blob)
++    except (KeyError,ValueError,TypeError,RuntimeError) as exc:
++        raise PatchError('corrupt behavior checkpoint') from exc
++    if (not isinstance(meta,dict) or set(meta)!={'version','base_sha256','weights'} or
++        meta['version']!='actor-trainable-and-frozen-sha256-v81' or
++        not isinstance(meta['weights'],list) or meta['weights']!=sorted(tensors)):
++        raise PatchError('behavior checkpoint layout mismatch')
++    live,frozen=_parts(model)
++    if set(tensors)!={n for n,_ in live}:
++        raise PatchError('behavior Actor trainable layout differs from recipient')
++    if meta['base_sha256']!=_tensor_digest(frozen):
++        raise PatchError('behavior Actor frozen base differs from recipient; cannot replay')
++    staged=[]
++    for name,param in live:
++        t=tensors[name]
++        if t.dtype!=param.dtype or t.shape!=param.shape or not bool(torch.isfinite(t).all()):
++            raise PatchError('behavior Actor weight dtype/shape/finite mismatch')
++        staged.append((param,t.to(device=param.device)))
++    return staged
++
++
++@contextmanager
++def temporarily_loaded(model,blob):
++    """Restore ALL trainable params and model mode even when forward raises."""
++    staged=_validated(model,blob)  # validate ALL before first model mutation
++    original=[(p,p.detach().clone()) for p,_ in staged]
++    was_training=model.training
++    try:
++        with torch.no_grad():
++            for p,w in staged:p.copy_(w)
++        model.eval()
++        yield
++    finally:
++        with torch.no_grad():
++            for p,w in original:p.copy_(w)
++        model.train(was_training)
++
++
++def replay_logps(model,blob,rollout,args,device):
++    """Independently recompute mu(a_t | prompt,a_<t) from restored Actor."""
++    from .mixed_learning_v65 import _logits
++    from torch.nn import functional as F
++    prompt=rollout['prompt'];actions=rollout['tokens'];n=len(actions)
++    ids=torch.tensor([prompt+actions],device=device,dtype=torch.long)
++    with temporarily_loaded(model,blob),torch.no_grad():
++        out=_logits(model,ids,args,start=len(prompt)-1,length=n)
++        actual=F.log_softmax(out.float(),dim=-1).gather(
++            -1,torch.tensor(actions,device=device).view(1,n,1)).view(n)
++    claimed=torch.tensor(rollout['behavior_logp'],dtype=torch.float64,device=device)
++    if actual.numel()!=n or not bool(torch.isfinite(actual).all()):
++        raise PatchError('nonfinite checkpoint Actor likelihoods')
++    if not bool(torch.all(torch.abs(actual.double()-claimed)<=LOGP_ATOL)):
++        raise PatchError('behavior probabilities disagree with reproducible Actor checkpoint')
++    return actual.detach().to('cpu').tolist()
+
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -567,7 +567,7 @@
+                     args._v77_critic_before=before
+                 if (getattr(args,'critic_rollout_gossip',False) and getattr(args,'mode',None)=='elastic'
+                         and mixer.reuses==1):
+-                    args._v80_rollout_pending=mixer.export_rollout_v80()
++                    args._v80_rollout_pending=(mixer.export_rollout_v80(),mixer.cached['behavior_checkpoint_v81'])
+                 if mixer.critic_steps%10==0 and not getattr(mixer,'_v75_paired',False):
+                     mixer.save_critic()
+                 total+=float(ppo_actor.detach())*args.ppo_weight
+
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -424,7 +424,7 @@
+                 'generation-carry-offer','generation-carry-need','generation-carry-chunk'):
+             return False  # A signed v1 update must never cross epochs.
+         if kind != 'hello' and not self.hello_sent:
+-            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, critic_v78=True, trajectory_v80=True,
++            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, critic_v78=True, trajectory_v81=True,
+                     **({'generation_root':self.generation_root} if self.generation_root else {}),
+                     **({'pub':self.public_key} if self.public_key else {})):
+                 return False
+@@ -823,7 +823,7 @@
+                         # Capability negotiation preserves compatibility with
+                         # older v3 peers that do not understand 'frontier'.
+                         self.remote_supports_critic = decoded.get('critic_v78') is True
+-                        self.remote_supports_rollout = decoded.get('trajectory_v80') is True
++                        self.remote_supports_rollout = decoded.get('trajectory_v81') is True
+                         self.remote_supports_frontier = decoded.get('frontier_v1') is True
+                         self.remote_supports_aggregate = decoded.get('aggregate_v1') is True
+                         self.remote_supports_snapshot_pages = decoded.get('snapshot_tip_pages_v1') is True
+@@ -1727,13 +1727,13 @@
+             allowed_actor_epochs=critic_known_epochs,actor_epoch=genesis)
+         args._v65_mixer._v75_paired=_v75_paired_active
+         if getattr(args,'critic_rollout_gossip',False):
+-            from .trajectory_gossip_v80 import TrajectoryGossip
+-            trajectory_gossip=TrajectoryGossip(
+-                Path(str(args.journal)+'.trajectory-v80.sqlite3'),critic_gossip.genesis,args._v65_mixer,
++            from .trajectory_gossip_v81 import VerifiedTrajectoryGossip
++            trajectory_gossip=VerifiedTrajectoryGossip(
++                Path(str(args.journal)+'.trajectory-v81.sqlite3'),critic_gossip.genesis,args._v65_mixer,
+                 args.peer_id,signer,pub=room_pub if room_only else None,
+                 trusted=trusted,allowed_epochs=critic_gossip.known_actor_epochs,
+                 actor_epoch=genesis,max_bytes=min(args.max_journal_gb*1024**3,512*1024**2))
+-            print('SIGNED TRAJECTORY REPLAY active; Critic weight delta broadcasts disabled',flush=True)
++            print('V81 CHECKPOINT-VERIFIED TRAJECTORY REPLAY active; only fully reproduced behavior probabilities update Critic',flush=True)
+         print('DISTRIBUTED CRITIC active signed_events='
+               f'{critic_gossip.journal.count()} lane={critic_gossip.genesis[:16]}',flush=True)
+     critic_step_lock=asyncio.Lock()
+@@ -2417,9 +2417,9 @@
+                 wire=node.incoming.get_nowait()
+                 if not isinstance(wire,bytes):
+                     raise PatchError('nonbinary elastic event')
+-                if wire.startswith(b'KTR80\0'):
++                if wire.startswith((b'KTR81\0',b'KCP81\0')):
+                     if trajectory_gossip is None or not node.remote_supports_rollout:
+-                        raise PatchError('unexpected v80 trajectory frame')
++                        raise PatchError('unexpected v81 trajectory/checkpoint frame')
+                     async with critic_step_lock:
+                         with adapter.lock:
+                             fresh=trajectory_gossip.ingest(wire)
+@@ -2431,9 +2431,11 @@
+                                     not other.outgoing.full() and not other.bridge_only):
+                                 other.outgoing.put_nowait(wire)
+                     continue
++                if wire.startswith(b'KTR80\0') and trajectory_gossip is not None:
++                    raise PatchError('v81 room rejects unsigned-checkpoint v80 trajectory')
+                 if wire.startswith(b'KVC78\0'):
+                     if trajectory_gossip is not None:
+-                        raise PatchError('v80 rollout room must not ingest old Critic parameter deltas')
++                        raise PatchError('v81 rollout room must not ingest old Critic parameter deltas')
+                     if critic_gossip is None or not node.remote_supports_critic:
+                         raise PatchError('unexpected signed Critic frame in a non-v78 room')
+                     async with critic_step_lock:
+@@ -2607,16 +2609,18 @@
+                 wire=node.incoming.get_nowait()
+                 if not isinstance(wire,bytes):
+                     raise PatchError('malformed old DataChannel event at handoff')
+-                if wire.startswith(b'KTR80\0'):
++                if wire.startswith((b'KTR81\0',b'KCP81\0')):
+                     if trajectory_gossip is None:
+-                        raise PatchError('unexpected trajectory frame at epoch handoff')
++                        raise PatchError('unexpected v81 trajectory/checkpoint at epoch handoff')
+                     async with critic_step_lock:
+                         with adapter.lock:
+                             trajectory_gossip.ingest(wire)
+                     continue
++                if wire.startswith(b'KTR80\0') and trajectory_gossip is not None:
++                    raise PatchError('v80 trajectory forbidden in v81 epoch handoff')
+                 if wire.startswith(b'KVC78\0'):
+                     if trajectory_gossip is not None:
+-                        raise PatchError('old-generation Critic delta in a v80 rollout room')
++                        raise PatchError('old-generation Critic delta in a v81 rollout room')
+                     if critic_gossip is None:
+                         raise PatchError('unexpected Critic frame at epoch handoff')
+                     async with critic_step_lock:
+@@ -3575,22 +3579,31 @@
+                     before=getattr(args,'_v77_critic_before',None)
+                     args._v77_critic_before=None
+                     if trajectory_gossip is not None:
+-                        from .trajectory_gossip_v80 import validate_rollout
+                         sample=getattr(args,'_v80_rollout_pending',None)
+                         args._v80_rollout_pending=None
+                         with adapter.lock:
+                             if sample is not None:
+                                 from .localprogress import _tip
+-                                signed=trajectory_gossip.local(sample,actor_tip=_tip(journal))
++                                rollout,checkpoint=sample
++                                # Fail locally before making a signed claim:
++                                # full forward on the frozen source snapshot must
++                                # reproduce all observed sampling log-probs.
++                                from .behavior_checkpoint_v81 import replay_logps
++                                from .cli import input_device
++                                replay_logps(model,checkpoint,rollout,args,input_device(model,args.device))
++                                signed=trajectory_gossip.local(rollout,checkpoint=checkpoint,actor_tip=_tip(journal))
+                             else:
+                                 trajectory_gossip.persist()  # repeated PPO step
+                         if sample is not None:
+                             for ps in slots.values():
+                                 nd=ps.node
+-                                if (nd is not None and nd.remote_supports_rollout and
+-                                    nd.verified_at and not nd.outgoing.full() and not nd.bridge_only):
+-                                    nd.outgoing.put_nowait(signed)
+-                        # v80 substitutes recipient-side Critic training for
++                                if nd is not None and nd.remote_supports_rollout and nd.verified_at and not nd.bridge_only:
++                                    for frame in signed:
++                                        if nd.outgoing.full():break
++                                        nd.outgoing.put_nowait(frame)
++                            # Remaining pages are recovered via durable v81
++                            # trajectory frontier/need instead of unbounded queues.
++                        # v81 substitutes recipient-side Critic training for
+                         # weight delta gossip (avoid duplicated experience).
+                         before=None
+                     if before is not None:
+
+--- a/patchlib/mixed_learning_v65.py
++++ b/patchlib/mixed_learning_v65.py
+@@ -77,8 +77,9 @@
+         generated['critic_offpolicy']='unclipped-trajectory-is-mc-v79'
+         generated['version']='pt-sft-clipped-ppo-v79'
+     if getattr(args,'critic_rollout_gossip',False):
+-        generated['critic_distribution']='signed-trajectory-recipient-is-v80'
+-        generated['version']='pt-sft-clipped-ppo-v80'
++        generated['critic_distribution']='checkpoint-verified-trajectory-is-v81'
++        generated['behavior_policy_proof']='content-addressed-trainable-checkpoint-frozen-base-sha256-v81'
++        generated['version']='pt-sft-clipped-ppo-v81'
+     if not getattr(args,'mix_policy',None):
+         return generated
+     path=Path(args.mix_policy)
+@@ -115,11 +116,11 @@
+         if not getattr(args,'distributed_critic',False):
+             raise MixedLearningError('trajectory gossip requires --distributed-critic')
+         if getattr(args,'ppo_reward','token_match') not in ('exact','token_match'):
+-            raise MixedLearningError('v80 trajectory relay requires receiver-verifiable reference rewards; HF reward not supported')
++            raise MixedLearningError('v81 trajectory relay requires receiver-verifiable reference rewards; HF reward not supported')
+         if resolved_mode(args)!='trajectory_is':
+-            raise MixedLearningError('v80 distributed trajectory replay requires un-clipped trajectory_is')
++            raise MixedLearningError('v81 distributed trajectory replay requires un-clipped trajectory_is')
+         if int(getattr(args,'max_length',1024))>4096:
+-            raise MixedLearningError('v80 signed trajectory frame requires max_length <= 4096')
++            raise MixedLearningError('v81 signed trajectory frame requires max_length <= 4096')
+     if getattr(args,'distributed_critic',False):
+         if not source_selected(args,'ppo') or float(getattr(args,'ppo_weight',.2))<=0:
+             raise MixedLearningError('distributed Critic v78 currently needs a PPO dataset on every Critic participant')
+@@ -424,6 +425,14 @@
+         max_new=min(self.args.ppo_max_tokens,self.args.max_length-len(prompt))
+         if max_new<=0:
+             raise MixedLearningError('no room for PPO generation')
++        # Snapshot the EXACT old Actor before its first sampling forward.
++        # run_step holds adapter.lock, so no concurrent P2P/optimizer write
++        # can change a tensor between this capture and rollout generation.
++        if getattr(self.args,'critic_rollout_gossip',False):
++            from .behavior_checkpoint_v81 import capture
++            checkpoint=capture(model)
++        else:
++            checkpoint=None
+         was_training=model.training
+         model.eval()
+         try:
+@@ -496,7 +505,8 @@
+                         'tokens':torch.tensor(chosen,device=device),
+                         'old_lp':torch.stack(old_lp).detach(), 'old_values':old_values.detach(),
+                         'adv':adv.detach(),'returns':returns.detach(), 'reward':reward,
+-                        'critic_prefixes':prefixes, 'reference_tokens':reference}
++                        'critic_prefixes':prefixes, 'reference_tokens':reference,
++                        'behavior_checkpoint_v81':checkpoint}
+         finally:
+             model.train(was_training)
+ 
+
+--- a/patchlib/trajectory_gossip_v80.py
++++ b/patchlib/trajectory_gossip_v80.py
+@@ -125,9 +125,9 @@
+     after compute but before commit reloads the prior snapshot; it does not
+     apply a permanently half-committed value update twice.
+     """
+-    def __init__(self,path,root_genesis,mixer,self_id,signer,*,pub=None,trusted=None,allowed_epochs,actor_epoch,max_bytes=256*1024**2):
++    def __init__(self,path,root_genesis,mixer,self_id,signer,*,pub=None,trusted=None,allowed_epochs,actor_epoch,max_bytes=256*1024**2,_lane_tag="v80"):
+         if not _id(root_genesis):raise PatchError('invalid rollout room genesis')
+-        self.genesis=hashlib.sha256(('kagami-signed-rollout-v80:'+root_genesis).encode()).hexdigest()
++        self.genesis=hashlib.sha256(('kagami-signed-rollout-'+_lane_tag+':'+root_genesis).encode()).hexdigest()
+         self.journal=EventJournal(path,self.genesis,max_bytes=max_bytes)
+         self.mixer=mixer;self.self_id=self_id;self.signer=signer;self.pub=pub;self.trusted=trusted or {}
+         self.allowed_epochs=allowed_epochs;self.actor_epoch=actor_epoch
+
+--- /dev/null
++++ b/patchlib/trajectory_gossip_v81.py
+@@ -0,0 +1,295 @@
++"""Kagami v81: signed, content-addressed behavior checkpoint + verified PPO IS.
++
++KCP81 pages are independently authenticated, journaled, and requested through
++existing bounded trajectory frontier/need gossip. KTR81 references their exact
++checkpoint digest. A missing checkpoint NEVER produces an applied receipt.
++"""
++from __future__ import annotations
++import hashlib
++import json
++import math
++import struct
++from .core import PatchError, PEER_ID, _canonical_json
++from .trajectory_gossip_v80 import (TrajectoryGossip, validate_rollout,
++    MAX_WIRE, MAX_HEAD, _id)
++from .behavior_checkpoint_v81 import (PAGE_BYTES, MAX_CHECKPOINT_PAGES,
++    MAX_CHECKPOINT_BYTES, digest as checkpoint_digest, replay_logps)
++
++TR_MAGIC=b'KTR81\0'
++CP_MAGIC=b'KCP81\0'
++TR_DOMAIN=b'KAGAMI-V81-CHECKPOINTED-TRAJECTORY\0'
++CP_DOMAIN=b'KAGAMI-V81-CHECKPOINT-PAGE\0'
++
++
++def _seal(head,payload,signer,magic,domain):
++    signed=domain+_canonical_json(head)
++    head=dict(head)
++    head['signature']=signer(len(signed),hashlib.sha256(signed).hexdigest())
++    encoded=_canonical_json(head)
++    frame=magic+struct.pack('!I',len(encoded))+encoded+payload
++    if len(encoded)>MAX_HEAD or len(frame)>MAX_WIRE:
++        raise PatchError('checkpointed trajectory frame exceeds wire limit')
++    return frame
++
++
++def _open(wire,magic,domain,genesis,epochs,trusted):
++    if not isinstance(wire,bytes) or not wire.startswith(magic) or not len(magic)+4<len(wire)<=MAX_WIRE:
++        raise PatchError('invalid v81 trajectory/checkpoint frame')
++    hsize=struct.unpack('!I',wire[len(magic):len(magic)+4])[0]
++    if not 0<hsize<=MAX_HEAD or len(wire)<=len(magic)+4+hsize:
++        raise PatchError('invalid v81 event header size')
++    try:head=json.loads(wire[len(magic)+4:len(magic)+4+hsize])
++    except (UnicodeDecodeError,TypeError,ValueError) as exc:raise PatchError('invalid v81 signed header') from exc
++    if not isinstance(head,dict):raise PatchError('invalid v81 header fields')
++    origin=head.get('origin');seq=head.get('seq');epoch=head.get('actor_epoch')
++    if (not isinstance(origin,str) or not PEER_ID.fullmatch(origin) or
++        type(seq) is not int or not 1<=seq<2**63 or
++        head.get('genesis')!=genesis or not _id(epoch) or epoch not in epochs):
++        raise PatchError('v81 origin or certified Actor epoch mismatch')
++    payload=wire[len(magic)+4+hsize:]
++    if (type(head.get('size')) is not int or head['size']!=len(payload) or
++        not _id(head.get('sha256')) or hashlib.sha256(payload).hexdigest()!=head['sha256']):
++        raise PatchError('v81 payload commitment mismatch')
++    if 'pub' in head:
++        from .roomid import identity_from_public_b64
++        verify=identity_from_public_b64(head['pub'],origin)
++    else:verify=(trusted or {}).get(origin)
++    if verify is None:raise PatchError('unauthenticated v81 event origin')
++    sig=head.get('signature')
++    signed=domain+_canonical_json({k:v for k,v in head.items() if k!='signature'})
++    verify({'size':len(signed),'sha256':hashlib.sha256(signed).hexdigest(),'sig':sig})
++    return head,payload
++
++
++def _head(origin,seq,genesis,epoch,payload,pub):
++    if not isinstance(origin,str) or not PEER_ID.fullmatch(origin) or type(seq) is not int or not 1<=seq<2**63 or not _id(genesis) or not _id(epoch):
++        raise PatchError('invalid v81 signed event identity')
++    h={'origin':origin,'seq':seq,'genesis':genesis,'actor_epoch':epoch,
++       'size':len(payload),'sha256':hashlib.sha256(payload).hexdigest()}
++    if pub is not None:
++        from .roomid import identity_from_public_b64
++        identity_from_public_b64(pub,origin)
++        h['pub']=pub
++    return h
++
++
++def page_wire(origin,seq,genesis,epoch,blob,index,signer,*,pub=None):
++    if not isinstance(blob,bytes) or not blob or len(blob)>MAX_CHECKPOINT_BYTES:
++        raise PatchError('invalid v81 behavior checkpoint')
++    total=(len(blob)+PAGE_BYTES-1)//PAGE_BYTES
++    if total>MAX_CHECKPOINT_PAGES or type(index) is not int or not 0<=index<total:
++        raise PatchError('v81 checkpoint page index overflow')
++    payload=blob[index*PAGE_BYTES:(index+1)*PAGE_BYTES]
++    head=_head(origin,seq,genesis,epoch,payload,pub)
++    head.update(checkpoint=checkpoint_digest(blob),index=index,total=total,checkpoint_size=len(blob))
++    return _seal(head,payload,signer,CP_MAGIC,CP_DOMAIN)
++
++
++def parse_page(wire,genesis,epochs,trusted=None):
++    h,p=_open(wire,CP_MAGIC,CP_DOMAIN,genesis,epochs,trusted)
++    if (set(h)-{'origin','seq','genesis','actor_epoch','size','sha256','pub','signature',
++               'checkpoint','index','total','checkpoint_size'} or
++        not {'checkpoint','index','total','checkpoint_size','signature'}<=set(h) or
++        not _id(h['checkpoint']) or type(h['index']) is not int or
++        type(h['total']) is not int or type(h['checkpoint_size']) is not int or
++        not 1<=h['total']<=MAX_CHECKPOINT_PAGES or
++        not 0<=h['index']<h['total'] or not 0<h['checkpoint_size']<=MAX_CHECKPOINT_BYTES or
++        (h['checkpoint_size']+PAGE_BYTES-1)//PAGE_BYTES!=h['total'] or
++        len(p)!=min(PAGE_BYTES,h['checkpoint_size']-h['index']*PAGE_BYTES)):
++        raise PatchError('invalid v81 checkpoint page commitment')
++    return h,p
++
++
++def rollout_wire(origin,seq,genesis,epoch,rollout,checkpoint,signer,*,pub=None,actor_tip=None):
++    validate_rollout(rollout,max_length=4096)
++    if not _id(checkpoint):raise PatchError('missing behavior Actor checkpoint hash')
++    payload=_canonical_json(rollout)
++    head=_head(origin,seq,genesis,epoch,payload,pub)
++    head['checkpoint']=checkpoint
++    if actor_tip is not None:
++        if (not isinstance(actor_tip,list) or len(actor_tip)!=2 or type(actor_tip[0]) is not int or
++            actor_tip[0]<0 or not (actor_tip[1] is None or
++            (isinstance(actor_tip[1],list) and len(actor_tip[1])==3 and
++             isinstance(actor_tip[1][0],str) and PEER_ID.fullmatch(actor_tip[1][0]) and
++             type(actor_tip[1][1]) is int and actor_tip[1][1]>0 and _id(actor_tip[1][2])))):
++            raise PatchError('invalid v81 Actor journal cursor')
++        head['actor_tip']=actor_tip
++    return _seal(head,payload,signer,TR_MAGIC,TR_DOMAIN)
++
++
++def parse_rollout(wire,genesis,epochs,trusted=None,*,reward_mode,max_length):
++    h,p=_open(wire,TR_MAGIC,TR_DOMAIN,genesis,epochs,trusted)
++    if (set(h)-{'origin','seq','genesis','actor_epoch','size','sha256','pub','signature','checkpoint','actor_tip'} or
++        'signature' not in h or not _id(h.get('checkpoint'))):
++        raise PatchError('missing v81 authenticated behavior checkpoint commitment')
++    if 'actor_tip' in h:
++        tip=h['actor_tip']
++        if not (isinstance(tip,list) and len(tip)==2 and type(tip[0]) is int and tip[0]>=0 and
++                (tip[1] is None or (isinstance(tip[1],list) and len(tip[1])==3 and
++                isinstance(tip[1][0],str) and PEER_ID.fullmatch(tip[1][0]) and
++                type(tip[1][1]) is int and tip[1][1]>0 and _id(tip[1][2])))):
++            raise PatchError('invalid v81 signed journal cursor')
++    try:d=json.loads(p)
++    except (ValueError,UnicodeDecodeError,TypeError) as exc:raise PatchError('malformed v81 trajectory') from exc
++    validate_rollout(d,max_length=max_length,reward_mode=reward_mode)
++    return h,d
++
++
++class VerifiedTrajectoryGossip(TrajectoryGossip):
++    """Fail-closed receiver of KCP81 pages and KTR81 trajectories.
++
++    Deduplicates signed pages; stores only page indices (not duplicate blobs).
++    Rebuilds an incomplete index from the durable event journal on restart.
++    """
++    def __init__(self,*args,**kwargs):
++        kwargs['_lane_tag']='v81'
++        super().__init__(*args,**kwargs)
++        self.journal.db.execute('''CREATE TABLE IF NOT EXISTS v81_pages
++            (origin TEXT NOT NULL, checkpoint TEXT NOT NULL, idx INTEGER NOT NULL,
++             total INTEGER NOT NULL, checkpoint_size INTEGER NOT NULL,
++             actor_epoch TEXT NOT NULL, seq INTEGER NOT NULL,
++             PRIMARY KEY(origin,checkpoint,idx))''')
++        self.journal.db.execute('''CREATE TABLE IF NOT EXISTS v81_rollouts
++            (origin TEXT NOT NULL, seq INTEGER NOT NULL, checkpoint TEXT NOT NULL,
++             actor_epoch TEXT NOT NULL, PRIMARY KEY(origin,seq))''')
++        self.journal.db.commit()
++        self._reindex()
++
++    def _reindex(self):
++        # Rebuild orphaned index rows after a crash between EventJournal's
++        # fsynced append and v81 index commit (no cross-file transaction).
++        for origin,seq in self.journal.db.execute('''SELECT e.origin,e.seq FROM events e
++            LEFT JOIN v81_rollouts r ON e.origin=r.origin AND e.seq=r.seq
++            LEFT JOIN v81_pages p ON e.origin=p.origin AND e.seq=p.seq
++            WHERE r.seq IS NULL AND p.seq IS NULL ORDER BY e.origin,e.seq''').fetchall():
++            wire=self.journal.get(origin,seq)
++            if wire is None:raise PatchError('missing immutable v81 event archive')
++            self._index(wire,origin,seq)
++
++    def _index(self,wire,origin,seq):
++        if wire.startswith(CP_MAGIC):
++            h,_=parse_page(wire,self.genesis,self.allowed_epochs,self.trusted)
++            if (h['origin'],h['seq'])!=(origin,seq):raise PatchError('invalid v81 stored page identity')
++            prior=self.journal.db.execute('SELECT seq FROM v81_pages WHERE origin=? AND checkpoint=? AND idx=?',
++                (origin,h['checkpoint'],h['index'])).fetchone()
++            if prior is not None and prior[0]!=seq:
++                raise PatchError('conflicting behavior checkpoint page index')
++            with self.journal.db:
++                self.journal.db.execute('''INSERT OR IGNORE INTO v81_pages
++                    (origin,checkpoint,idx,total,checkpoint_size,actor_epoch,seq)
++                    VALUES(?,?,?,?,?,?,?)''',
++                    (origin,h['checkpoint'],h['index'],h['total'],h['checkpoint_size'],h['actor_epoch'],seq))
++        elif wire.startswith(TR_MAGIC):
++            h,_=parse_rollout(wire,self.genesis,self.allowed_epochs,self.trusted,
++                               reward_mode=self.reward_mode,max_length=self.max_length)
++            if (h['origin'],h['seq'])!=(origin,seq):raise PatchError('invalid v81 stored rollout identity')
++            with self.journal.db:
++                self.journal.db.execute('INSERT OR IGNORE INTO v81_rollouts(origin,seq,checkpoint,actor_epoch) VALUES(?,?,?,?)',
++                                      (origin,seq,h['checkpoint'],h['actor_epoch']))
++        else:raise PatchError('mixed v80/v81 or Actor event in v81 trajectory journal')
++
++    def local(self,rollout,*,checkpoint=None,actor_tip=None):
++        validate_rollout(rollout,max_length=self.max_length,reward_mode=self.reward_mode)
++        d=checkpoint_digest(checkpoint)
++        total=(len(checkpoint)+PAGE_BYTES-1)//PAGE_BYTES
++        frames=[]
++        existing=self.journal.db.execute('''SELECT idx,actor_epoch,total,checkpoint_size FROM v81_pages
++            WHERE origin=? AND checkpoint=?''',(self.self_id,d)).fetchall()
++        if any(e[1]!=self.actor_epoch or e[2]!=total or e[3]!=len(checkpoint) for e in existing):
++            raise PatchError('v81 checkpoint was already committed under a different Actor epoch')
++        have={e[0] for e in existing}
++        # Content addressing avoids re-shipping unchanged policies and also
++        # resumes a partially journaled checkpoint after a local crash.
++        for i in range(total):
++            if i in have:continue
++            seq=self.journal.next_seq(self.self_id)
++            wire=page_wire(self.self_id,seq,self.genesis,self.actor_epoch,checkpoint,i,self.signer,pub=self.pub)
++            if not self.journal.append(self.self_id,seq,wire):raise PatchError('duplicate local v81 checkpoint page')
++            self._index(wire,self.self_id,seq)
++            frames.append(wire)
++        seq=self.journal.next_seq(self.self_id)
++        wire=rollout_wire(self.self_id,seq,self.genesis,self.actor_epoch,rollout,d,self.signer,pub=self.pub,actor_tip=actor_tip)
++        if not self.journal.append(self.self_id,seq,wire):raise PatchError('duplicate local v81 trajectory')
++        self._index(wire,self.self_id,seq)
++        self.persist((self.self_id,seq))
++        frames.append(wire)
++        return frames
++
++    def ingest(self,wire):
++        if wire.startswith(CP_MAGIC):
++            h,_=parse_page(wire,self.genesis,self.allowed_epochs,self.trusted)
++        elif wire.startswith(TR_MAGIC):
++            h,_=parse_rollout(wire,self.genesis,self.allowed_epochs,self.trusted,
++                               reward_mode=self.reward_mode,max_length=self.max_length)
++        else:raise PatchError('v81 room rejects legacy or unsigned trajectories')
++        origin,seq=h['origin'],h['seq']
++        # Do not poison the immutable event archive with a second signed
++        # page for the same checkpoint offset at a different journal seq.
++        if wire.startswith(CP_MAGIC):
++            old=self.journal.db.execute('SELECT seq FROM v81_pages WHERE origin=? AND checkpoint=? AND idx=?',
++                (origin,h['checkpoint'],h['index'])).fetchone()
++            if old is not None and old[0]!=seq:
++                raise PatchError('conflicting behavior checkpoint page index')
++        prior=self.journal.has(origin,seq)
++        if prior:
++            if prior[0]!=hashlib.sha256(wire).hexdigest():raise PatchError('v81 event equivocation')
++            self._index(wire,origin,seq)
++            return False
++        if not self.journal.append(origin,seq,wire):raise PatchError('v81 event index race')
++        self._index(wire,origin,seq)
++        return True
++
++    def pending(self,limit=4):
++        rows=self.journal.db.execute('''SELECT r.origin,r.seq FROM v81_rollouts r
++            LEFT JOIN trajectory_applied a ON a.origin=r.origin AND a.seq=r.seq
++            WHERE a.origin IS NULL ORDER BY r.origin,r.seq LIMIT ?''',(limit,)).fetchall()
++        return [(o,s,self.journal.get(o,s)) for o,s in rows]
++
++    def _checkpoint(self,origin,checkpoint,epoch):
++        rows=self.journal.db.execute('''SELECT idx,total,checkpoint_size,actor_epoch,seq
++            FROM v81_pages WHERE origin=? AND checkpoint=? ORDER BY idx''',(origin,checkpoint)).fetchall()
++        if not rows:return None
++        total=rows[0][1];size=rows[0][2]
++        if (len(rows)<total or len(rows)>total or total>MAX_CHECKPOINT_PAGES or
++            size>MAX_CHECKPOINT_BYTES):return None
++        chunks=[]
++        for i,(idx,n,sz,ep,seq) in enumerate(rows):
++            if idx!=i or n!=total or sz!=size or ep!=epoch:
++                raise PatchError('v81 checkpoint index/epoch equivocation')
++            wire=self.journal.get(origin,seq)
++            if wire is None:raise PatchError('v81 missing archived checkpoint page')
++            h,p=parse_page(wire,self.genesis,self.allowed_epochs,self.trusted)
++            if h['checkpoint']!=checkpoint or h['index']!=i:
++                raise PatchError('v81 checkpoint page archive changed')
++            chunks.append(p)
++        blob=b''.join(chunks)
++        if len(blob)!=size or hashlib.sha256(blob).hexdigest()!=checkpoint:
++            raise PatchError('v81 behavior checkpoint digest mismatch')
++        return blob
++
++    def apply_pending(self,model,device,limit=1):
++        applied=0
++        for origin,seq,wire in self.pending(max(4,limit)):
++            if applied>=limit:break
++            if wire is None:raise PatchError('v81 missing durable trajectory')
++            head,data=parse_rollout(wire,self.genesis,self.allowed_epochs,self.trusted,
++                                    reward_mode=self.reward_mode,max_length=self.max_length)
++            blob=self._checkpoint(origin,head['checkpoint'],head['actor_epoch'])
++            if blob is None:continue  # future anti-entropy completes it; NEVER ACK
++            before=self._snapshot()
++            try:
++                checked_logps=replay_logps(model,blob,data,self.mixer.args,device)
++                # Use the independently RECOMPUTED mu, not the signed claim.
++                # The 2e-3 cross-backend comparison tolerance must never
++                # enter the IS estimator as a systematic log-ratio error.
++                verified=dict(data,behavior_logp=checked_logps)
++                self.mixer.train_imported_rollout(model,device,verified)
++                self.persist((origin,seq))
++            except BaseException:
++                with self.journal.db:
++                    self.journal.db.execute('''INSERT OR REPLACE INTO trajectory_state
++                        (id,tensors,digest,critic_steps) VALUES(1,?,?,?)''',before)
++                self._restore()
++                raise
++            applied+=1
++        return applied
+
+--- /dev/null
++++ b/tests/test_behavior_checkpoint_v81.py
+@@ -0,0 +1,216 @@
++"""End-to-end source checkpoint replay, adversarial likelihoods, crashes/churn."""
++import pytest
++import torch
++from patchlib.core import PatchError
++from patchlib.behavior_checkpoint_v81 import capture, replay_logps, digest
++from patchlib.trajectory_gossip_v81 import (VerifiedTrajectoryGossip, parse_rollout,
++                                            rollout_wire, page_wire, parse_page)
++from patchlib.mixed_learning_v65 import MixedObjectiveTrainer, spec
++from test_mixed_learning_v65 import make_args, setup_model, write, ToyTokenizer
++from test_trajectory_gossip_v80 import crypt
++
++
++def peers(tmp_path):
++    dataset=write(tmp_path,'ppo.jsonl',[{'prompt':'Hi','reference':'Ag'}])
++    args=make_args(tmp_path,ppo_jsonl=dataset,distributed_critic=True,
++                   critic_rollout_gossip=True,critic_offpolicy='trajectory_is')
++    aa,bb=setup_model(),setup_model()
++    model_a,adapter_a,_,_=aa
++    model_b,adapter_b,_,_=bb
++    mixer_a=MixedObjectiveTrainer(args,ToyTokenizer())
++    args2=make_args(tmp_path,ppo_jsonl=dataset,distributed_critic=True,
++                   critic_rollout_gossip=True,critic_offpolicy='trajectory_is')
++    mixer_b=MixedObjectiveTrainer(args2,ToyTokenizer())
++    sign,verify=crypt()
++    a=VerifiedTrajectoryGossip(tmp_path/'a.db','a'*64,mixer_a,'alpha',sign,
++        trusted={'alpha':verify,'beta':verify},allowed_epochs={'a'*64},actor_epoch='a'*64)
++    b=VerifiedTrajectoryGossip(tmp_path/'b.db','a'*64,mixer_b,'beta',sign,
++        trusted={'alpha':verify,'beta':verify},allowed_epochs={'a'*64},actor_epoch='a'*64)
++    return a,b,model_a,model_b,mixer_a,mixer_b
++
++
++def rollout(model,mix):
++    torch.manual_seed(23)
++    mix.ppo_loss(model,torch.device('cpu'))
++    return mix.export_rollout_v80(),mix.cached['behavior_checkpoint_v81']
++
++
++def finish(a,b,ma,mb):
++    a.close();b.close();ma.close();mb.close()
++
++
++def test_checkpoint_reproduces_source_after_actor_update(tmp_path):
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        data,ck=rollout(src,ma)
++        expected=replay_logps(dst,ck,data,ma.args,torch.device('cpu'))
++        assert max(abs(x-y) for x,y in zip(expected,data['behavior_logp']))<2e-3
++        before=[p.clone() for p in dst.parameters()]
++        with torch.no_grad():
++            # The sampled source has already moved on; its immutable snapshot
++            # must still replay the OLD probabilities at the receiver.
++            src.head.bias[5].add_(0.4)
++        frames=a.local(data,checkpoint=ck)
++        assert frames[0].startswith(b'KCP81\0')
++        assert frames[-1].startswith(b'KTR81\0')
++        # Unchanged receiver weights even when old behavior Actor must be loaded.
++        for wire in frames:b.ingest(wire)
++        assert b.apply_pending(dst,torch.device('cpu'))==1
++        assert all(torch.equal(p,x) for p,x in zip(dst.parameters(),before))
++        assert b.apply_pending(dst,torch.device('cpu'))==0
++    finally:finish(a,b,ma,mb)
++
++
++def test_forged_claim_with_valid_signature_fails_before_value_update(tmp_path):
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        data,ck=rollout(src,ma)
++        malicious=dict(data,behavior_logp=[x-.65 for x in data['behavior_logp']])
++        frames=a.local(malicious,checkpoint=ck)
++        for wire in frames:b.ingest(wire)
++        before=[p.clone() for p in mb.critic.parameters()]
++        with pytest.raises(PatchError,match='probabilities disagree'):
++            b.apply_pending(dst,torch.device('cpu'))
++        assert b.pending()
++        assert all(torch.equal(p,x) for p,x in zip(before,mb.critic.parameters()))
++    finally:finish(a,b,ma,mb)
++
++
++def test_missing_checkpoint_waits_and_restart_resumes_without_duplicate(tmp_path):
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        data,ck=rollout(src,ma)
++        frames=a.local(data,checkpoint=ck)
++        b.ingest(frames[-1])
++        assert b.apply_pending(dst,torch.device('cpu'))==0
++        assert b.pending()
++        b.close()
++        b=VerifiedTrajectoryGossip(tmp_path/'b.db','a'*64,mb,'beta',crypt()[0],
++            trusted={'alpha':crypt()[1]},allowed_epochs={'a'*64},actor_epoch='a'*64)
++        for wire in reversed(frames[:-1]):b.ingest(wire)
++        assert b.apply_pending(dst,torch.device('cpu'))==1
++        assert not b.pending()
++        assert b.apply_pending(dst,torch.device('cpu'))==0
++    finally:finish(a,b,ma,mb)
++
++
++def test_wrong_frozen_base_fails_and_restores_receiver_actor(tmp_path):
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        data,ck=rollout(src,ma)
++        frames=a.local(data,checkpoint=ck)
++        for wire in frames:b.ingest(wire)
++        with torch.no_grad():
++            # source/recipient frozen base must match, not just trainable LoRA.
++            dst.emb.weight[0,0].add_(2.0)
++        before=[p.clone() for p in dst.parameters()]
++        with pytest.raises(PatchError,match='frozen base differs'):
++            b.apply_pending(dst,torch.device('cpu'))
++        assert all(torch.equal(p,x) for p,x in zip(before,dst.parameters()))
++        assert b.pending()
++    finally:finish(a,b,ma,mb)
++
++
++def test_forged_checkpoint_page_and_old_protocol_are_rejected(tmp_path):
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        data,ck=rollout(src,ma)
++        frames=a.local(data,checkpoint=ck)
++        broken=bytearray(frames[0]);broken[-1]^=1
++        with pytest.raises(PatchError):b.ingest(bytes(broken))
++        with pytest.raises(PatchError,match='legacy'):
++            b.ingest(b'KTR80\0junk')
++        assert b.journal.count()==0
++        # A signed but invalid checkpoint digest cannot impersonate an
++        # uploaded snapshot of the source policy.
++        fake=rollout_wire('alpha',99,a.genesis,'a'*64,data,'f'*64,crypt()[0])
++        b.ingest(fake)
++        assert b.apply_pending(dst,torch.device('cpu'))==0
++    finally:finish(a,b,ma,mb)
++
++
++def test_oversized_model_checkpoint_rejected_and_policy_segregated(tmp_path):
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        from patchlib.behavior_checkpoint_v81 import MAX_CHECKPOINT_BYTES
++        assert spec(ma.args)['version']=='pt-sft-clipped-ppo-v81'
++        assert spec(ma.args)['behavior_policy_proof'].startswith('content-addressed')
++        with pytest.raises(PatchError,match='checkpoint'):
++            a.local({'prompt':[3,4],'tokens':[5], 'behavior_logp':[-1],
++                     'reward':0.,'reference':[7], 'reward_mode':'token_match'},checkpoint=None)
++        # Any new v81 rollout frame must contain a checkpoint digest.
++        data,_=rollout(src,ma)
++        with pytest.raises(PatchError,match='missing behavior'):
++            rollout_wire('alpha',1,a.genesis,'a'*64,data,'invalid',crypt()[0])
++    finally:finish(a,b,ma,mb)
++
++
++def test_multiframe_checkpoint_out_of_order_and_rebuilt_index(tmp_path):
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        # Add a trainable tensor to both identical models so snapshot spans
++        # multiple SCTP-safe pages. Its output need not depend on this tensor.
++        from torch import nn
++        src.extra=nn.Parameter(torch.zeros(13000))
++        dst.extra=nn.Parameter(torch.zeros(13000))
++        data,ck=rollout(src,ma)
++        frames=a.local(data,checkpoint=ck)
++        assert len(frames)>=3
++        b.ingest(frames[-1])
++        b.ingest(frames[-2])
++        assert b.apply_pending(dst,torch.device('cpu'))==0
++        for f in frames[:-2]:b.ingest(f)
++        # Deliberately lose SQLite's secondary index but retain EventJournal.
++        with b.journal.db:
++            b.journal.db.execute('DELETE FROM v81_pages')
++        b.close()
++        b=VerifiedTrajectoryGossip(tmp_path/'b.db','a'*64,mb,'beta',crypt()[0],
++            trusted={'alpha':crypt()[1]},allowed_epochs={'a'*64},actor_epoch='a'*64)
++        assert b.apply_pending(dst,torch.device('cpu'))==1
++    finally:finish(a,b,ma,mb)
++
++
++def test_checkpoint_page_conflict_and_actor_epoch_fence(tmp_path):
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        data,ck=rollout(src,ma)
++        frames=a.local(data,checkpoint=ck)
++        duplicate=page_wire('alpha',100,a.genesis,'a'*64,ck,0,crypt()[0])
++        b.ingest(frames[0])
++        with pytest.raises(PatchError,match='conflicting'):
++            b.ingest(duplicate)
++        invalid_epoch=page_wire('alpha',101,a.genesis,'f'*64,ck,0,crypt()[0])
++        with pytest.raises(PatchError,match='certified'):
++            b.ingest(invalid_epoch)
++    finally:finish(a,b,ma,mb)
++
++
++def test_repeat_policy_content_addressed_no_retransmission(tmp_path):
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        data,ck=rollout(src,ma)
++        first=a.local(data,checkpoint=ck)
++        again=a.local(data,checkpoint=ck)
++        assert len(first)>=2
++        assert len(again)==1 and again[0].startswith(b'KTR81\0')
++        for f in first+again:b.ingest(f)
++        assert b.apply_pending(dst,torch.device('cpu'),limit=2)==2
++        assert not b.pending()
++    finally:finish(a,b,ma,mb)
++
++
++def test_elastic_training_step_exports_checkpoint_from_sampling_time(tmp_path):
++    from patchlib.cli import run_step
++    a,b,src,dst,ma,mb=peers(tmp_path)
++    try:
++        _,adapter,optimizer,batch=setup_model()
++        # Need the same model+adapter pair for run_step and checkpoint capture.
++        model,adapter,optimizer,batch=setup_model()
++        ma.args.mode='elastic'
++        ma.args._v65_mixer=ma
++        run_step(model,adapter,optimizer,batch,ma.args)
++        result=getattr(ma.args,'_v80_rollout_pending',None)
++        assert result is not None
++        sample,blob=result
++        replay_logps(model,blob,sample,ma.args,torch.device('cpu'))
++    finally:finish(a,b,ma,mb)
+
+--- a/tests/test_trajectory_gossip_v80.py
++++ b/tests/test_trajectory_gossip_v80.py
+@@ -122,8 +122,8 @@
+     p=write(tmp_path,'ex.jsonl',[{'prompt':'abc','reference':'yes'}])
+     args=make_args(tmp_path,ppo_jsonl=p,distributed_critic=True,critic_rollout_gossip=True)
+     validate_args(args)
+-    assert spec(args)['critic_distribution']=='signed-trajectory-recipient-is-v80'
+-    assert spec(args)['version']=='pt-sft-clipped-ppo-v80'
++    assert spec(args)['critic_distribution']=='checkpoint-verified-trajectory-is-v81'
++    assert spec(args)['version']=='pt-sft-clipped-ppo-v81'
+     args.ppo_reward='hf_model'
+     with pytest.raises(MixedLearningError,match='reference rewards'):validate_args(args)
+     from patchlib.mix_gui_v66 import normalize, command_options
+
+--- a/web/desktop_webview.html
++++ b/web/desktop_webview.html
+@@ -71,7 +71,7 @@
+       <label><span>Score index</span><input id="mixRewardIndex" type="number" value="0" min="0" max="65535"></label>
+       <label><span>Reward multiplier</span><input id="mixRewardScale" type="number" value="1" min="0.001" max="100" step="0.1"></label>
+       <label><span>Max input tokens</span><input id="mixRewardMaxLength" type="number" value="512" min="16" max="8192"></label></div></div>
+-      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Independent value estimator for PPO/GAE. Optionally share its trained value-head updates over signed P2P gossip; this is never a Reward Model.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option><option value="hf">Hugging Face · pretrained Value Critic</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Critic training</span><select id="mixDistributedCritic"><option value="off">Local only · legacy</option><option value="on">P2P · signed value-head deltas (v78)</option><option value="rollout">P2P · signed trajectories / receiver-side IS (v80)</option></select></label><label><span>Off-policy value correction</span><select id="mixCriticOffpolicy"><option value="auto">Automatic · trajectory IS for P2P</option><option value="trajectory_is">Unclipped trajectory IS · target Actor</option><option value="gae">Legacy GAE · no off-policy correction</option></select></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><div class="fieldgrid" id="mixCriticHub" hidden><label class="wide"><span>Hugging Face Value Critic</span><div class="mixed-path"><input id="mixCriticHfRepo" placeholder="organization/pretrained-scalar-value-model" spellcheck="false"><button type="button" id="mixCriticSearch">おすすめから選ぶ</button></div><select hidden id="mixCriticSearchResults" aria-label="HF Critic model search"><option value="">Search Hub for a compatible scalar value model…</option></select></label><label class="wide"><span>Immutable commit SHA</span><div class="mixed-path"><input id="mixCriticHfRevision" placeholder="40 hexadecimal characters"><button type="button" id="mixCriticPin">Pin current commit</button></div></label><label><span>Critic model type</span><select id="mixCriticHfLoader"><option value="sequence_classification">Scalar sequence classification</option><option value="token_classification">Scalar token classification</option></select></label><label><span>Critic device</span><select id="mixCriticHfDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label><label><span>Maximum Critic tokens</span><input id="mixCriticHfMaxLength" type="number" value="512" min="16" max="8192"></label><p class="footnote wide">Requires a checkpoint with an already-trained scalar value head. The backbone stays frozen; the value head trains locally or through signed P2P gossip. PPO state prefixes are retokenized for this Critic. The model may be substantially slower than the small local Critic.</p></div><label id="mixCriticLocalInit"><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">P2P mode shares signed value-head parameter updates with PPO peers. Trajectory IS corrects local stale rollouts against the current Actor, without clipping; large importance weights can destabilize learning. v80 trajectory mode shares token IDs, signed behavior log-probability claims, and receiver-verifiable reference rewards. Each receiver re-evaluates its current Actor and optimizes its own Critic. Parameter-delta broadcasts are disabled in this mode. This is conditionally unbiased in expectation, not a guaranteed global convergence protocol. New rooms only. Signed trajectories expose tokenized prompts and references to other room peers; use authorized data only.</p></div>
++      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Independent value estimator for PPO/GAE. Optionally share its trained value-head updates over signed P2P gossip; this is never a Reward Model.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option><option value="hf">Hugging Face · pretrained Value Critic</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Critic training</span><select id="mixDistributedCritic"><option value="off">Local only · legacy</option><option value="on">P2P · signed value-head deltas (v78)</option><option value="rollout">P2P · checkpoint-verified trajectories / IS (v81)</option></select></label><label><span>Off-policy value correction</span><select id="mixCriticOffpolicy"><option value="auto">Automatic · trajectory IS for P2P</option><option value="trajectory_is">Unclipped trajectory IS · target Actor</option><option value="gae">Legacy GAE · no off-policy correction</option></select></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><div class="fieldgrid" id="mixCriticHub" hidden><label class="wide"><span>Hugging Face Value Critic</span><div class="mixed-path"><input id="mixCriticHfRepo" placeholder="organization/pretrained-scalar-value-model" spellcheck="false"><button type="button" id="mixCriticSearch">おすすめから選ぶ</button></div><select hidden id="mixCriticSearchResults" aria-label="HF Critic model search"><option value="">Search Hub for a compatible scalar value model…</option></select></label><label class="wide"><span>Immutable commit SHA</span><div class="mixed-path"><input id="mixCriticHfRevision" placeholder="40 hexadecimal characters"><button type="button" id="mixCriticPin">Pin current commit</button></div></label><label><span>Critic model type</span><select id="mixCriticHfLoader"><option value="sequence_classification">Scalar sequence classification</option><option value="token_classification">Scalar token classification</option></select></label><label><span>Critic device</span><select id="mixCriticHfDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label><label><span>Maximum Critic tokens</span><input id="mixCriticHfMaxLength" type="number" value="512" min="16" max="8192"></label><p class="footnote wide">Requires a checkpoint with an already-trained scalar value head. The backbone stays frozen; the value head trains locally or through signed P2P gossip. PPO state prefixes are retokenized for this Critic. The model may be substantially slower than the small local Critic.</p></div><label id="mixCriticLocalInit"><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">P2P mode shares signed value-head parameter updates with PPO peers. Trajectory IS corrects local stale rollouts against the current Actor, without clipping; large importance weights can destabilize learning. v81 trajectory mode shares signed, SHA-256-committed behavior Actor checkpoints (bounded 64MiB, paged) alongside token IDs and verifiable rewards; each receiver recomputes old-Actor probabilities before applying any Critic step. Frozen base tensors must match byte-for-byte. This significantly increases network and disk use, and may reject very large adapters. Each receiver re-evaluates its current Actor and optimizes its own Critic. Parameter-delta broadcasts are disabled in this mode. This is conditionally unbiased in expectation, not a guaranteed global convergence protocol. New rooms only. Signed trajectories expose tokenized prompts and references to other room peers; use authorized data only.</p></div>
+       <div id="mixedConfigStatus" class="footnote" role="status">These settings apply when launching a new worker; changing a room's pinned objective protocol requires a new room.</div>
+     </div>
+   </div>
+
+--- a/web/desktop_webview.js
++++ b/web/desktop_webview.js
+@@ -417,8 +417,8 @@
+      data.reward_model_output=p.reward_model.output;data.reward_model_loader=p.reward_model.loader;data.reward_model_format=p.reward_model.format;data.reward_model_index=p.reward_model.index;
+      data.reward_model_scale=p.reward_model.scale;data.reward_model_max_length=p.reward_model.max_length;
+      data.reward_model_device='cpu';}
+-   data.distributed_critic=['signed-root-critic-gossip-v78','signed-trajectory-recipient-is-v80'].includes(p.critic_distribution);
+-   data.critic_rollout_gossip=p.critic_distribution==='signed-trajectory-recipient-is-v80';
++   data.distributed_critic=['signed-root-critic-gossip-v78','checkpoint-verified-trajectory-is-v81'].includes(p.critic_distribution);
++   data.critic_rollout_gossip=p.critic_distribution==='checkpoint-verified-trajectory-is-v81';
+    data.critic_offpolicy=p.critic_offpolicy==='unclipped-trajectory-is-mc-v79'?'trajectory_is':'gae';
+    if(p.critic){data.critic_kind=p.critic.kind;data.critic_hidden=p.critic.hidden;data.critic_lr=p.critic.lr; if(p.critic.hf){data.critic_hf_repo=p.critic.hf.repo;data.critic_hf_revision=p.critic.hf.revision;data.critic_hf_loader=p.critic.hf.loader;data.critic_hf_max_length=p.critic.hf.max_length;data.critic_hf_device='cpu';}}
+  }

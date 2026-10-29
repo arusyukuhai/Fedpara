@@ -51,15 +51,21 @@ def test_real_websocket_presence_updates_with_multiple_clients():
     ids=['p'+'1'*32,'p'+'2'*32]
     room=create_room_id()
     roster={}
+    version=0
     async def handler(ws):
+        nonlocal version
         msg=json.loads(await ws.recv())
         assert msg['type']=='group-join'
         peer=msg['peer']
         old=list(roster.items())
         roster[peer]=ws
-        await ws.send(json.dumps({'type':'group-members','peers':[p for p,_ in old]}))
+        version+=1
+        await ws.send(json.dumps({'type':'group-members','topology':'bounded-v2',
+              'degree':8,'revision':version,'online':len(roster),
+              'peers':[p for p,_ in old]}))
         for _,client in old:
-            await client.send(json.dumps({'type':'group-peer-joined','peer':peer}))
+            await client.send(json.dumps({'type':'group-neighbors','topology':'bounded-v2',
+              'revision':version,'online':len(roster),'peers':[peer]}))
         try:
             async for _ in ws: pass
         finally:
@@ -111,7 +117,10 @@ def test_missing_event_requests_retry_after_backpressure():
         assert frame['events']==[[remote,1],[remote,2]]
         assert len(node.pending)==2
         assert not node.retry_missing(10.5)
-        assert node.retry_missing(11.5)
+        # V20: do not flood a slow peer with duplicate NEEDs while its
+        # multi-MiB response is still in flight. Retry after the cooldown.
+        assert not node.retry_missing(11.5)
+        assert node.retry_missing(16.5)
         assert len(ch.frames)==3  # hello, need, retried need
 
 
@@ -141,8 +150,10 @@ def test_first_roster_founder_survives_quick_second_member():
     founder='p'+'a'*32
     newcomer='p'+'b'*32
     lobby=RoomDiscovery('ws://127.0.0.1:8080/ws',create_room_id(),founder)
-    lobby.accept({'type':'group-members','peers':[]})
-    lobby.accept({'type':'group-peer-joined','peer':newcomer})
+    lobby.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+                  'revision':1,'online':1,'peers':[]})
+    lobby.accept({'type':'group-neighbors','topology':'bounded-v2',
+                  'revision':2,'online':2,'peers':[newcomer]})
     assert lobby.members=={newcomer}
     assert lobby.first_roster_was_empty is True
     gate=BootstrapState.restored(False)
@@ -162,7 +173,8 @@ def test_newcomer_cannot_skip_verified_full_snapshot():
     founder='p'+'a'*32
     newcomer='p'+'b'*32
     lobby=RoomDiscovery('ws://127.0.0.1:8080/ws',create_room_id(),newcomer)
-    lobby.accept({'type':'group-members','peers':[founder]})
+    lobby.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+                  'revision':1,'online':2,'peers':[founder]})
     gate=BootstrapState.restored(False)
     decision=initial_join_decision(initial_complete=False,lobby_online=True,
         lobby_members=lobby.members,neighbors={founder:True},
@@ -194,9 +206,11 @@ def test_first_roster_cannot_change_after_reconnect():
     founder='p'+'a'*32
     newcomer='p'+'b'*32
     lobby=RoomDiscovery('ws://127.0.0.1:8080/ws',create_room_id(),newcomer)
-    lobby.accept({'type':'group-members','peers':[founder]})
+    lobby.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+                  'revision':1,'online':2,'peers':[founder]})
     assert lobby.first_roster_was_empty is False
-    lobby.accept({'type':'group-members','peers':[]})
+    lobby.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+                  'revision':2,'online':1,'peers':[]})
     assert lobby.first_roster_was_empty is False
 
 
@@ -206,8 +220,10 @@ def test_newcomer_cannot_claim_genesis_when_original_peer_leaves():
     first='p'+'a'*32
     newcomer='p'+'b'*32
     lobby=RoomDiscovery('ws://127.0.0.1:8080/ws',create_room_id(),newcomer)
-    lobby.accept({'type':'group-members','peers':[first]})
-    lobby.accept({'type':'group-peer-left','peer':first})
+    lobby.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+                  'revision':1,'online':2,'peers':[first]})
+    lobby.accept({'type':'group-neighbors','topology':'bounded-v2',
+                  'revision':2,'online':1,'peers':[]})
     assert lobby.members==set()
     assert lobby.first_roster_was_empty is False
     # A current empty roster MUST NOT promote an unsynchronized newcomer.

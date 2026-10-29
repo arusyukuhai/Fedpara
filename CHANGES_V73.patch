@@ -1,0 +1,424 @@
+--- a/patchlib/mixed_learning_v65.py
++++ b/patchlib/mixed_learning_v65.py
+@@ -239,6 +239,11 @@
+             return _logits(model, ids, args, start=ids.shape[1]-1, length=1)
+         data={'input_ids':ids,'attention_mask':torch.ones_like(ids),'use_cache':True}
+     else:
++        # Hugging Face causal LMs generally expect the *full prefix* attention
++        # mask even though only the newest token is passed as input_ids. A
++        # one-token mask can corrupt RoPE/SDPA attention or fail on decode.
++        if ids.shape[1] != cache_state.get('last_len', -1)+1:
++            raise MixedLearningError('PPO KV cache prefix length changed unexpectedly')
+         data={'input_ids':ids[:,-1:],
+               'attention_mask':torch.ones_like(ids),
+               'past_key_values':cache_state['past'], 'use_cache':True}
+@@ -256,6 +261,7 @@
+     else:
+         cache_state['active']=True
+         cache_state['past']=past
++        cache_state['last_len']=ids.shape[1]
+     last=logits[:,-1:,:]
+     if not bool(torch.isfinite(last).all()):
+         raise MixedLearningError('nonfinite PPO generation logits')
+@@ -371,19 +377,24 @@
+         model.eval()
+         try:
+             with torch.no_grad():
+-                ids=torch.tensor([prompt],dtype=torch.long,device=device)
++                # Avoid reallocating the complete token prefix on every
++                # generation step (quadratic tensor copies for long PPO replies).
++                ids_buffer=torch.empty((1,len(prompt)+max_new),dtype=torch.long,device=device)
++                ids_buffer[0,:len(prompt)]=torch.tensor(prompt,dtype=torch.long,device=device)
++                generated_length=len(prompt)
+                 chosen=[];old_lp=[];features=[]
+                 cache_state={'active':None,'past':None}
+                 eos=getattr(self.tok,'eos_token_id',None)
+                 for _ in range(max_new):
+-                    final_logits=_cached_step_logits(model,ids,self.args,cache_state)
++                    final_logits=_cached_step_logits(model,ids_buffer[:,:generated_length],self.args,cache_state)
+                     lp=F.log_softmax(final_logits[:,0],dim=-1)
+                     sample=torch.multinomial(lp.exp(),1)
+                     token=int(sample.item());chosen.append(token)
+                     old_lp.append(lp[0,token])
+                     if getattr(self.args,'critic_kind','mlp')!='hf':
+-                        features.append(_features(final_logits,offset=ids.shape[1]-1)[0,0])
+-                    ids=torch.cat((ids,sample),dim=1)
++                        features.append(_features(final_logits,offset=generated_length-1)[0,0])
++                    ids_buffer[0,generated_length]=token
++                    generated_length+=1
+                     if eos is not None and token==int(eos):
+                         break
+                 if not chosen:
+@@ -430,7 +441,8 @@
+                 if T>1 and adv.std(unbiased=False)>1e-6:
+                     adv=(adv-adv.mean())/(adv.std(unbiased=False)+1e-6)
+                 adv=adv.clamp(-10,10)
+-                return {'ids':ids.detach(),'start':len(prompt),'tokens':torch.tensor(chosen,device=device),
++                return {'ids':ids_buffer[:,:generated_length].clone().detach(),'start':len(prompt),
++                        'tokens':torch.tensor(chosen,device=device),
+                         'old_lp':torch.stack(old_lp).detach(), 'old_values':old_values.detach(),
+                         'adv':adv.detach(),'returns':returns.detach(), 'reward':reward,
+                         'critic_prefixes':prefixes}
+@@ -452,8 +464,17 @@
+             logits=_logits(model,ids,self.args,start=start-1,length=N)
+             lp=F.log_softmax(logits,dim=-1)
+             chosen=lp.gather(-1,rollout['tokens'].view(1,N,1)).squeeze(0).squeeze(-1)
+-            # Clamped exponent prevents overflow on heavily changed P2P policies.
+-            log_ratio=(chosen-rollout['old_lp']).clamp(-20,20)
++            # Never silently underreport a huge P2P policy shift by clipping
++            # the log ratio *before* inspecting it. Extremely stale rollouts
++            # must be recollected rather than replayed as if their KL were 20.
++            raw_log_ratio=chosen-rollout['old_lp']
++            if not bool(torch.isfinite(raw_log_ratio).all()):
++                self.cached=None
++                raise MixedLearningError('nonfinite PPO importance ratio; discard rollout')
++            if bool((raw_log_ratio.detach().abs()>20).any()):
++                self.cached=None
++                raise MixedLearningError('PPO policy changed too far for a safe replay; discard stale rollout')
++            log_ratio=raw_log_ratio
+             ratio=log_ratio.exp()
+             advantage=rollout['adv']
+             clipped=ratio.clamp(1-self.args.ppo_clip,1+self.args.ppo_clip)
+--- a/patchlib/hf_value_critic_v69.py
++++ b/patchlib/hf_value_critic_v69.py
+@@ -15,6 +15,7 @@
+ 
+ REPO = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$')
+ SHA = re.compile(r'^[a-fA-F0-9]{40}$')
++MAX_REPLAY_FEATURE_BYTES = 32 * 1024**2
+ 
+ 
+ class HFValueError(ValueError):
+@@ -94,6 +95,11 @@
+         if hasattr(self.tok,'truncation_side'):
+             self.tok.truncation_side='left'
+         self.calls=0
++        # PPO reuses a bounded set of prefixes. The backbone is frozen, so its
++        # last hidden vectors can be reused while the scalar head is re-run on
++        # every critic optimizer step. Never cache graphs or value predictions.
++        self._cached_prefix_key=None
++        self._cached_features=None
+ 
+     def trainable_parameters(self):
+         return list(self.head.parameters())
+@@ -109,6 +115,20 @@
+         if not isinstance(prefixes,list) or not 1<=len(prefixes)<=128:
+             raise HFValueError('Expected 1..128 PPO state prefixes')
+         self.model.eval()
++        prefix_key=tuple(prefixes)
++        if self._cached_features is not None and prefix_key==self._cached_prefix_key:
++            # Keep the *head* in the graph: PPO still trains it on each reuse.
++            values=self.head(self._cached_features).reshape(-1)
++            if values.shape!=(len(prefixes),) or not bool(torch.isfinite(values).all()):
++                self._cached_features=None
++                self._cached_prefix_key=None
++                raise HFValueError('Cached critic features produced invalid values')
++            return values.float().to(actor_device)
++        self._cached_features=None
++        self._cached_prefix_key=None
++        candidate_features=[None]*len(prefixes)
++        can_cache=True
++        cache_bytes=0
+         samples=[]
+         for text in prefixes:
+             if not isinstance(text,str) or not text or len(text)>65536:
+@@ -172,7 +192,15 @@
+                     packed['token_type_ids'].append(torch.cat((row['token_type_ids'][0],
+                         row['token_type_ids'].new_zeros(diff))))
+             tensors={key:torch.stack(items).to(self.device) for key,items in packed.items()}
+-            result=self.model(**tensors)
++            head_inputs=[]
++            def capture_head(_module, inputs):
++                if len(inputs)==1 and isinstance(inputs[0],torch.Tensor):
++                    head_inputs.append(inputs[0].detach())
++            hook=self.head.register_forward_pre_hook(capture_head)
++            try:
++                result=self.model(**tensors)
++            finally:
++                hook.remove()
+             logits=result.get('logits') if isinstance(result,dict) else getattr(result,'logits',None)
+             if not isinstance(logits,torch.Tensor):
+                 raise HFValueError('HF Critic must return logits tensor')
+@@ -187,9 +215,41 @@
+                 values=logits[torch.arange(len(group),device=logits.device),final_index,0]
+             if not bool(torch.isfinite(values).all()):
+                 raise HFValueError('HF Critic returned nonfinite state value')
++            if can_cache:
++                # Only bypass the backbone if the model's actual scalar output
++                # is numerically identical to the selected Linear head output.
++                # Custom post-head transforms remain on the conservative path.
++                if len(head_inputs)!=1:
++                    can_cache=False
++                else:
++                    hidden=head_inputs[0]
++                    if hidden.ndim==3 and hidden.shape[:2]==(len(group),max_length):
++                        selection=torch.tensor([samples[idx][0]-1 for idx in group],device=hidden.device)
++                        hidden=hidden[torch.arange(len(group),device=hidden.device),selection]
++                    if hidden.ndim!=2 or hidden.shape[0]!=len(group) or hidden.shape[1]!=self.head.in_features:
++                        can_cache=False
++                    elif cache_bytes + hidden.numel()*hidden.element_size() > MAX_REPLAY_FEATURE_BYTES:
++                        # Enforce the bound *before* allocating any clones;
++                        # inspecting it at the end could cause large spikes.
++                        can_cache=False
++                        candidate_features=[]
++                    else:
++                        with torch.no_grad():
++                            direct=self.head(hidden).reshape(-1)
++                            matches=bool(torch.allclose(direct.float(),values.detach().float(),
++                                                        rtol=1e-4,atol=1e-4))
++                        if not matches:
++                            can_cache=False
++                        else:
++                            cache_bytes += hidden.numel()*hidden.element_size()
++                            for idx,vector in zip(group,hidden.unbind(0)):
++                                candidate_features[idx]=vector.detach().clone()
+             for idx,value in zip(group,values.unbind(0)):
+                 output[idx]=value.float().to(actor_device)
+             self.calls+=len(group)
++        if can_cache and all(feature is not None for feature in candidate_features):
++            self._cached_features=torch.stack(candidate_features).detach()
++            self._cached_prefix_key=prefix_key
+         return torch.stack(output)
+ 
+     def snapshot_weights(self):
+--- a/tests/test_ppo_correctness_performance_v73.py
++++ b/tests/test_ppo_correctness_performance_v73.py
+@@ -0,0 +1,179 @@
++"""Regression cases for v73: HF KV-cache mask, frozen value-feature reuse, stale PPO policy."""
++from types import SimpleNamespace
++import json
++import pytest
++import torch
++from torch import nn
++
++from patchlib.mixed_learning_v65 import MixedObjectiveTrainer, MixedLearningError
++from patchlib.hf_value_critic_v69 import HFValueCritic
++
++SHA='d'*40
++
++class Tok:
++    eos_token_id=None
++    pad_token_id=0
++    def encode(self,text,add_special_tokens=False):
++        return [2+(ord(c)%29) for c in text]
++    def decode(self,ids,skip_special_tokens=False):
++        return ''.join(chr(65+int(x)%26) for x in ids)
++    def __call__(self,text,*,return_tensors,truncation,max_length):
++        items=self.encode(text)[-max_length:]
++        return {'input_ids':torch.tensor([items]),'attention_mask':torch.ones(1,len(items),dtype=torch.long)}
++
++class StrictCausalCache(nn.Module):
++    """Emulates common HF contract: cache decode gets full-prefix mask."""
++    def __init__(self):
++        super().__init__()
++        self.emb=nn.Embedding(40,12)
++        self.head=nn.Linear(12,40)
++        self.tokens_seen=[]
++    def forward(self,input_ids,attention_mask=None,past_key_values=None,use_cache=False):
++        prior=0 if past_key_values is None else past_key_values.shape[1]
++        expected=prior+input_ids.shape[1]
++        assert attention_mask is not None and tuple(attention_mask.shape)==(1,expected), (
++            f'expected full-prefix attention_mask of length {expected}, got {attention_mask.shape}')
++        self.tokens_seen.append(input_ids.numel())
++        history=torch.cat([past_key_values,input_ids],dim=1) if past_key_values is not None else input_ids
++        logits=self.head(self.emb(history).cumsum(1))[:,-input_ids.shape[1]:]
++        return {'logits':logits,'past_key_values':history.detach() if use_cache else None}
++
++class SlowValue(nn.Module):
++    def __init__(self,postprocess=False):
++        super().__init__()
++        self.config=SimpleNamespace(num_labels=1,pad_token_id=0)
++        self.backbone=nn.Sequential(nn.Linear(1,32),nn.Tanh(),nn.Linear(32,16),nn.Tanh())
++        self.score=nn.Linear(16,1)
++        self.calls=0
++        self.postprocess=postprocess
++    def forward(self,input_ids,attention_mask=None):
++        self.calls+=1
++        weights=attention_mask.float()
++        pooled=(input_ids.float()*weights).sum(1,keepdim=True)/weights.sum(1,keepdim=True)
++        val=self.score(self.backbone(pooled/40.))
++        return SimpleNamespace(logits=(2*val if self.postprocess else val))
++
++def args_for_ppo(p,**kw):
++    opts=dict(sft_jsonl=None,ppo_jsonl=p,pt_weight=0.,sft_weight=0.,ppo_weight=1.,
++              ppo_clip=.2,ppo_kl_coef=.02,ppo_value_coef=.5,ppo_gamma=.99,
++              ppo_gae_lambda=.95,ppo_max_tokens=5,ppo_reuse=2,ppo_reward='exact',
++              max_length=48,hf_task='causal-lm',loss_policy='auto',critic_kind='mlp',
++              critic_hidden=32,critic_lr=.001,ppo_kv_cache='auto',input_map='')
++    opts.update(kw)
++    return SimpleNamespace(**opts)
++
++def critic_args():
++    return SimpleNamespace(critic_kind='hf',critic_hf_repo='Org/value',critic_hf_revision=SHA,
++                           critic_hf_loader='sequence_classification',critic_hf_device='cpu',
++                           critic_hf_max_length=128)
++
++def test_kv_cache_full_attention_mask_and_rollout_consistency(tmp_path):
++    p=tmp_path/'samples.jsonl';p.write_text(json.dumps({'prompt':'abcdefgh','reference':'xyz'})+'\n')
++    torch.manual_seed(40); fast=StrictCausalCache(); slow=StrictCausalCache()
++    slow.load_state_dict(fast.state_dict())
++    auto=MixedObjectiveTrainer(args_for_ppo(p),Tok())
++    off=MixedObjectiveTrainer(args_for_ppo(p,ppo_kv_cache='off'),Tok())
++    try:
++        torch.manual_seed(55)
++        first=auto._new_rollout(fast,torch.device('cpu'))
++        torch.manual_seed(55)
++        second=off._new_rollout(slow,torch.device('cpu'))
++        assert torch.equal(first['tokens'],second['tokens'])
++        assert torch.allclose(first['old_lp'],second['old_lp'],atol=1e-6)
++        assert sum(fast.tokens_seen)<sum(slow.tokens_seen)
++    finally:
++        auto.close();off.close()
++
++def test_frozen_hf_backbone_reuses_features_but_head_is_retrained():
++    torch.manual_seed(8)
++    model=SlowValue()
++    critic=HFValueCritic(critic_args(),model=model,tokenizer=Tok())
++    prefixes=['a','ab','abcd','hello','hello world','longish input']
++    old=critic.values(prefixes,actor_device=torch.device('cpu'))
++    calls=model.calls
++    assert critic._cached_features is not None
++    optimizer=torch.optim.SGD(critic.trainable_parameters(),lr=.25)
++    loss=critic.values(prefixes,actor_device=torch.device('cpu')).square().sum()
++    loss.backward()
++    assert model.calls==calls, 'backbone must not run again on PPO reuse'
++    assert model.score.weight.grad is not None and model.score.weight.grad.abs().sum()>0
++    optimizer.step();optimizer.zero_grad()
++    current=critic.values(prefixes,actor_device=torch.device('cpu'))
++    assert model.calls==calls, 'head updates alone must not invalidate frozen features'
++    assert not torch.allclose(old,current)
++    assert torch.allclose(current,model_value_reference(critic,prefixes),atol=1e-6)
++    assert model.calls>calls
++    critic.values(prefixes+['new state'],actor_device=torch.device('cpu'))
++    assert model.calls>calls+1, 'changed rollout invalidates feature cache'
++
++def model_value_reference(critic,prefixes):
++    return torch.stack([critic.model(**critic.tok(s,return_tensors='pt',truncation=True,max_length=128)).logits[0,0] for s in prefixes])
++
++def test_custom_postprocessing_disables_feature_shortcut():
++    model=SlowValue(postprocess=True)
++    critic=HFValueCritic(critic_args(),model=model,tokenizer=Tok())
++    prefixes=['a','abc','xy']
++    first=critic.values(prefixes,actor_device=torch.device('cpu'))
++    before=model.calls
++    second=critic.values(prefixes,actor_device=torch.device('cpu'))
++    assert model.calls>before
++    assert critic._cached_features is None
++    assert torch.equal(first,second)
++
++def test_ppo_extreme_stale_replay_fails_closed(tmp_path):
++    p=tmp_path/'samples.jsonl';p.write_text(json.dumps({'prompt':'abc','reference':'xyz'})+'\n')
++    model=StrictCausalCache()
++    trainer=MixedObjectiveTrainer(args_for_ppo(p,ppo_kv_cache='off'),Tok())
++    try:
++        actor_loss,_,_=trainer.ppo_loss(model,torch.device('cpu'))
++        assert actor_loss.requires_grad
++        trainer.cached['old_lp']-=100.
++        with pytest.raises(MixedLearningError,match='stale rollout'):
++            trainer.ppo_loss(model,torch.device('cpu'))
++        assert trainer.cached is None
++        a,_,_=trainer.ppo_loss(model,torch.device('cpu'))
++        assert a.requires_grad
++    finally:
++        trainer.close()
++
++class TokenWiseValue(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.config=SimpleNamespace(num_labels=1,pad_token_id=0)
++        self.proj=nn.Linear(1,12)
++        self.score=nn.Linear(12,1)
++        self.calls=0
++    def forward(self,input_ids,attention_mask=None):
++        self.calls+=1
++        hidden=self.proj(input_ids.float().unsqueeze(-1)/40)
++        return SimpleNamespace(logits=self.score(hidden))
++
++def test_tokenwise_hf_critic_cache_respects_last_unpadded_token_and_gradient():
++    options=critic_args();options.critic_hf_loader='token_classification'
++    model=TokenWiseValue()
++    critic=HFValueCritic(options,model=model,tokenizer=Tok())
++    prefixes=['a','abcdef','bc','longer tokenwise prefix']
++    expected=critic.values(prefixes,actor_device=torch.device('cpu'))
++    calls=model.calls
++    assert critic._cached_features is not None
++    cached=critic.values(prefixes,actor_device=torch.device('cpu'))
++    assert torch.allclose(cached,expected)
++    assert model.calls==calls
++    cached.sum().backward()
++    assert critic.head.weight.grad is not None and critic.head.weight.grad.abs().sum()>0
++    for i,text in enumerate(prefixes):
++        row=critic.tok(text,return_tensors='pt',truncation=True,max_length=128)
++        assert torch.allclose(expected[i],model(**row).logits[0,-1,0])
++
++
++def test_feature_cache_budget_fails_to_unoptimized_path_before_extra_clones(monkeypatch):
++    import patchlib.hf_value_critic_v69 as module
++    monkeypatch.setattr(module,'MAX_REPLAY_FEATURE_BYTES',128)
++    model=SlowValue()
++    critic=HFValueCritic(critic_args(),model=model,tokenizer=Tok())
++    prefixes=['one','two','three','four']  # 4 * 16 * 4 = 256 bytes
++    a=critic.values(prefixes,actor_device=torch.device('cpu'))
++    assert critic._cached_features is None
++    calls=model.calls
++    b=critic.values(prefixes,actor_device=torch.device('cpu'))
++    assert model.calls>calls and torch.allclose(a,b)
+--- a/benchmark_v73.py
++++ b/benchmark_v73.py
+@@ -0,0 +1,56 @@
++"""Local CPU synthetic estimate of PPO Critic reuse savings; no real HF/GPU involved."""
++import json, statistics, time
++from types import SimpleNamespace
++import torch
++from torch import nn
++from patchlib.hf_value_critic_v69 import HFValueCritic
++
++class Tok:
++    pad_token_id=0
++    eos_token_id=1
++    def __call__(self, text, *, return_tensors, truncation, max_length):
++        tokens=[2+ord(char)%40 for char in text][-max_length:]
++        return {'input_ids':torch.tensor([tokens]), 'attention_mask':torch.ones(1,len(tokens),dtype=torch.long)}
++
++class FrozenBackbone(nn.Module):
++    def __init__(self):
++        super().__init__(); self.config=SimpleNamespace(num_labels=1,pad_token_id=0)
++        self.backbone=nn.Sequential(nn.Linear(1,512),nn.GELU(),nn.Linear(512,512),nn.GELU(),nn.Linear(512,256))
++        self.score=nn.Linear(256,1)
++        self.calls=0
++    def forward(self,input_ids,attention_mask=None):
++        self.calls+=1
++        weights=attention_mask.float()
++        x=((input_ids.float()*weights).sum(dim=1,keepdim=True)/weights.sum(dim=1,keepdim=True))/48
++        return SimpleNamespace(logits=self.score(self.backbone(x)))
++
++def run():
++    torch.set_num_threads(1); torch.manual_seed(73)
++    args=SimpleNamespace(critic_kind='hf',critic_hf_repo='Lab/toy',critic_hf_revision='e'*40,
++        critic_hf_loader='sequence_classification',critic_hf_device='cpu',critic_hf_max_length=512)
++    critic=HFValueCritic(args,model=FrozenBackbone(),tokenizer=Tok())
++    prompts=['synthetic state number '+str(i)+' very long prompt '*4 for i in range(32)]
++    # Warm up and establish feature cache once per simulated rollout.
++    critic.values(prompts,actor_device=torch.device('cpu'))
++    t_cache=[]; t_full=[]
++    for _ in range(9):
++        t=time.perf_counter()
++        critic.values(prompts,actor_device=torch.device('cpu')).sum().backward()
++        t_cache.append(time.perf_counter()-t)
++        critic.head.zero_grad(set_to_none=True)
++        # Reference path performs full frozen-backbone classification each time.
++        critic._cached_features=None
++        critic._cached_prefix_key=None
++        t=time.perf_counter()
++        critic.values(prompts,actor_device=torch.device('cpu')).sum().backward()
++        t_full.append(time.perf_counter()-t)
++        critic.head.zero_grad(set_to_none=True)
++    r={'synthetic_prefixes':32,'frozen_backbone_calls_per_full_evaluation':critic.model.calls//10,
++       'cached_head_only_seconds_median':round(statistics.median(t_cache),6),
++       'full_backbone_seconds_median':round(statistics.median(t_full),6),
++       'cache_feature_bytes':critic._cached_features.numel()*critic._cached_features.element_size(),
++       'scope':'CPU synthetic; non-HF, not representative of real model throughput'}
++    print(json.dumps(r,indent=2))
++    with open('BENCHMARK_V73.json','w') as f: json.dump(r,f,indent=2)
++
++if __name__=='__main__':run()

@@ -1,0 +1,1385 @@
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,5 @@
++> **v50変更版の状態:** 無停止世代移行の完全版ではありません。追加した転送・復旧処理、検証結果、未接続の本番経路については [README_V50_STATUS.md](README_V50_STATUS.md) を先に確認してください。
++
+ **Kagami v43 safety patch:** See [README_KAGAMI_V43.md](README_KAGAMI_V43.md) for the changes and, crucially, the remaining unimplemented automatic live handoff work.
+ 
+ # Kagami v40 — verified generation rollover
+--- /dev/null
++++ b/README_V50_STATUS.md
+@@ -0,0 +1,107 @@
++# v50: bounded checkpoint preparation and safer epoch publication
++
++**Status: partial implementation; not a completed end-to-end live generation migration.**
++
++This archive contains the original v49 project plus the changes described below.
++The existing GUI / `train-live` worker still uses v1 genesis-bound ElasticNode
++connections. This patch DOES NOT make that production worker automatically
++switch generations. Do not deploy it under the assumption that it does.
++
++## Implemented and connected to the existing switch service
++
++- `epoch_objects_v50.py`: exclusively owned, persistent content-addressed cache;
++  byte reservations before download; object count and metadata page limits;
++  explicit owner pins; only unpinned cache objects can be evicted.
++- Transfers resume from the last durable block after disconnect or process exit.
++  Publication requires full SHA-256 verification. Recovery handles both the
++  last-block-before-rename and rename-before-SQL-commit crash windows.
++- `epoch_checkpoint_v50.py`: a dedicated disk worker keeps fsync, hashing and
++  SQLite off the relay event loop. Checkpoint views use hardlinks so unchanged
++  shards occupy disk once. A shared per-node token bucket limits requested
++  payload bandwidth, with a bounded burst. At most eight candidate neighbors
++  and one in-flight shard block by default; retries and RPC timeouts are bounded.
++- `LiveEpochSwitchService(checkpoint_stager=...)` uses this preparation path
++  before calling the supplied model/optimizer constructor. The old trainer
++  remains admitted while the new checkpoint downloads. The constructor must
++  return the exact staged paths; independent manifest/shard checks still run.
++- Rejoining switch services walk intermediate committed certificates in order
++  instead of rejecting any head more than one generation ahead forever.
++- Pointer publication now fails closed even if rename succeeds and directory
++  fsync fails. `resume_publication()` retries only pointer/network publication;
++  it does not flush or replay the carried suffix again. The network handoff
++  callback must be idempotent.
++- Watcher failures use bounded exponential retry delay with jitter. Restart
++  refuses an initial trainer inconsistent with the durable active pointer.
++
++## What is NOT implemented
++
++1. A new generation-aware data plane in the actual ElasticNode / GUI worker.
++   Its current signed hello rejects a different genesis. Relaxing that check
++   without separating update validation and routing would be incorrect.
++2. Automatic, verified candidate snapshot creation, voting and adoption from
++   the production training loop. The existing bridge's vote guard remains
++   disabled deliberately; it lacks an atomic model/certified-cut proof.
++3. Complete transport of old-generation late contributions, with end-to-end
++   deduplication across arbitrary generations and checkpoint cuts. Existing
++   carry components have tests, but are not a complete production integration.
++4. Automatic journal/carry retirement, checkpoint lease release and bounded
++   certificate-history compaction. The new cache's `retire()` is LOCAL lifecycle
++   functionality, not evidence authorizing retirement. It must only be called
++   after independently proving no live model or recovery path needs the base.
++5. Production-worker crash reconstruction from the new pointer. The service
++   detects a mismatch instead of silently restarting the old generation.
++6. Automatic liveness-preserving proposer recovery after split votes. The
++   existing one-vote-per-epoch ledger alone does not implement a complete
++   leader-election/ballot recovery protocol. Its safety checks must not be
++   relaxed to recover from a split vote.
++7. A real multi-thousand-device training/rollover deployment or long-duration
++   hardware validation. The included 4096-node test is an overlay topology test.
++
++These gaps are why this is not labelled a finished no-stop migration release.
++
++## Resource semantics
++
++`quota_bytes` limits reserved UNIQUE checkpoint payload bytes, including the
++manifest and partial downloads. Active/candidate pins are protected. If both
++cannot fit, preparation raises `CapacityError`; it does not delete the active
++base. Optimizer RAM/VRAM, old journals, carry archives, and certified history
++are outside this cache quota. SQLite has a separate page limit; its rollback
++journal and filesystem overhead require additional disk headroom.
++
++`bytes_per_second` limits this fetcher's requested checkpoint payload bytes.
++Use one stager per node to share the budget. It does not limit all existing
++WebRTC traffic, signatures, headers or the old gossip engine. Authentication
++and rejection of oversized responses BEFORE buffering are responsibilities of
++supplied transport callbacks. Manifest requests conservatively charge the
++maximum accepted manifest size. Bad responses/retries also consume budget.
++
++No local API can guarantee lossless retention of unlimited disconnected
++training history in finite storage. The production policy still needs explicit
++backpressure or a verified aggregation scheme. Never delete unincorporated
++updates just to claim bounded disk usage.
++
++## Integration API (not a GUI feature flag)
++
++Create `BoundedCheckpointStager(root, peers=..., fetch_manifest=...,
++fetch_block=..., quota_bytes=..., bytes_per_second=...)`. Callbacks:
++
++- `peers()` yields authenticated CURRENT neighbors, not a room-wide roster.
++- `await fetch_manifest(peer, digest, max_bytes)` returns bounded manifest bytes.
++- `await fetch_block(peer, digest, offset, length)` returns exactly that range.
++
++Pass this stager to `LiveEpochSwitchService(checkpoint_stager=stager, ...)`.
++With this option, `build_shadow(proposal, checkpoint)` takes two arguments;
++without it the original one-argument callback is unchanged. The checkpoint has
++`manifest`, `store`, `owner`. Construct a separate model, adapter, optimizer and
++durable journal, then return `PreparedEpoch`. Existing flush, carry, attestation,
++verification and idempotent network handoff hooks remain mandatory.
++
++After a separately verified retirement, `await stager.retire(checkpoint)` removes
++its view and releases its cache pins. Never call it just because a neighbor
++reported a newer head. Shutdown calls `await stager.close()`.
++
++## Validation
++
++See `VALIDATION_V50.md`. Tests include real PyTorch weight loading/optimizer
++steps during blocked transfer; the transport and lifecycle hooks in that
++integration test are test doubles, not an actual multi-peer WebRTC migration.
+--- /dev/null
++++ b/VALIDATION_V50.md
+@@ -0,0 +1,59 @@
++# Validation — 2026-10-27
++
++Result: **85 passed in 53.61s** on CPU (Python 3.12, torch 2.14.1+cpu).
++Compilation of the four changed/added runtime modules also passed.
++
++Reproduce from the archive's project root:
++
++```bash
++PYTHONPATH=. python -m pytest -q \
++  tests/test_epoch_checkpoint_v50.py \
++  tests/test_epoch_objects_v50.py \
++  tests/test_live_epoch_switch_v48.py \
++  tests/test_hot_swap_v45.py \
++  tests/test_epoch_carry_v46.py \
++  tests/test_destructive_gc_v47.py \
++  tests/test_epoch_runtime_v43.py \
++  tests/test_compact_epoch_network_v46.py \
++  tests/test_live_generation_transport_v42.py \
++  tests/test_generation_multicast_v46.py \
++  tests/test_epoch_ingest_v46.py \
++  tests/test_snapshot_boundary_paging_v26.py \
++  tests/test_v49_overlay_scale.py \
++  tests/test_v49_gossip_cost.py
++```
++
++Install the existing project dependencies and `pytest-asyncio` for async tests.
++
++## New evidence
++
++- Actual subprocess `os._exit(13)` after partial append; reopen resumes the
++  durable offset and reconstructs exactly the expected bytes.
++- Final-block-before-publication, rename-before-index-commit, uncommitted file
++  tail and corrupt cached object recovery.
++- Quota exhaustion leaves pinned active bytes intact; content deduplication,
++  object-count limits and exclusive cache writer checks.
++- Download cancellation, neighboring-source failover, bad-source hash rejection,
++  bounded retry and shared token-bucket concurrency.
++- 300 sequential cache generations with explicit lifecycle retirement: unique
++  payload storage stays at 600 bytes in that synthetic fixture and SQLite stays
++  under 128 KiB. This proves cache behavior, NOT bounded full-system disk usage.
++- Real checkpoint export, ranged download, full hash/semantic verification,
++  PyTorch model loading and SGD steps. Four old-model optimizer steps execute
++  while checkpoint transfer is blocked; new-model steps execute after handoff.
++  Ledger, journal attestation and transport handoff are test doubles here.
++- Reopening a completed checkpoint cache requires no redownload.
++- Simulated pointer directory-fsync failure fails closed; same-process retry
++  does not repeat flush or carry. Failed transport publication can retry safely
++  with an idempotent callback.
++- Lagging service selects the next intermediate certificate. A restart with a
++  mismatched durable generation pointer is refused.
++
++## Limits
++
++The 4096-participant checks cover the existing overlay's connectivity, degree
++and graph distances. They do NOT run 4096 training processes, WebRTC links or
++simultaneous generation migrations. No full GUI end-to-end migration, GPU/VRAM
++stress, real power-cut test or multi-day network soak has been performed.
++The existing production training/transport integration is still incomplete;
++see README_V50_STATUS.md before use.
+--- /dev/null
++++ b/patchlib/epoch_checkpoint_v50.py
+@@ -0,0 +1,208 @@
++"""Off-loop, quota-controlled checkpoint preparation for LiveEpochSwitchService.
++
++Transport is supplied as authenticated ranged RPCs; no remote paths/code.
++The caller must run a generation-aware data plane before enabling adoption.
++"""
++from __future__ import annotations
++
++import asyncio
++from concurrent.futures import ThreadPoolExecutor
++from dataclasses import dataclass
++import hashlib
++import os
++from pathlib import Path
++import shutil
++
++from .epoch_objects_v50 import EpochObjectStore, ByteRateLimiter, ResumableEpochFetch, CacheError, fsync_dir, digest_ok
++from .core import PatchError
++from .shards import parse_manifest, shard_map, semantic_shard_sha256, verify_shards, _blob_path
++
++
++@dataclass(frozen=True)
++class StagedCheckpoint:
++    manifest: Path
++    store: Path
++    owner: str
++
++
++class EpochCacheWorker:
++    """All fsync/hash/SQLite operations run on ONE dedicated disk thread."""
++    def __init__(self, root, **limits):
++        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='epoch-cache')
++        self._opening = self.pool.submit(EpochObjectStore, root, **limits)
++        self.closed = False
++
++    async def call(self, method, *args, **kwargs):
++        if self.closed:
++            raise RuntimeError('closed epoch cache')
++        def run():
++            store = self._opening.result()
++            return getattr(store, method)(*args, **kwargs)
++        # Cancellation does not interrupt a started fsync/SQL commit. Subsequent
++        # calls on this executor run AFTER it and observe the committed offset.
++        return await asyncio.wrap_future(self.pool.submit(run))
++
++    async def status(self,*args):return await self.call('status',*args)
++    async def append(self,*args):return await self.call('append',*args)
++    async def path(self,*args):return await self.call('path',*args)
++
++    async def close(self):
++        if self.closed:return
++        try:
++            await self.call('close')
++        finally:
++            self.closed = True
++            # All previously submitted jobs are complete; do not block the
++            # relay thread on worker teardown after a cancelled transfer.
++            await asyncio.to_thread(self.pool.shutdown, wait=True)
++
++
++class BoundedCheckpointStager:
++    """Prepare a verified checkpoint while the old trainer remains admitted.
++
++    fetch_manifest(peer, digest, max_bytes) and fetch_block(peer,digest,offset,n)
++    are authenticated application callbacks. The transport must enforce the
++    supplied length caps before allocating. All candidate shard bytes are
++    reserved atomically before any shard transfer. Failed stages stay resumable.
++
++    No journal GC authority is granted here. ``retire`` only removes this
++    cache's views; lifecycle integration must prove the model no longer uses
++    them before calling it. Never release the current base on elapsed time.
++    """
++    def __init__(self, root, *, peers, fetch_manifest, fetch_block,
++                 quota_bytes=8*1024**3, bytes_per_second=4*1024**2,
++                 max_manifest_bytes=16*1024**2, max_neighbors=8,
++                 max_objects=100_000, max_state_bytes=2*1024**4):
++        if not 1 <= max_manifest_bytes <= 96*1024**2:
++            raise ValueError('invalid manifest size limit')
++        self.root = Path(root)
++        self.peers = peers
++        self.fetch_manifest = fetch_manifest
++        self.max_manifest_bytes = max_manifest_bytes
++        self.max_neighbors = max_neighbors
++        self.max_state_bytes = max_state_bytes
++        self.cache = EpochCacheWorker(self.root/'cache',quota_bytes=quota_bytes,
++            max_objects=max_objects,max_object_bytes=max(64*1024**2,max_manifest_bytes))
++        self.limiter = ByteRateLimiter(bytes_per_second)
++        self.fetcher = ResumableEpochFetch(self.cache,fetch_block,limiter=self.limiter,max_neighbors=max_neighbors)
++        self.lock = asyncio.Lock()
++
++    async def close(self):
++        await self.cache.close()
++
++    def _peers(self):
++        selected=[]
++        for peer in self.peers():
++            if peer not in selected:selected.append(peer)
++            if len(selected)==self.max_neighbors:break
++        return selected
++
++    async def prepare(self, proposal):
++        async with self.lock:
++            digest = proposal.get('manifest')
++            semantic = proposal.get('semantic')
++            if not digest_ok(digest) or not digest_ok(semantic):
++                raise PatchError('invalid certified checkpoint digest')
++            owner='checkpoint-'+digest
++            peers=self._peers()
++            raw=None
++            try:
++                path=await self.cache.path(digest)
++                raw=await asyncio.to_thread(path.read_bytes)
++            except CacheError:
++                pass
++            if raw is None:
++                last_error=None
++                for peer in peers:
++                    try:
++                        # Manifest admission is also rate-budgeted. Reserve its
++                        # maximum upfront, so a lying source cannot bypass rate.
++                        remaining=self.max_manifest_bytes
++                        while remaining:
++                            amount=min(remaining,self.limiter.burst)
++                            await self.limiter.take(amount)
++                            remaining-=amount
++                        raw=await asyncio.wait_for(self.fetch_manifest(peer,digest,self.max_manifest_bytes),10.)
++                        if (not isinstance(raw,bytes) or not 0<len(raw)<=self.max_manifest_bytes
++                                or hashlib.sha256(raw).hexdigest()!=digest):
++                            raise CacheError('manifest hash/length mismatch')
++                        break
++                    except (OSError,TimeoutError,CacheError) as exc:
++                        last_error=exc
++                        raw=None
++                if raw is None:
++                    raise ConnectionError('no verified checkpoint manifest source') from last_error
++            meta=await asyncio.to_thread(parse_manifest,raw,max_state_bytes=self.max_state_bytes,
++                                         max_manifest_bytes=self.max_manifest_bytes)
++            if semantic_shard_sha256(meta)!=semantic:
++                raise PatchError('checkpoint semantic digest differs from certificate')
++            specs=shard_map(meta)
++            if digest in specs and specs[digest]!=len(raw):
++                raise PatchError('conflicting manifest/object size')
++            specs[digest]=len(raw)
++            await self.cache.call('pin',owner,specs)
++            size,offset,complete=await self.cache.status(digest)
++            if not complete:
++                while offset<len(raw):
++                    chunk=raw[offset:offset+256*1024]
++                    await self.cache.append(digest,offset,chunk)
++                    offset+=len(chunk)
++            for shard in specs:
++                if shard != digest:
++                    await self.fetcher.download(shard,peers)
++            # A view is a tree of hardlinks into pinned objects, never copied
++            # payloads. Shared shards across generations consume disk once.
++            target=self.root/'views'/digest
++            paths={key:await self.cache.path(key) for key in specs}
++            def build_view():
++                target.mkdir(parents=True,exist_ok=True)
++                if target.is_symlink() or target.parent.is_symlink():
++                    raise CacheError('unsafe checkpoint view')
++                def link(source,dest):
++                    dest.parent.mkdir(parents=True,exist_ok=True)
++                    if dest.is_symlink():raise CacheError('unsafe checkpoint link')
++                    if dest.exists():
++                        if not os.path.samefile(source,dest):
++                            raise CacheError('unexpected checkpoint view object')
++                    else:
++                        os.link(source,dest)
++                    fsync_dir(dest.parent)
++                link(paths[digest],target/'checkpoint.fmanifest')
++                for key in specs:
++                    if key!=digest:link(paths[key],_blob_path(target,key))
++                verify_shards(meta,target)
++                fsync_dir(target)
++                fsync_dir(target.parent)
++            await _finish_disk_mutation(build_view)
++            return StagedCheckpoint(target/'checkpoint.fmanifest',target,owner)
++
++    async def retire(self, checkpoint:StagedCheckpoint):
++        """Call only after local durable retirement proof; no remote GC command."""
++        async with self.lock:
++            digest=checkpoint.owner.removeprefix('checkpoint-')
++            target=self.root/'views'/digest
++            if (not digest_ok(digest) or checkpoint.store!=target or
++                    checkpoint.manifest!=target/'checkpoint.fmanifest'):
++                raise CacheError('foreign checkpoint retirement')
++            def remove():
++                if target.is_symlink():raise CacheError('unsafe checkpoint view')
++                if target.exists():shutil.rmtree(target)
++                if target.parent.exists():fsync_dir(target.parent)
++            await _finish_disk_mutation(remove)
++            await self.cache.call('release',checkpoint.owner)
++            await self.cache.call('collect',all_unpinned=True)
++
++
++async def _finish_disk_mutation(fn):
++    # Do not release a lifecycle lock while an uncancellable filesystem job
++    # can still create hardlinks to objects another coroutine may unpin.
++    task=asyncio.create_task(asyncio.to_thread(fn))
++    cancelled=False
++    while not task.done():
++        try:
++            await asyncio.shield(task)
++        except asyncio.CancelledError:
++            cancelled=True
++    result=task.result()
++    if cancelled:raise asyncio.CancelledError
++    return result
+--- a/patchlib/epoch_hot_swap_v45.py
++++ b/patchlib/epoch_hot_swap_v45.py
+@@ -121,6 +121,7 @@
+         self._active = 0
+         self._switching = False
+         self._fatal = False
++        self._pending_publication = None
+         self._condition = asyncio.Condition()
+ 
+     @staticmethod
+@@ -175,8 +176,8 @@
+         if verified(target) is not True:
+             raise PatchError('new checkpoint not independently verified')
+         async with self._condition:
+-            if self._switching:
+-                raise PatchError('generation change already in progress')
++            if self._switching or self._fatal:
++                raise PatchError('generation change already in progress or awaiting publication recovery')
+             old = self._current
+             if target.epoch != old.epoch + 1 or target.genesis == old.genesis:
+                 raise PatchError('epoch must advance by one to a distinct genesis')
+@@ -203,22 +204,48 @@
+                 raise PatchError('generation certificate changed during handoff')
+             # The durable new locator precedes publishing the live pointer.
+             # A crash between them restarts from new checkpoint, not old.
+-            durable_pointer(pointer,epoch=target.epoch,genesis=target.genesis,
+-                            checkpoint_hash=target.checkpoint_hash)
+-            # Re-key the prepared dual-generation transport while step
+-            # admission is still closed. The durable pointer MUST precede
+-            # the network-visible epoch publication. Any failure after the
+-            # pointer is durable is fail-stop: continuing on the old epoch
+-            # would create incompatible signed updates on a retired branch.
+-            try:
+-                if activate_new is not None and await _await_if_needed(
+-                        activate_new(old,target)) is not True:
+-                    raise PatchError('new generation transport activation failed')
+-            except BaseException:
+-                self._fatal = True
+-                raise
++            # From here even an fsync failure can mean rename committed. Never
++            # resume the old writer on an uncertain persistent pointer.
++            self._pending_publication = (old, target, Path(pointer), activate_new)
++            self._fatal = True
++            await self._publish_pending()
+             self._current = target
+             return old
++        finally:
++            async with self._condition:
++                self._switching = False
++                self._condition.notify_all()
++
++    async def _publish_pending(self):
++        old, target, pointer, activate_new = self._pending_publication
++        durable_pointer(pointer, epoch=target.epoch, genesis=target.genesis,
++                        checkpoint_hash=target.checkpoint_hash)
++        if activate_new is not None and await _await_if_needed(activate_new(old, target)) is not True:
++            raise PatchError('new generation transport activation failed')
++        self._current = target
++        self._pending_publication = None
++        self._fatal = False
++
++    @property
++    def pending_publication(self):
++        return self._pending_publication is not None
++
++    async def resume_publication(self):
++        """Retry only pointer/transport publication, never flush or replay twice.
++
++        The locally supplied transport hook MUST be idempotent. Works during
++        this process lifetime; after a crash reconstruct from the durable
++        checkpoint + carry + journal before creating this router.
++        """
++        async with self._condition:
++            if self._switching:
++                raise PatchError('generation publication already in progress')
++            if self._pending_publication is None:
++                return False
++            self._switching = True
++        try:
++            await self._publish_pending()
++            return True
+         finally:
+             async with self._condition:
+                 self._switching = False
+--- /dev/null
++++ b/patchlib/epoch_objects_v50.py
+@@ -0,0 +1,388 @@
++"""Durable bounded content-addressed epoch transfer cache.
++
++Single process ownership, SQLite owner pins, sequential resumable blocks,
++SHA-256 before publication, byte reservations before download. This store is
++for checkpoints only: it MUST NOT collect event journals or carry archives.
++It is independent of torch so crash/quota/transfer tests need no accelerator.
++"""
++from __future__ import annotations
++
++import asyncio
++import hashlib
++import inspect
++import math
++import os
++import sqlite3
++import time
++from pathlib import Path
++
++
++class CacheError(ValueError):
++    pass
++
++
++class CapacityError(CacheError):
++    pass
++
++
++def digest_ok(value):
++    return isinstance(value, str) and len(value) == 64 and all(c in '0123456789abcdef' for c in value)
++
++
++def fsync_dir(path):
++    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
++    try:
++        os.fsync(fd)
++    finally:
++        os.close(fd)
++
++
++class EpochObjectStore:
++    """Owns a private directory; one writer process enforced by flock.
++
++    All methods are synchronous and serialized by the caller. Open and use in
++    the same thread. Payload reservations are limited by quota; SQLite has a
++    separate hard page limit and incremental vacuum. Owner pins never expire
++    on a wall clock: an offline trainer's base must not be evicted by a TTL.
++    """
++    def __init__(self, root, *, quota_bytes=8*1024**3, max_objects=100_000,
++                 max_object_bytes=64*1024**2, metadata_bytes=64*1024**2):
++        import fcntl
++        for n in (quota_bytes, max_objects, max_object_bytes, metadata_bytes):
++            if type(n) is not int or n <= 0:
++                raise ValueError('positive integer cache limits required')
++        self.root = Path(root)
++        self.root.mkdir(parents=True, exist_ok=True)
++        if self.root.is_symlink():
++            raise CacheError('cache root cannot be a symlink')
++        self.lock = (self.root/'owner.lock').open('a+b')
++        try:
++            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BaseException:
++            self.lock.close()
++            raise CacheError('epoch cache already has an owner')
++        self.quota = quota_bytes
++        self.max_objects = max_objects
++        self.max_object_bytes = max_object_bytes
++        self.db = None
++        try:
++            for name in ('objects', 'partial'):
++                p = self.root/name
++                p.mkdir(exist_ok=True)
++                if p.is_symlink():
++                    raise CacheError('unsafe cache directory')
++            self.db = sqlite3.connect(self.root/'cache.sqlite3', timeout=5)
++            self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')
++            # DELETE keeps metadata disk bounded without accumulating a WAL.
++            self.db.execute('PRAGMA journal_mode=DELETE')
++            self.db.execute('PRAGMA synchronous=FULL')
++            self.db.execute('PRAGMA foreign_keys=ON')
++            page_size = self.db.execute('PRAGMA page_size').fetchone()[0]
++            self.db.execute(f'PRAGMA max_page_count={max(32, metadata_bytes//page_size)}')
++            self.db.executescript('''
++                CREATE TABLE IF NOT EXISTS objects(
++                    digest TEXT PRIMARY KEY, size INTEGER NOT NULL,
++                    received INTEGER NOT NULL DEFAULT 0,
++                    complete INTEGER NOT NULL DEFAULT 0,
++                    accessed REAL NOT NULL);
++                CREATE TABLE IF NOT EXISTS owners(
++                    owner TEXT NOT NULL, digest TEXT NOT NULL REFERENCES objects(digest),
++                    PRIMARY KEY(owner,digest));
++                CREATE INDEX IF NOT EXISTS owner_digest ON owners(digest);
++                CREATE INDEX IF NOT EXISTS lru ON objects(accessed);
++            ''')
++            self._recover()
++            if self.reserved_bytes > self.quota or self.count > self.max_objects:
++                self.collect()
++                if self.reserved_bytes > self.quota or self.count > self.max_objects:
++                    raise CapacityError('new limit smaller than pinned state')
++        except BaseException:
++            self.close()
++            raise
++
++    def close(self):
++        if self.db is not None:
++            self.db.close()
++            self.db = None
++        self.lock.close()
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, *_):
++        self.close()
++
++    @property
++    def reserved_bytes(self):
++        return self.db.execute('SELECT COALESCE(SUM(size),0) FROM objects').fetchone()[0]
++
++    @property
++    def count(self):
++        return self.db.execute('SELECT COUNT(*) FROM objects').fetchone()[0]
++
++    def _path(self, digest, *, partial=False):
++        if not digest_ok(digest):
++            raise CacheError('invalid content digest')
++        return self.root/('partial' if partial else 'objects')/(digest+'.blob')
++
++    @staticmethod
++    def _hash_file(path):
++        with path.open('rb') as f:
++            return hashlib.file_digest(f, 'sha256').hexdigest()
++
++    def _recover(self):
++        # Files unknown to the committed index can only be orphaned cache data.
++        # Never traverse or collect files outside these two owned directories.
++        for dirname in ('objects', 'partial'):
++            for p in (self.root/dirname).iterdir():
++                digest = p.name.removesuffix('.blob')
++                if (not digest_ok(digest) or p.is_symlink() or not p.is_file()):
++                    raise CacheError('unexpected file in private epoch cache')
++                if not self.db.execute('SELECT 1 FROM objects WHERE digest=?', (digest,)).fetchone():
++                    p.unlink()
++        for digest, size, received, complete in self.db.execute(
++                'SELECT digest,size,received,complete FROM objects').fetchall():
++            final = self._path(digest)
++            part = self._path(digest, partial=True)
++            # Crash after rename but before SQL completion: finish publication.
++            if final.exists():
++                if final.stat().st_size == size and self._hash_file(final) == digest:
++                    with self.db:
++                        self.db.execute('UPDATE objects SET received=size,complete=1 WHERE digest=?', (digest,))
++                    part.unlink(missing_ok=True)
++                    continue
++                final.unlink()
++                received = 0
++            if not part.exists() or part.stat().st_size < received or complete:
++                received = 0
++            if part.exists():
++                with part.open('r+b') as f:
++                    f.truncate(received)
++                    f.flush()
++                    os.fsync(f.fileno())
++            # Crash after the last block's SQL commit but before verification
++            # or rename must not strand a permanently "full but incomplete"
++            # download with no remaining range to request.
++            if received == size and part.exists():
++                if self._hash_file(part) == digest:
++                    os.replace(part, final)
++                    fsync_dir(final.parent)
++                    fsync_dir(part.parent)
++                    with self.db:
++                        self.db.execute('UPDATE objects SET received=size,complete=1 WHERE digest=?', (digest,))
++                    continue
++                part.unlink()
++                fsync_dir(part.parent)
++                received = 0
++            with self.db:
++                self.db.execute('UPDATE objects SET received=?,complete=0 WHERE digest=?', (received, digest))
++
++    def pin(self, owner, specs):
++        """Atomically reserve/pin a whole checkpoint; no partial pin on failure.
++
++        Caller supplies a verified manifest's UNIQUE {digest:size} mapping.
++        Calling again adds pins idempotently, it never unpins the active base.
++        """
++        if not isinstance(owner, str) or not 0 < len(owner) <= 128:
++            raise CacheError('invalid owner')
++        if not isinstance(specs, dict) or not specs or len(specs) > self.max_objects:
++            raise CacheError('invalid checkpoint object count')
++        if any(not digest_ok(d) or type(s) is not int or not 0 < s <= self.max_object_bytes
++               for d, s in specs.items()):
++            raise CacheError('invalid object specification')
++        missing = {}
++        for d, size in specs.items():
++            row = self.db.execute('SELECT size FROM objects WHERE digest=?', (d,)).fetchone()
++            if row is not None and row[0] != size:
++                raise CacheError('same digest with conflicting size')
++            if row is None:
++                missing[d] = size
++        need = sum(missing.values())
++        if need > self.quota:
++            raise CapacityError('checkpoint exceeds cache quota')
++        # Protect requested objects from eviction before they receive new pins.
++        self.collect(required_bytes=need, required_objects=len(missing), protect=set(specs))
++        if self.reserved_bytes+need > self.quota or self.count+len(missing) > self.max_objects:
++            raise CapacityError('active/pending checkpoint pins exhaust quota')
++        with self.db:
++            for digest, size in missing.items():
++                self.db.execute('INSERT INTO objects VALUES(?,?,0,0,?)', (digest, size, time.time()))
++            self.db.executemany('INSERT OR IGNORE INTO owners VALUES(?,?)', ((owner,d) for d in specs))
++
++    def release(self, owner):
++        """Local lifecycle only: call AFTER durable adoption/retirement proof.
++
++        Never expose this as a remote message handler or expire by peer age.
++        """
++        with self.db:
++            self.db.execute('DELETE FROM owners WHERE owner=?', (owner,))
++
++    def collect(self, *, required_bytes=0, required_objects=0, protect=frozenset(), all_unpinned=False):
++        freed = 0
++        used, count = self.reserved_bytes, self.count
++        for digest, size in self.db.execute('''SELECT digest,size FROM objects o
++            WHERE NOT EXISTS(SELECT 1 FROM owners p WHERE p.digest=o.digest)
++            ORDER BY accessed''').fetchall():
++            if not all_unpinned and used+required_bytes <= self.quota and count+required_objects <= self.max_objects:
++                break
++            if digest in protect:
++                continue
++            # Files first: a crash leaves a missing unpinned entry, repaired at
++            # startup. SQL first could leave unaccounted payloads at full quota.
++            self._path(digest).unlink(missing_ok=True)
++            self._path(digest, partial=True).unlink(missing_ok=True)
++            with self.db:
++                self.db.execute('DELETE FROM objects WHERE digest=?', (digest,))
++            used -= size
++            count -= 1
++            freed += size
++        if freed:
++            fsync_dir(self.root/'objects')
++            fsync_dir(self.root/'partial')
++            self.db.execute('PRAGMA incremental_vacuum(128)')
++        return freed
++
++    def status(self, digest):
++        row = self.db.execute('SELECT size,received,complete FROM objects WHERE digest=?', (digest,)).fetchone()
++        if row is None:
++            raise CacheError('unreserved object')
++        return row[0], row[1], bool(row[2])
++
++    def append(self, digest, offset, data):
++        """Persist one requested block. Replay offsets are rejected, never added twice."""
++        size, received, complete = self.status(digest)
++        if complete:
++            raise CacheError('object already complete')
++        if (type(offset) is not int or offset != received or not isinstance(data, bytes)
++                or not 0 < len(data) <= 256*1024 or offset+len(data) > size):
++            raise CacheError('unsolicited/oversized/noncontiguous object block')
++        path = self._path(digest, partial=True)
++        if path.is_symlink():
++            raise CacheError('unsafe partial path')
++        with path.open('r+b' if path.exists() else 'w+b') as f:
++            f.seek(offset)
++            f.write(data)
++            f.truncate()
++            f.flush()
++            os.fsync(f.fileno())
++        fsync_dir(path.parent)
++        end = offset+len(data)
++        with self.db:
++            self.db.execute('UPDATE objects SET received=?,accessed=? WHERE digest=?', (end,time.time(),digest))
++        if end == size:
++            if self._hash_file(path) != digest:
++                # Discard corrupt partial bytes; leave the pin/reservation.
++                path.unlink()
++                fsync_dir(path.parent)
++                with self.db:
++                    self.db.execute('UPDATE objects SET received=0 WHERE digest=?', (digest,))
++                raise CacheError('downloaded checkpoint object hash mismatch')
++            target = self._path(digest)
++            os.replace(path, target)
++            fsync_dir(target.parent)
++            fsync_dir(path.parent)
++            with self.db:
++                self.db.execute('UPDATE objects SET complete=1 WHERE digest=?', (digest,))
++        return end == size
++
++    def path(self, digest):
++        if not self.status(digest)[2]:
++            raise CacheError('object not yet verified')
++        return self._path(digest)
++
++    def read_block(self, digest, offset, length):
++        size, _, complete = self.status(digest)
++        if (not complete or type(offset) is not int or type(length) is not int
++                or not 0 <= offset < size or not 1 <= length <= 256*1024):
++            raise CacheError('invalid object range')
++        with self.path(digest).open('rb') as f:
++            f.seek(offset)
++            return f.read(min(length, size-offset))
++
++
++class ByteRateLimiter:
++    """One shared limiter per NODE, not per neighbor. Bounded burst + byte rate."""
++    def __init__(self, bytes_per_second, *, burst=256*1024):
++        if (not isinstance(bytes_per_second, (int,float)) or not math.isfinite(bytes_per_second)
++                or bytes_per_second <= 0 or type(burst) is not int or burst <= 0):
++            raise ValueError('invalid bandwidth budget')
++        self.rate = bytes_per_second
++        self.burst = burst
++        self.tokens = float(burst)
++        self.last = time.monotonic()
++        self.lock = asyncio.Lock()
++
++    async def take(self, size):
++        if type(size) is not int or not 0 < size <= self.burst:
++            raise ValueError('request larger than bandwidth burst')
++        async with self.lock:
++            while True:
++                now = time.monotonic()
++                self.tokens = min(self.burst, self.tokens+(now-self.last)*self.rate)
++                self.last = now
++                if self.tokens >= size:
++                    self.tokens -= size
++                    return
++                await asyncio.sleep(min(1.0, (size-self.tokens)/self.rate))
++
++
++class ResumableEpochFetch:
++    """Pull only from current neighbors, at most max_neighbors; no room broadcast.
++
++    fetch(peer,digest,offset,length) must use an authenticated bounded RPC.
++    It returns exactly the requested bytes; transport must reject oversized
++    frames BEFORE buffering. This class bounds requests and disk, not an
++    underlying WebRTC implementation's internal buffers.
++    """
++    def __init__(self, store, fetch, *, limiter, max_neighbors=8, block_bytes=64*1024,
++                 timeout=10., max_attempts=4):
++        if (type(max_neighbors) is not int or not 1 <= max_neighbors <= 32
++                or type(block_bytes) is not int or not 1 <= block_bytes <= min(256*1024,limiter.burst)
++                or not math.isfinite(timeout) or timeout <= 0
++                or type(max_attempts) is not int or not 1 <= max_attempts <= 32):
++            raise ValueError('invalid fetch limits')
++        self.store, self.fetch, self.limiter = store, fetch, limiter
++        self.max_neighbors, self.block_bytes = max_neighbors, block_bytes
++        self.timeout, self.max_attempts = timeout, max_attempts
++        self.lock = asyncio.Lock()
++        self.cursor = 0
++
++    async def _store(self, method, *args):
++        result = getattr(self.store, method)(*args)
++        return await result if inspect.isawaitable(result) else result
++
++    async def download(self, digest, peers):
++        # One in-flight block per cache worker. Multiple callers do not multiply
++        # bandwidth, duplicate a partial offset, or grow a persistent work queue.
++        async with self.lock:
++            candidates = []
++            for peer in peers:
++                if peer not in candidates:
++                    candidates.append(peer)
++                if len(candidates) == self.max_neighbors:
++                    break
++            size, offset, complete = await self._store('status', digest)
++            if complete:
++                return await self._store('path', digest)
++            if not candidates:
++                raise ConnectionError('no connected checkpoint source')
++            failures = 0
++            while offset < size:
++                peer = candidates[self.cursor % len(candidates)]
++                length = min(self.block_bytes, size-offset)
++                await self.limiter.take(length)  # failed traffic counts too
++                try:
++                    data = await asyncio.wait_for(self.fetch(peer,digest,offset,length),self.timeout)
++                    if not isinstance(data, bytes) or len(data) != length:
++                        raise CacheError('invalid checkpoint range response')
++                    await self._store('append', digest, offset, data)
++                except (OSError, TimeoutError, CacheError):
++                    failures += 1
++                    self.cursor += 1
++                    size, offset, complete = await self._store('status', digest)
++                    if failures >= self.max_attempts:
++                        raise
++                    await asyncio.sleep(min(2., .05*2**(failures-1)))
++                    continue
++                offset += length
++            return await self._store('path', digest)
+--- a/patchlib/live_epoch_switch_v48.py
++++ b/patchlib/live_epoch_switch_v48.py
+@@ -14,6 +14,8 @@
+ import asyncio
+ import hashlib
+ import json
++import random
++import time
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Awaitable, Callable, Any
+@@ -94,7 +96,7 @@
+                  carry_suffix: Callable[[TrainerGeneration,TrainerGeneration,dict], Any],
+                  transport_handoff: Callable[[TrainerGeneration,TrainerGeneration,dict], Any],
+                  attest_journal: Callable[[TrainerGeneration,dict], Any],
+-                 validate_shards: bool = True):
++                 validate_shards: bool = True, checkpoint_stager=None):
+         self.ledger = ledger
+         self.router = router
+         self.root = Path(root)
+@@ -106,9 +108,23 @@
+         self._transport = transport_handoff
+         self._attest = attest_journal
+         self.validate_shards=validate_shards
++        self.checkpoint_stager=checkpoint_stager
+         self._lock = asyncio.Lock()
+-        self._bad = {}  # retry throttling only, never durable proof
++        self._retry_at = 0.0
++        self._failures = 0
+         self.pointer = self.root/'active-epoch.json'
++        # Restart cannot silently construct an old trainer over a new pointer.
++        # The caller must reconstruct the committed generation before admission.
++        if self.pointer.exists():
++            if self.pointer.is_symlink() or self.pointer.stat().st_size > 4096:
++                raise PatchError('unsafe active epoch pointer')
++            saved = json.loads(self.pointer.read_text())
++            current = router.current
++            if (saved.get('format') != 'kagami-hot-pointer-v1' or
++                    saved.get('epoch') != current.epoch or
++                    saved.get('genesis') != current.genesis or
++                    saved.get('checkpoint') != current.checkpoint_hash):
++                raise PatchError('reconstruct durable active generation before starting trainer')
+ 
+     def _certificate(self):
+         latest=self.ledger.latest()
+@@ -123,6 +139,16 @@
+         certified=self.ledger.certified_epoch(epoch)
+         if certified is None or certified.get('proposal')!=proposal:
+             raise PatchError('quorum head is not durably certified')
++        # A disconnected peer may lag many commits. Walk durable certificates
++        # one at a time rather than getting stuck forever at the latest head.
++        expected = self.router.current.epoch + 1
++        if epoch > expected:
++            next_certificate = self.ledger.certified_epoch(expected)
++            if next_certificate is None:
++                raise PatchError('missing intermediate generation; fetch certified chain')
++            proposal = next_certificate.get('proposal')
++            if not isinstance(proposal, dict) or proposal.get('epoch') != expected:
++                raise PatchError('invalid intermediate certified generation')
+         return proposal
+ 
+     async def activate_next(self):
+@@ -134,6 +160,8 @@
+         invoked after any irreversible log deletion (none occurs here).
+         """
+         async with self._lock:
++            if self.router.pending_publication:
++                return await self.router.resume_publication()
+             proposal=self._certificate()
+             if proposal is None or proposal['epoch']<=self.router.current.epoch:
+                 return False
+@@ -141,7 +169,17 @@
+             # local updates. Recover the missing certificate first.
+             if proposal['epoch']!=self.router.current.epoch+1:
+                 raise PatchError('missing intermediate generation; fetch certified chain')
+-            prepared=await self._build(proposal)
++            if self.checkpoint_stager is None:
++                prepared=await self._build(proposal)
++            else:
++                checkpoint=await self.checkpoint_stager.prepare(proposal)
++                # Explicit two-argument constructor when using the bounded
++                # cache: the builder loads these independently verified files.
++                prepared=await self._build(proposal,checkpoint)
++                if (not isinstance(prepared,PreparedEpoch) or
++                        Path(prepared.manifest)!=checkpoint.manifest or
++                        Path(prepared.store)!=checkpoint.store):
++                    raise PatchError('builder substituted staged checkpoint paths')
+             if (not isinstance(prepared,PreparedEpoch) or
+                     prepared.epoch!=proposal['epoch'] or
+                     prepared.proposal_digest!=_digest(proposal) or
+@@ -187,11 +225,20 @@
+         if not 0.2<=interval<=300.0:raise ValueError('bad epoch poll interval')
+         while not stop.is_set():
+             try:
+-                await self.activate_next()
++                if time.monotonic() >= self._retry_at:
++                    await self.activate_next()
++                    self._failures = 0
++                    self._retry_at = 0.0
+             except (PatchError,OSError,ValueError,RuntimeError) as exc:
+-                if report is not None: report(exc)
++                # Failed checkpoints must not cause a full model rebuild every
++                # three seconds across thousands of peers. Jitter avoids storms.
++                self._failures = min(8, self._failures+1)
++                self._retry_at = time.monotonic()+random.uniform(.75,1.25)*min(300,2**self._failures)
++                if report is not None:
++                    await _await(report(exc))
+             try:await asyncio.wait_for(stop.wait(),timeout=interval)
+             except asyncio.TimeoutError:pass
++
+ 
+ 
+ async def _await(value):
+--- /dev/null
++++ b/tests/test_epoch_checkpoint_v50.py
+@@ -0,0 +1,106 @@
++import asyncio
++import hashlib
++from types import SimpleNamespace
++import pytest
++import torch
++from patchlib.shards import export_state_sharded,read_manifest,semantic_shard_sha256,_blob_path,apply_sharded_state
++from patchlib.epoch_checkpoint_v50 import BoundedCheckpointStager
++from patchlib.epoch_objects_v50 import CapacityError
++from patchlib.live_epoch_switch_v48 import LiveEpochSwitchService,PreparedEpoch,certified_genesis
++from patchlib.epoch_hot_swap_v45 import TrainerGeneration,TrainerStepRouter
++from patchlib.online_generation import _digest
++
++
++def snapshot(root):
++    model=torch.nn.Linear(2,2,bias=False)
++    with torch.no_grad():model.weight.fill_(2.)
++    manifest=root/'source.fmanifest';store=root/'source'
++    export_state_sharded(model,store,manifest,model_id='test/model',revision='v1',peer_id='tester',shard_bytes=65536)
++    raw=manifest.read_bytes()
++    p={'epoch':1,'manifest':hashlib.sha256(raw).hexdigest(),'semantic':semantic_shard_sha256(read_manifest(manifest)),
++       'room':'room','parent':'f'*64}
++    return model,store,raw,p
++
++
++@pytest.mark.asyncio
++async def test_real_download_and_step_boundary_switch(tmp_path):
++    source,store,raw,p=snapshot(tmp_path)
++    requested=asyncio.Event();release=asyncio.Event();calls=[]
++    async def fm(peer,d,limit):
++        assert d==p['manifest'] and len(raw)<=limit
++        return raw
++    async def fb(peer,d,o,n):
++        calls.append((d,o,n));requested.set();await release.wait()
++        return _blob_path(store,d).read_bytes()[o:o+n]
++    stager=BoundedCheckpointStager(tmp_path/'bounded',peers=lambda:['p1'],fetch_manifest=fm,fetch_block=fb,
++        quota_bytes=1024*1024,max_manifest_bytes=65536,bytes_per_second=1e9)
++    model=torch.nn.Linear(2,2,bias=False)
++    old=TrainerGeneration(0,'a'*64,'b'*64,model,object(),torch.optim.SGD(model.parameters(),lr=.01),SimpleNamespace(genesis='a'*64))
++    router=TrainerStepRouter(old)
++    class Ledger:
++        def latest(self):return {'proposal':p}
++        def certified_epoch(self,n):return {'proposal':p} if n==1 else None
++    built=[]
++    async def build(proposal,checkpoint):
++        model=torch.nn.Linear(2,2,bias=False)
++        await asyncio.to_thread(apply_sharded_state,model,checkpoint.manifest,checkpoint.store,
++                               model_id='test/model',revision='v1')
++        genesis=certified_genesis(proposal)
++        g=TrainerGeneration(1,genesis,p['manifest'],model,object(),torch.optim.SGD(model.parameters(),lr=.01),SimpleNamespace(genesis=genesis))
++        built.append(checkpoint)
++        return PreparedEpoch(1,_digest(p),p['manifest'],g,checkpoint.manifest,checkpoint.store)
++    switch=LiveEpochSwitchService(ledger=Ledger(),router=router,root=tmp_path/'runtime',build_shadow=build,
++        verify_local=lambda *_:True,flush_unpublished=lambda *_:None,carry_suffix=lambda *_:None,
++        transport_handoff=lambda *_:True,attest_journal=lambda *_:True,checkpoint_stager=stager)
++    task=None
++    try:
++        task=asyncio.create_task(switch.activate_next())
++        await asyncio.wait_for(requested.wait(),3)
++        for _ in range(4):
++            async with router.step() as g:
++                assert g is old
++                g.optimizer.zero_grad();g.model(torch.ones(1,2)).sum().backward();g.optimizer.step()
++        release.set()
++        assert await asyncio.wait_for(task,5)
++        async with router.step() as g:
++            assert g.epoch==1 and torch.equal(g.model.weight,source.weight)
++            g.model(torch.ones(1,2)).sum().backward();g.optimizer.step()
++        count=len(calls)
++        repeated=await stager.prepare(p)
++        assert repeated==built[0] and len(calls)==count
++        await stager.retire(repeated)
++        assert not repeated.store.exists()
++    finally:
++        release.set()
++        if task is not None and not task.done():
++            task.cancel();await asyncio.gather(task,return_exceptions=True)
++        await stager.close()
++
++
++@pytest.mark.asyncio
++async def test_cache_reopen_avoids_network(tmp_path):
++    _,store,raw,p=snapshot(tmp_path);calls=[]
++    async def fm(*_):calls.append('manifest');return raw
++    async def fb(peer,d,o,n):calls.append('block');return _blob_path(store,d).read_bytes()[o:o+n]
++    def make():return BoundedCheckpointStager(tmp_path/'cache-root',peers=lambda:['source'],
++        fetch_manifest=fm,fetch_block=fb,max_manifest_bytes=65536,bytes_per_second=1e9)
++    first=make()
++    try:before=await first.prepare(p)
++    finally:await first.close()
++    count=len(calls);second=make()
++    try:
++        assert await second.prepare(p)==before
++        assert len(calls)==count
++    finally:await second.close()
++
++
++@pytest.mark.asyncio
++async def test_quota_failure_before_tensor_requests(tmp_path):
++    _,store,raw,p=snapshot(tmp_path)
++    async def fm(*_):return raw
++    async def fb(*_):raise AssertionError('tensor requested without capacity')
++    stager=BoundedCheckpointStager(tmp_path/'small',peers=lambda:['source'],fetch_manifest=fm,fetch_block=fb,
++        quota_bytes=1,max_manifest_bytes=65536,bytes_per_second=1e9)
++    try:
++        with pytest.raises(CapacityError):await stager.prepare(p)
++    finally:await stager.close()
+--- /dev/null
++++ b/tests/test_epoch_objects_v50.py
+@@ -0,0 +1,225 @@
++import asyncio
++import hashlib
++import os
++import subprocess
++import sys
++
++import pytest
++
++from patchlib.epoch_objects_v50 import (
++    EpochObjectStore, CacheError, CapacityError, ByteRateLimiter, ResumableEpochFetch,
++)
++
++
++def sha(data):
++    return hashlib.sha256(data).hexdigest()
++
++
++def test_resume_after_abrupt_process_exit(tmp_path):
++    content = b'abcdefgh'*100
++    digest = sha(content)
++    source = '''
++import os, sys
++from patchlib.epoch_objects_v50 import EpochObjectStore
++s=EpochObjectStore(sys.argv[1],quota_bytes=1024)
++s.pin('candidate',{sys.argv[2]:800})
++s.append(sys.argv[2],0,b'abcdefgh'*40)
++os._exit(13)
++'''
++    result = subprocess.run([sys.executable,'-c',source,str(tmp_path),digest])
++    assert result.returncode == 13
++    with EpochObjectStore(tmp_path,quota_bytes=1024) as s:
++        assert s.status(digest) == (800,320,False)
++        assert s.append(digest,320,content[320:])
++        assert s.path(digest).read_bytes() == content
++
++
++def test_quota_never_evicts_pins_and_deduplicates(tmp_path):
++    a,b = b'a'*600,b'b'*600
++    with EpochObjectStore(tmp_path,quota_bytes=1024) as s:
++        s.pin('active',{sha(a):len(a)})
++        s.append(sha(a),0,a)
++        s.pin('shadow',{sha(a):len(a)})
++        assert s.reserved_bytes == 600
++        with pytest.raises(CapacityError):
++            s.pin('new',{sha(b):len(b)})
++        assert s.path(sha(a)).read_bytes() == a
++        s.release('active')
++        assert s.collect(all_unpinned=True) == 0
++        s.release('shadow')
++        s.pin('new',{sha(b):len(b)})
++        assert s.count == 1 and s.reserved_bytes == 600
++
++
++def test_corrupt_payload_cannot_publish(tmp_path):
++    with EpochObjectStore(tmp_path,quota_bytes=100) as s:
++        digest=sha(b'good')
++        s.pin('candidate',{digest:4})
++        with pytest.raises(CacheError,match='hash mismatch'):
++            s.append(digest,0,b'evil')
++        assert s.status(digest) == (4,0,False)
++        with pytest.raises(CacheError):
++            s.path(digest)
++        s.append(digest,0,b'good')
++        assert s.path(digest).read_bytes() == b'good'
++
++
++def test_recover_rename_before_index_commit(tmp_path):
++    data=b'durable'
++    d=sha(data)
++    with EpochObjectStore(tmp_path) as s:
++        s.pin('active',{d:len(data)})
++        s.append(d,0,data)
++        with s.db:
++            s.db.execute('UPDATE objects SET complete=0,received=0 WHERE digest=?',(d,))
++    with EpochObjectStore(tmp_path) as s:
++        assert s.status(d) == (len(data),len(data),True)
++
++
++def test_partial_uncommitted_tail_is_truncated(tmp_path):
++    data=b'abcdefgh'
++    d=sha(data)
++    with EpochObjectStore(tmp_path) as s:
++        s.pin('shadow',{d:8})
++        s.append(d,0,data[:3])
++        with s._path(d,partial=True).open('ab') as f:
++            f.write(b'crash-tail')
++    with EpochObjectStore(tmp_path) as s:
++        assert s._path(d,partial=True).read_bytes() == b'abc'
++        s.append(d,3,data[3:])
++        assert s.path(d).read_bytes() == data
++
++
++def test_cached_corruption_is_redownloaded_on_restart(tmp_path):
++    d=sha(b'good')
++    with EpochObjectStore(tmp_path) as s:
++        s.pin('active',{d:4})
++        s.append(d,0,b'good')
++        s.path(d).write_bytes(b'evil')
++    with EpochObjectStore(tmp_path) as s:
++        assert s.status(d) == (4,0,False)
++        assert s.collect(all_unpinned=True) == 0
++
++
++def test_second_owner_rejected(tmp_path):
++    with EpochObjectStore(tmp_path):
++        with pytest.raises(CacheError,match='already has an owner'):
++            EpochObjectStore(tmp_path)
++
++
++def test_object_count_and_range_limits(tmp_path):
++    with EpochObjectStore(tmp_path,max_objects=1) as s:
++        s.pin('active',{sha(b'a'):1})
++        with pytest.raises(CapacityError):
++            s.pin('next',{sha(b'b'):1})
++        with pytest.raises(CacheError):
++            s.append(sha(b'a'),1,b'a')
++        with pytest.raises(CacheError):
++            s.pin('next',{'../../bad':3})
++
++
++@pytest.mark.asyncio
++async def test_failover_only_requests_missing_bytes(tmp_path):
++    data = b'x'*200_000
++    digest=sha(data)
++    calls=[]
++    async def request(peer,d,offset,length):
++        calls.append((peer,offset,length))
++        if peer=='disconnected':
++            raise ConnectionError('gone')
++        return data[offset:offset+length]
++    with EpochObjectStore(tmp_path) as s:
++        s.pin('shadow',{digest:len(data)})
++        s.append(digest,0,data[:65000])
++        downloader=ResumableEpochFetch(s,request,limiter=ByteRateLimiter(1e9))
++        result=await downloader.download(digest,['disconnected','live'])
++        assert result.read_bytes()==data
++        assert calls[0][1]==65000
++        assert all(n<=65536 for _,_,n in calls)
++        assert sum(n for p,_,n in calls if p=='live')==len(data)-65000
++
++
++@pytest.mark.asyncio
++async def test_cancel_fetch_and_resume(tmp_path):
++    data=b'x'*100_000
++    d=sha(data)
++    started=asyncio.Event()
++    async def blocked(*_):
++        started.set()
++        await asyncio.Event().wait()
++    with EpochObjectStore(tmp_path) as s:
++        s.pin('shadow',{d:len(data)})
++        fetch=ResumableEpochFetch(s,blocked,limiter=ByteRateLimiter(1e9))
++        task=asyncio.create_task(fetch.download(d,['neighbor']))
++        await started.wait()
++        task.cancel()
++        with pytest.raises(asyncio.CancelledError):
++            await task
++        assert s.status(d)==(len(data),0,False)
++        async def good(p,k,o,n):return data[o:o+n]
++        fetch.fetch=good
++        await asyncio.wait_for(fetch.download(d,['neighbor']),1)
++        assert s.path(d).read_bytes()==data
++
++
++@pytest.mark.asyncio
++async def test_bad_source_rotated_and_retry_bounded(tmp_path):
++    content=b'12345678'
++    d=sha(content)
++    calls=[]
++    async def fetch(peer,d,o,n):
++        calls.append(peer)
++        return b'!'*n if peer=='bad' else content[o:o+n]
++    with EpochObjectStore(tmp_path) as s:
++        s.pin('shadow',{d:len(content)})
++        job=ResumableEpochFetch(s,fetch,limiter=ByteRateLimiter(1e9),max_neighbors=2,max_attempts=2)
++        await job.download(d,['bad','good','never-contact'])
++        assert calls==['bad','good']
++
++
++@pytest.mark.asyncio
++async def test_global_bandwidth_limiter_is_shared():
++    limiter=ByteRateLimiter(1000,burst=100)
++    start=asyncio.get_running_loop().time()
++    await asyncio.gather(*(limiter.take(100) for _ in range(4)))
++    elapsed=asyncio.get_running_loop().time()-start
++    assert elapsed>=.29
++
++
++def test_long_run_storage_plateau(tmp_path):
++    # Actual filesystem and SQLite, 300 successive bases. Only active and
++    # preparing generations are pinned. Shared bytes are deduplicated.
++    shared=b's'*200
++    dshared=sha(shared)
++    with EpochObjectStore(tmp_path,quota_bytes=2000,max_objects=10) as s:
++        last=None
++        for epoch in range(300):
++            data=epoch.to_bytes(4,'big')*100
++            d=sha(data)
++            owner=f'epoch-{epoch}'
++            s.pin(owner,{d:len(data),dshared:len(shared)})
++            if not s.status(dshared)[2]:s.append(dshared,0,shared)
++            s.append(d,0,data)
++            if last is not None:s.release(last)
++            last=owner
++            s.collect(all_unpinned=True)
++            assert s.reserved_bytes==600
++            assert s.count==2
++        assert sum(p.stat().st_size for p in (tmp_path/'objects').iterdir())==600
++        # Metadata must not grow linearly with generations after page reuse.
++        assert (tmp_path/'cache.sqlite3').stat().st_size < 128*1024
++
++@pytest.mark.parametrize('corrupt',[False,True])
++def test_crash_after_final_block_before_publication(tmp_path,corrupt):
++    data=b'verified'
++    digest=sha(data)
++    with EpochObjectStore(tmp_path) as s:
++        s.pin('active',{digest:len(data)})
++        s._path(digest,partial=True).write_bytes(b'corrupt!' if corrupt else data)
++        with s.db:
++            s.db.execute('UPDATE objects SET received=size,complete=0 WHERE digest=?',(digest,))
++    with EpochObjectStore(tmp_path) as s:
++        if corrupt:
++            assert s.status(digest)==(len(data),0,False)
++        else:
++            assert s.path(digest).read_bytes()==data
+--- a/tests/test_live_epoch_switch_v48.py
++++ b/tests/test_live_epoch_switch_v48.py
+@@ -203,3 +203,66 @@
+     with pytest.raises(PatchError,match='restart from durable pointer'):
+         async with router.step():
+             pytest.fail('must never execute on retired old epoch')
++
++@pytest.mark.asyncio
++async def test_pointer_fsync_failure_blocks_old_steps_and_retries_only_publication(tmp_path,monkeypatch):
++    import patchlib.epoch_hot_swap_v45 as hot
++    old,new=make_gen(0),make_gen(1)
++    router=TrainerStepRouter(old)
++    calls=[]
++    original=hot.durable_pointer
++    def interrupted(path,**kwargs):
++        original(path,**kwargs)
++        raise OSError('simulated directory fsync failure after rename')
++    monkeypatch.setattr(hot,'durable_pointer',interrupted)
++    with pytest.raises(OSError):
++        await router.switch(new,verified=lambda _:True,
++            flush_old=lambda _:calls.append('flush'),carry_old=lambda *_:calls.append('carry'),
++            attest_new=lambda _:True,pointer=tmp_path/'ptr',activate_new=lambda *_:True)
++    assert router.pending_publication
++    with pytest.raises(PatchError,match='publication failed'):
++        async with router.step():pass
++    monkeypatch.setattr(hot,'durable_pointer',original)
++    assert await router.resume_publication()
++    async with router.step() as current:assert current is new
++    assert calls==['flush','carry']
++    assert not router.pending_publication
++
++
++@pytest.mark.asyncio
++async def test_network_failure_retry_does_not_reapply_carry(tmp_path):
++    old,new=make_gen(0),make_gen(1)
++    router=TrainerStepRouter(old)
++    calls=[]
++    async def publish(*_):
++        calls.append('publish')
++        return calls.count('publish')>1
++    with pytest.raises(PatchError,match='transport activation failed'):
++        await router.switch(new,verified=lambda _:True,
++            flush_old=lambda _:calls.append('flush'),carry_old=lambda *_:calls.append('carry'),
++            attest_new=lambda _:True,pointer=tmp_path/'ptr',activate_new=publish)
++    assert await router.resume_publication()
++    assert calls==['flush','carry','publish','publish']
++    assert router.current is new
++
++
++def test_rejoin_walks_certified_intermediate_epochs(tmp_path):
++    old=make_gen(0)
++    class HistoricalLedger:
++        def certified_epoch(self,n):
++            if 1<=n<=5:
++                return {'proposal':{'epoch':n,'manifest':'a'*64,'semantic':'b'*64,'room':'r','parent':'c'*64}}
++        def latest(self):return self.certified_epoch(5)
++    s=LiveEpochSwitchService(ledger=HistoricalLedger(),router=TrainerStepRouter(old),root=tmp_path,
++        build_shadow=lambda _:None,verify_local=lambda *_:True,flush_unpublished=lambda *_:None,
++        carry_suffix=lambda *_:None,transport_handoff=lambda *_:True,attest_journal=lambda *_:True)
++    assert s._certificate()['epoch']==1
++
++
++def test_restart_with_wrong_generation_refused(tmp_path):
++    from patchlib.epoch_hot_swap_v45 import durable_pointer
++    durable_pointer(tmp_path/'active-epoch.json',epoch=1,genesis='a'*64,checkpoint_hash='b'*64)
++    with pytest.raises(PatchError,match='reconstruct durable'):
++        LiveEpochSwitchService(ledger=Ledger(),router=TrainerStepRouter(make_gen(0)),root=tmp_path,
++            build_shadow=lambda _:None,verify_local=lambda *_:True,flush_unpublished=lambda *_:None,
++            carry_suffix=lambda *_:None,transport_handoff=lambda *_:True,attest_journal=lambda *_:True)

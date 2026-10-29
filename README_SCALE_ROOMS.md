@@ -1,3 +1,7 @@
+> **Current default (v17): bounded-v2 signaling only**, 4096 participants per room (configured cap), at most 8 direct neighbors per peer. Legacy full-roster signaling is removed. See [README_BOUNDED_LARGE_ROOMS_V17_2026_10_25.md](README_BOUNDED_LARGE_ROOMS_V17_2026_10_25.md). Historical notes below describe superseded versions.
+
+> **v17 notice:** The 96-peer limit below describes the legacy protocol. See [README_BOUNDED_LARGE_ROOMS_V17_2026_10_25.md](README_BOUNDED_LARGE_ROOMS_V17_2026_10_25.md) for compact signaling rooms (admission cap 4096).
+
 # Fedpara: bounded gossip and persistent room directory
 
 This update builds on the tested `fedpara_reconnect_peer_seed_fixed.zip` source. It preserves the WebView GUI and the elastic LoRA/LoHA training implementation.

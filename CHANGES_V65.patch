@@ -1,0 +1,886 @@
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -6,6 +6,7 @@
+ import itertools
+ import json
+ import logging
++import math
+ import os
+ import sys
+ import hashlib
+@@ -408,6 +409,12 @@
+ 
+ 
+ def training_batches(args):
++    # A specialized SFT/PPO peer is permitted to omit a pretraining corpus.
++    # Never fetch HF data for an objective with an explicit zero coefficient.
++    if (getattr(args,'pt_weight',1.) == 0 and
++            (getattr(args,'sft_jsonl',None) or getattr(args,'ppo_jsonl',None))):
++        while True:
++            yield {}  # run_step checks pt_weight=0 before invoking the model
+     from .data_sampling import peer_sampling_seed, shuffled_cycle
+     from .room_manifest import load_manifest
+     manifest = (load_manifest(args.room_manifest) if getattr(args, 'room_manifest', None)
+@@ -488,9 +495,60 @@
+         batch = {k: v.to(target, non_blocking=True) if isinstance(v,torch.Tensor) else v
+                  for k, v in batch.items()}
+         from .model_contract_v64 import invoke_model, training_loss
+-        outputs = invoke_model(model, batch, input_map=getattr(args,'input_map',None))
+-        loss = training_loss(outputs,batch,task=getattr(args,'hf_task','causal-lm'),
+-                             policy=getattr(args,'loss_policy','auto'))
++        from .mixed_learning_v65 import enabled as mixed_enabled, build as build_mixer
++        mixed=mixed_enabled(args)
++        if mixed:
++            previous=getattr(args,'_v65_mixer',None)
++            old_adapter=getattr(args,'_v65_mixer_adapter',None)
++            if previous is None or (old_adapter is not None and old_adapter is not adapter):
++                if previous is not None:
++                    previous.close()  # epoch switch: discard old-policy PPO rollouts
++                args._v65_mixer=build_mixer(args)
++            args._v65_mixer_adapter=adapter
++        mixer=getattr(args,'_v65_mixer',None) if mixed else None
++        if mixer is not None and float(args.pt_weight)==0:
++            loss=None  # intentional: no pretraining forward when its weight is zero
++            outputs=None
++        else:
++            outputs = invoke_model(model, batch, input_map=getattr(args,'input_map',None))
++            loss = training_loss(outputs,batch,task=getattr(args,'hf_task','causal-lm'),
++                                 policy=getattr(args,'loss_policy','auto'))
++        if mixer is not None:
++            total=0.0
++            if loss is not None:
++                (loss * args.pt_weight / args.grad_accum).backward()
++                total += float(loss.detach())*args.pt_weight
++                mixer.counts['pt']+=1
++            if mixer.sft is not None and args.sft_weight>0:
++                sft_loss=mixer.sft_loss(model,target)
++                (sft_loss*args.sft_weight/args.grad_accum).backward()
++                total+=float(sft_loss.detach())*args.sft_weight
++            if mixer.ppo is not None and args.ppo_weight>0:
++                mixer.critic_optim.zero_grad(set_to_none=True)
++                ppo_actor,ppo_critic,metrics=mixer.ppo_loss(model,target)
++                (ppo_actor*args.ppo_weight/args.grad_accum).backward()
++                (ppo_critic*args.ppo_weight).backward()
++                mixer.critic_optim.step()  # critic is local; never part of signed P2P adapter
++                total+=float(ppo_actor.detach())*args.ppo_weight
++                args._v65_ppo_metrics=metrics
++            # Preserve the existing GUI top-1 telemetry even in mixed mode.
++            if (outputs is not None and getattr(args,'telemetry_file',None)
++                    and getattr(args,'_metric_step',0)%10==0):
++                with torch.no_grad():
++                    from .model_contract_v64 import _loss_or_logits
++                    _,logits=_loss_or_logits(outputs)
++                    labels=batch.get('labels')
++                    if (isinstance(logits,torch.Tensor) and logits.ndim==3 and
++                            isinstance(labels,torch.Tensor) and labels.ndim==2 and
++                            logits.shape[:2]==labels.shape):
++                        valid=labels[:,1:]!=-100
++                        if bool(valid.any().item()):
++                            guess=logits[:,:-1,:].argmax(-1)
++                            args._latest_accuracy=float(((guess==labels[:,1:]) & valid).sum().item()/valid.sum().item())
++            args._metric_step=getattr(args,'_metric_step',0)+1
++            if not math.isfinite(total):
++                raise ValueError('nonfinite mixed objective')
++            return total
+         # Exact local minibatch token/top-1 accuracy, not validation accuracy.
+         # Collected only once every ten steps; no logits are retained.
+         if getattr(args, 'telemetry_file', None) and getattr(args, '_metric_step', 0) % 10 == 0:
+@@ -945,6 +1003,23 @@
+                    help='Model-neutral loss contract; auto uses returned scalar loss or known task logits')
+     p.add_argument('--input-map',default='',
+                    help='JSON mapping, e.g. {"input_ids":"tokens","attention_mask":null}; pin consistently across peers')
++    # v65: one model, simultaneous gradient contributions from PT, SFT and PPO.
++    p.add_argument('--mix-policy',type=Path,
++                   help='Optional shared immutable JSON objective protocol: permits PT-only, SFT, or PPO specialized peers in one signed room')
++    p.add_argument('--sft-jsonl',type=Path,help='Optional JSONL {prompt,response} supervised chat examples')
++    p.add_argument('--ppo-jsonl',type=Path,help='Optional JSONL {prompt,reference} verifiable-reward rollout prompts')
++    p.add_argument('--pt-weight',type=float,default=1.,help='Pretraining objective gradient coefficient')
++    p.add_argument('--sft-weight',type=float,default=1.,help='Response-only SFT objective coefficient')
++    p.add_argument('--ppo-weight',type=float,default=.2,help='Clipped PPO objective coefficient')
++    p.add_argument('--ppo-clip',type=float,default=.2,help='PPO actor and value clipping epsilon')
++    p.add_argument('--ppo-kl-coef',type=float,default=.02,help='Penalty relative to frozen rollout behavior policy')
++    p.add_argument('--ppo-value-coef',type=float,default=.5,help='Auxiliary local value estimator coefficient')
++    p.add_argument('--ppo-gamma',type=float,default=.99)
++    p.add_argument('--ppo-gae-lambda',type=float,default=.95)
++    p.add_argument('--ppo-max-tokens',type=int,default=8,help='Max autoregressive PPO rollout tokens per mixed step')
++    p.add_argument('--ppo-reuse',type=int,default=2,help='Max clipped PPO updates per sampled trajectory')
++    p.add_argument('--ppo-reward',choices=('token_match','exact'),default='token_match',
++                   help='Verifiable ground-truth reward; never model-judged')
+     p.add_argument('--steps', type=int, default=50)
+     p.add_argument('--batch-size', type=int, default=2)
+     p.add_argument('--max-length', type=int, default=128)
+@@ -1245,6 +1320,11 @@
+     add_swarm_parser(sub)
+     args = parser.parse_args()
+     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(message)s')
++    from .mixed_learning_v65 import validate_args as validate_mixed_args
++    try:
++        validate_mixed_args(args)
++    except ValueError as exc:
++        parser.error(str(exc))
+     if args.cmd in ('train-live','train-elastic'):
+         if getattr(args,'disk_optimizer_dir',None) and (args.mode!='elastic' or args.optimizer!='adamw'):
+             parser.error('live disk AdamW requires --mode elastic --optimizer adamw')
+@@ -1275,8 +1355,12 @@
+         parser.error('--data-wait-report-seconds cannot be negative')
+     if getattr(args,'steps',1) <= 0 or getattr(args,'grad_accum',1) <= 0:
+         parser.error('--steps and --grad-accum must be > 0')
+-    if args.cmd in ('train','train-p2p','train-live','train-elastic') and not any((args.batches_dir,args.text_file,args.jsonl,args.room_manifest)) and not (args.cmd in ('train-live','train-elastic') and args.room_id):
+-        parser.error('provide --room-manifest (v2 HF sources), --batches-dir, --text-file or --jsonl')
++    if (args.cmd in ('train','train-p2p','train-live','train-elastic') and
++            not any((args.batches_dir,args.text_file,args.jsonl,args.room_manifest)) and
++            not (args.cmd in ('train-live','train-elastic') and args.room_id) and
++            not (getattr(args,'pt_weight',1.)==0 and
++                 (getattr(args,'sft_jsonl',None) or getattr(args,'ppo_jsonl',None)))):
++        parser.error('provide a pretraining source, or set --pt-weight 0 with an SFT/PPO corpus')
+     if args.cmd in ('train','train-p2p','train-live','train-elastic') and args.room_manifest and any((args.batches_dir,args.text_file,args.jsonl)):
+         from .room_manifest import load_manifest
+         if load_manifest(args.room_manifest)['version'] == 2:
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -1310,6 +1310,11 @@
+     # Legacy reset-v1 peers/journals must never join this new genesis.
+     genesis_input['optimizer_protocol']='continual-elastic-fedsum-relora-mixed-async-v6'
+     genesis_input['reinit_every']=getattr(args,'reinit_every',20)
++    from .mixed_learning_v65 import spec as mixed_learning_spec
++    mix_protocol=mixed_learning_spec(args)
++    if mix_protocol is not None:
++        genesis_input['mixed_learning_protocol']=mix_protocol
++
+     # Preserve existing AdamW genesis compatibility. LoRA-Muon journals must
+     # not collide with AdamW journals because optimizer moments are different.
+     if getattr(args,'optimizer','adamw')=='lora-muon':
+--- a/patchlib/livefed.py
++++ b/patchlib/livefed.py
+@@ -274,9 +274,11 @@
+         raise ValueError('invalid kind')
+     # Apply model state before adapter creation via load_model(). The resolved
+     # revision is fstate-sha256:<digest> and binds base bytes unambiguously.
++    from .mixed_learning_v65 import spec as mixed_learning_spec
++    mixed_protocol=mixed_learning_spec(args)
+     base_ref = _canonical_json({'model_id':adapter.model_id, 'revision':adapter.revision,
+                                 'layout':adapter.layout, 'kind':adapter.kind,
+-                                'rank':adapter.rank, 'alpha':adapter.alpha})
++                                'rank':adapter.rank, 'alpha':adapter.alpha, **({'mixed_learning_protocol':mixed_protocol} if mixed_protocol is not None else {})})
+     anchor = hashlib.sha256(base_ref).hexdigest()
+     engine = FedAvgRound(adapter,args.peer_id,roster,anchor,
+                          max_delta_rms=args.max_delta_rms)
+--- /dev/null
++++ b/patchlib/mixed_learning_v65.py
+@@ -0,0 +1,347 @@
++"""Opt-in concurrent-objective PT + response-masked SFT + on-policy clipped PPO.
++
++Each local optimization microstep evaluates independent objectives against the
++same current adapter.  P2P continues to distribute ONLY adapter updates;
++the small auxiliary value estimator is local and never a signed parameter.
++This deliberately uses *verifiable reference text* as the PPO reward source,
++not the model's own self-judgment.
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import math
++from pathlib import Path
++
++import torch
++from torch import nn
++from torch.nn import functional as F
++
++from .model_contract_v64 import invoke_model, training_loss, _loss_or_logits
++
++
++class MixedLearningError(ValueError):
++    pass
++
++
++def enabled(args):
++    return bool(getattr(args, 'sft_jsonl', None) or getattr(args, 'ppo_jsonl', None))
++
++
++def spec(args):
++    """No local dataset paths in genesis: peers can use distinct data shards."""
++    if not enabled(args) and not getattr(args,'mix_policy',None):
++        return None
++    generated={'version':'pt-sft-clipped-ppo-v65',
++            'objectives':[bool(getattr(args,'sft_jsonl',None)),
++                          bool(getattr(args,'ppo_jsonl',None))],
++            'weights':[float(getattr(args,'pt_weight',1.)),
++                       float(getattr(args,'sft_weight',1.)),
++                       float(getattr(args,'ppo_weight',.2))],
++            'ppo_clip':float(getattr(args,'ppo_clip',.2)),
++            'ppo_kl_coef':float(getattr(args,'ppo_kl_coef',.02)),
++            'ppo_value_coef':float(getattr(args,'ppo_value_coef',.5)),
++            'ppo_gamma':float(getattr(args,'ppo_gamma',.99)),
++            'ppo_gae_lambda':float(getattr(args,'ppo_gae_lambda',.95)),
++            'ppo_max_tokens':int(getattr(args,'ppo_max_tokens',8)),
++            'ppo_reuse':int(getattr(args,'ppo_reuse',2)),
++            'ppo_reward':str(getattr(args,'ppo_reward','token_match')),
++            'input_map':str(getattr(args,'input_map','')),
++            'reward_source':'ground-truth-reference-v1',
++            'task':'causal-lm'}
++    if not getattr(args,'mix_policy',None):
++        return generated
++    path=Path(args.mix_policy)
++    if not path.is_file() or path.stat().st_size>8192:
++        raise MixedLearningError('--mix-policy must be a JSON file <=8KiB')
++    try:
++        policy=json.loads(path.read_text(encoding='utf8'))
++    except (OSError,ValueError) as exc:
++        raise MixedLearningError('--mix-policy is not readable JSON') from exc
++    if not isinstance(policy,dict) or set(policy)!=set(generated):
++        raise MixedLearningError('--mix-policy needs the exact v65 protocol fields')
++    # All numerical/scoring settings are immutable room-wide. Per-peer dataset
++    # selection is the ONLY permitted difference and is independently checked.
++    if any(policy[k]!=generated[k] for k in generated if k!='objectives'):
++        raise MixedLearningError('local objective hyperparameters disagree with --mix-policy')
++    flags=policy.get('objectives')
++    if not isinstance(flags,list) or len(flags)!=2 or any(type(f) is not bool for f in flags):
++        raise MixedLearningError('--mix-policy objectives must be [SFT enabled, PPO enabled] booleans')
++    if any(local and not agreed for local,agreed in zip(generated['objectives'],flags)):
++        raise MixedLearningError('local dataset is not enabled in the shared --mix-policy')
++    if not any(flags) or generated['weights'][0]+sum(w for active,w in zip(flags,generated['weights'][1:]) if active)<=0:
++        raise MixedLearningError('--mix-policy contains no active mixed learning objectives')
++    return policy
++
++
++def validate_args(args):
++    if not enabled(args) and not getattr(args,'mix_policy',None):
++        return
++    if getattr(args,'hf_task','causal-lm') != 'causal-lm':
++        raise MixedLearningError('PT/SFT/PPO mixture currently requires --hf-task causal-lm')
++    if getattr(args,'loss_policy','auto') not in ('auto','causal'):
++        raise MixedLearningError('mixed causal-LM requires --loss-policy auto or causal')
++    for field in ('pt_weight','sft_weight','ppo_weight'):
++        val=float(getattr(args,field,0))
++        if not math.isfinite(val) or val<0 or val>100:
++            raise MixedLearningError(f'{field} must be finite and in [0,100]')
++    if getattr(args,'ppo_reward','token_match') not in ('token_match','exact'):
++        raise MixedLearningError('PPO reward must be token_match or exact')
++    if not 0<float(args.ppo_clip)<=.5:
++        raise MixedLearningError('ppo_clip must be in (0,.5]')
++    for name in ('ppo_kl_coef','ppo_value_coef'):
++        val=float(getattr(args,name))
++        if not math.isfinite(val) or not 0<=val<=10:
++            raise MixedLearningError(f'{name} must be in [0,10]')
++    for name in ('ppo_gamma','ppo_gae_lambda'):
++        val=float(getattr(args,name))
++        if not 0<val<=1:
++            raise MixedLearningError(f'{name} must be in (0,1]')
++    if not 1<=int(args.ppo_max_tokens)<=128 or not 1<=int(args.ppo_reuse)<=8:
++        raise MixedLearningError('PPO token cap must be 1..128, reuse 1..8')
++    if not 8<=int(getattr(args,'max_length',128))<=131072:
++        raise MixedLearningError('max_length must be >= 8 for mixed causal-LM')
++    if not getattr(args,'mix_policy',None) and not getattr(args,'sft_jsonl',None) and getattr(args,'sft_weight',1.) != 1.:
++        raise MixedLearningError('SFT weight supplied without --sft-jsonl')
++    if not getattr(args,'mix_policy',None) and not getattr(args,'ppo_jsonl',None) and getattr(args,'ppo_weight',.2) != .2:
++        raise MixedLearningError('PPO weight supplied without --ppo-jsonl')
++    if float(args.pt_weight)+ (float(args.sft_weight) if args.sft_jsonl else 0) + (float(args.ppo_weight) if args.ppo_jsonl else 0) == 0:
++        raise MixedLearningError('at least one mixed objective must have positive weight')
++    for name in ('sft_jsonl','ppo_jsonl'):
++        path=getattr(args,name,None)
++        if path and (not Path(path).is_file() or Path(path).stat().st_size>4*1024**3):
++            raise MixedLearningError(f'{name} must be a readable local JSONL <= 4GiB')
++    spec(args)  # validate optional shared room policy before any network join
++
++
++class JsonlCycle:
++    """Streaming fixed-size lines; never keeps a multi-GB corpus in RAM."""
++    def __init__(self, path):
++        self.path=Path(path)
++        self.file=self.path.open('r',encoding='utf8')
++        self.line_number=0
++        self.file.seek(0,2)
++        if self.file.tell()==0:
++            raise MixedLearningError(f'{path}: empty dataset')
++        self.file.seek(0)
++
++    def next(self):
++        attempts=0
++        while True:
++            line=self.file.readline(65537)
++            if not line:
++                if attempts:
++                    raise MixedLearningError(f'{self.path}: no nonempty JSONL rows')
++                self.file.seek(0);self.line_number=0;attempts+=1;continue
++            self.line_number+=1
++            if len(line)>65536 or (line and not line.endswith('\n') and not self.file.tell()==self.path.stat().st_size):
++                raise MixedLearningError(f'{self.path}:{self.line_number} JSONL line too large')
++            if not line.strip():
++                continue
++            try:
++                row=json.loads(line)
++            except ValueError as exc:
++                raise MixedLearningError(f'{self.path}:{self.line_number} invalid JSON') from exc
++            if not isinstance(row,dict):
++                raise MixedLearningError('training row must be a JSON object')
++            return row
++
++    def close(self):
++        self.file.close()
++
++
++def _tokens(tokenizer, text):
++    if not isinstance(text,str) or not text or len(text)>16384:
++        raise MixedLearningError('prompt/response/reference must be nonempty UTF-8 text <=16Ki chars')
++    ids=tokenizer.encode(text, add_special_tokens=False)
++    if not ids or not all(isinstance(i,int) and i>=0 for i in ids):
++        raise MixedLearningError('tokenizer returned no valid token IDs')
++    return list(ids)
++
++
++def _logits(model, ids, args):
++    batch={'input_ids':ids,'attention_mask':torch.ones_like(ids)}
++    outputs=invoke_model(model,batch,input_map=getattr(args,'input_map',None))
++    _,logits=_loss_or_logits(outputs)
++    if not isinstance(logits,torch.Tensor) or logits.ndim!=3 or logits.shape[:2]!=ids.shape:
++        raise MixedLearningError('PPO requires causal logits [1, tokens, vocab]')
++    if not torch.isfinite(logits).all():
++        raise MixedLearningError('nonfinite PPO logits')
++    return logits.float()
++
++
++def _features(logits, *, offset):
++    """Small bounded, detached critic features: no unbounded vocab-size head."""
++    detached=logits.detach().float()
++    logp=F.log_softmax(detached,dim=-1)
++    p=logp.exp()
++    entropy=-(p*logp).sum(-1)
++    top2=detached.topk(k=min(2,detached.shape[-1]),dim=-1).values
++    margin=(top2[...,0]-top2[...,-1]).clamp(0,30)
++    normalized=-(logp.max(-1).values).clamp(0,30)
++    steps=torch.arange(offset,offset+detached.size(1),device=detached.device,dtype=torch.float32)
++    progress=(steps/512).clamp(0,1).unsqueeze(0).expand_as(entropy)
++    return torch.stack((entropy.clamp(0,30)/30,margin/30,normalized/30,progress),dim=-1)
++
++
++class LocalValueHead(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.net=nn.Sequential(nn.Linear(4,32),nn.Tanh(),nn.Linear(32,1))
++    def forward(self,x):
++        return self.net(x).squeeze(-1)
++
++
++class MixedObjectiveTrainer:
++    def __init__(self,args,tokenizer):
++        validate_args(args)
++        self.args=args
++        self.tok=tokenizer
++        self.sft=JsonlCycle(args.sft_jsonl) if getattr(args,'sft_jsonl',None) else None
++        self.ppo=JsonlCycle(args.ppo_jsonl) if getattr(args,'ppo_jsonl',None) else None
++        self.critic=None
++        self.critic_optim=None
++        self.cached=None
++        self.reuses=0
++        self.counts={'pt':0,'sft':0,'ppo':0}
++        if self.ppo:
++            self.critic=LocalValueHead()
++            self.critic_optim=torch.optim.AdamW(self.critic.parameters(),lr=1e-3)
++
++    def sft_loss(self,model,device):
++        row=self.sft.next()
++        if not isinstance(row.get('prompt'),str) or not isinstance(row.get('response'),str):
++            raise MixedLearningError('SFT row requires prompt and response strings')
++        prompt=_tokens(self.tok,row['prompt']);response=_tokens(self.tok,row['response'])
++        eos=getattr(self.tok,'eos_token_id',None)
++        if isinstance(eos,int) and eos>=0:
++            response=response+[eos]
++        if len(prompt)+len(response)>self.args.max_length:
++            # Keep the newest prompt context but NEVER silently truncate the response.
++            if len(response)>=self.args.max_length:
++                raise MixedLearningError('SFT response exceeds max_length; would lose supervision')
++            prompt=prompt[-(self.args.max_length-len(response)):]
++        ids=torch.tensor([prompt+response],device=device,dtype=torch.long)
++        labels=ids.clone();labels[:,:len(prompt)]=-100
++        batch={'input_ids':ids,'attention_mask':torch.ones_like(ids),'labels':labels}
++        outputs=invoke_model(model,batch,input_map=getattr(self.args,'input_map',None))
++        loss=training_loss(outputs,batch,task='causal-lm',policy='causal')
++        self.counts['sft']+=1
++        return loss
++
++    def _new_rollout(self,model,device):
++        row=self.ppo.next()
++        if not isinstance(row.get('prompt'),str) or not isinstance(row.get('reference'),str):
++            raise MixedLearningError('PPO row requires prompt and reference strings (verifiable reward)')
++        prompt=_tokens(self.tok,row['prompt'])
++        reference=_tokens(self.tok,row['reference'])
++        if len(prompt)+2>self.args.max_length:
++            prompt=prompt[-(self.args.max_length-2):]
++        max_new=min(self.args.ppo_max_tokens,self.args.max_length-len(prompt))
++        if max_new<=0:
++            raise MixedLearningError('no room for PPO generation')
++        was_training=model.training
++        model.eval()
++        try:
++            with torch.no_grad():
++                ids=torch.tensor([prompt],dtype=torch.long,device=device)
++                chosen=[];old_lp=[];features=[]
++                eos=getattr(self.tok,'eos_token_id',None)
++                for _ in range(max_new):
++                    final_logits=_logits(model,ids,self.args)[:,-1:,:]
++                    lp=F.log_softmax(final_logits[:,0],dim=-1)
++                    sample=torch.multinomial(lp.exp(),1)
++                    token=int(sample.item());chosen.append(token)
++                    old_lp.append(lp[0,token]);features.append(_features(final_logits,offset=ids.shape[1]-1)[0,0])
++                    ids=torch.cat((ids,sample),dim=1)
++                    if eos is not None and token==int(eos):
++                        break
++                if not chosen:
++                    raise MixedLearningError('PPO generation returned no tokens')
++                feat=torch.stack(features)
++                self.critic.to(device)
++                self.critic_optim.zero_grad(set_to_none=True)
++                old_values=self.critic(feat).detach()
++                # Observable, deterministic reference-based reward. Never ask
++                # this model to grade its own response.
++                exact=int(chosen==reference)
++                token_matches=sum(a==b for a,b in zip(chosen,reference))
++                partial=token_matches/max(len(chosen),len(reference))
++                reward=float(exact if getattr(self.args,'ppo_reward','token_match')=='exact' else partial)
++                T=len(chosen)
++                rs=torch.zeros(T,device=device);rs[-1]=reward
++                # Terminal-only verifiable reward; bootstrap V_T=0.
++                adv=torch.zeros(T,device=device);gae=torch.zeros((),device=device)
++                for i in reversed(range(T)):
++                    next_v=old_values[i+1] if i+1<T else torch.zeros((),device=device)
++                    delta=rs[i]+self.args.ppo_gamma*next_v-old_values[i]
++                    gae=delta+self.args.ppo_gamma*self.args.ppo_gae_lambda*gae
++                    adv[i]=gae
++                returns=adv+old_values
++                if T>1 and adv.std(unbiased=False)>1e-6:
++                    adv=(adv-adv.mean())/(adv.std(unbiased=False)+1e-6)
++                adv=adv.clamp(-10,10)
++                return {'ids':ids.detach(),'start':len(prompt),'tokens':torch.tensor(chosen,device=device),
++                        'old_lp':torch.stack(old_lp).detach(), 'old_values':old_values.detach(),
++                        'adv':adv.detach(),'returns':returns.detach(), 'reward':reward}
++        finally:
++            model.train(was_training)
++
++    def ppo_loss(self,model,device):
++        if self.cached is None or self.reuses>=self.args.ppo_reuse:
++            self.cached=self._new_rollout(model,device)
++            self.reuses=0
++        rollout=self.cached
++        ids=rollout['ids'];start=rollout['start'];N=rollout['tokens'].numel()
++        if ids.device!=device:
++            self.cached=None
++            raise MixedLearningError('PPO device changed; rollouts must be recollected')
++        was_training=model.training
++        model.eval()  # avoid dropout mismatch between rollout and update
++        try:
++            logits=_logits(model,ids,self.args)[:,start-1:start-1+N,:]
++            lp=F.log_softmax(logits,dim=-1)
++            chosen=lp.gather(-1,rollout['tokens'].view(1,N,1)).squeeze(0).squeeze(-1)
++            # Clamped exponent prevents overflow on heavily changed P2P policies.
++            log_ratio=(chosen-rollout['old_lp']).clamp(-20,20)
++            ratio=log_ratio.exp()
++            advantage=rollout['adv']
++            clipped=ratio.clamp(1-self.args.ppo_clip,1+self.args.ppo_clip)
++            pg_loss=-torch.minimum(ratio*advantage,clipped*advantage).mean()
++            # Reference is the behavior policy at rollout time. Reuse is bounded.
++            approx_kl=(log_ratio.square()).mean()/2
++            entropy=-(lp.exp()*lp).sum(-1).mean()
++            actor_loss=pg_loss+self.args.ppo_kl_coef*approx_kl
++            # A small *local-only* auxiliary value function: trained for GAE,
++            # not mixed into signatures, and not a model-as-judge.
++            features=_features(logits,offset=start-1)[0]
++            values=self.critic(features)
++            previous=rollout['old_values']
++            clipped_values=previous+(values-previous).clamp(-self.args.ppo_clip,self.args.ppo_clip)
++            value_loss=.5*torch.maximum((values-rollout['returns']).square(),
++                                         (clipped_values-rollout['returns']).square()).mean()
++            critic_loss=self.args.ppo_value_coef*value_loss
++            if not torch.isfinite(actor_loss+critic_loss):
++                raise MixedLearningError('nonfinite PPO objective')
++            self.reuses+=1;self.counts['ppo']+=1
++            return actor_loss,critic_loss,{'reward':rollout['reward'],
++                                           'kl':float(approx_kl.detach()),
++                                           'entropy':float(entropy.detach())}
++        finally:
++            model.train(was_training)
++
++    def close(self):
++        for x in (self.sft,self.ppo):
++            if x:x.close()
++
++
++def build(args, *, tokenizer=None):
++    if not enabled(args):
++        return None
++    validate_args(args)
++    if tokenizer is None:
++        from transformers import AutoTokenizer
++        tokenizer=AutoTokenizer.from_pretrained(args.model,revision=args.revision,
++                            trust_remote_code=bool(getattr(args,'trust_remote_code',False)),
++                            local_files_only=bool(getattr(args,'trust_remote_code',False)))
++    return MixedObjectiveTrainer(args,tokenizer)
+--- /dev/null
++++ b/tests/test_mixed_learning_v65.py
+@@ -0,0 +1,213 @@
++"""PT + masked SFT + on-policy PPO on the same signed adapter."""
++import json
++from types import SimpleNamespace
++
++import pytest
++import torch
++from torch import nn
++
++from patchlib.cli import run_step
++from patchlib.core import UniversalAdapter
++from patchlib.mixed_learning_v65 import (
++    MixedObjectiveTrainer, JsonlCycle, MixedLearningError, spec, validate_args,
++)
++
++
++class ToyTokenizer:
++    eos_token_id=2
++    def encode(self,text,add_special_tokens=False):
++        return [3+(ord(c)%12) for c in text]
++
++
++class SmallCausalLM(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.emb=nn.Embedding(18,12)
++        self.linear=nn.Linear(12,12)
++        self.head=nn.Linear(12,18)
++    def forward(self,input_ids,attention_mask=None):
++        return {'logits':self.head(torch.tanh(self.linear(self.emb(input_ids))))}
++
++
++def make_args(tmp_path,**changes):
++    d=dict(sft_jsonl=None,ppo_jsonl=None,pt_weight=1.,sft_weight=1.,ppo_weight=.2,
++           ppo_clip=.2,ppo_kl_coef=.02,ppo_value_coef=.5,ppo_gamma=.99,
++           ppo_gae_lambda=.95,ppo_max_tokens=3,ppo_reuse=2,ppo_reward='token_match',
++           max_length=24,hf_task='causal-lm',loss_policy='auto',device='cpu',
++           grad_accum=1,telemetry_file=None,input_map='',batch_size=1)
++    d.update(changes)
++    return SimpleNamespace(**d)
++
++
++def write(tmp_path,name,rows):
++    p=tmp_path/name
++    p.write_text(''.join(json.dumps(x)+'\n' for x in rows),encoding='utf8')
++    return p
++
++
++def setup_model():
++    torch.manual_seed(2026)
++    model=SmallCausalLM()
++    adapter=UniversalAdapter(model,'toy','revision',kind='lora',rank=2,target_scope='linear')
++    optimizer=torch.optim.AdamW(list(adapter.trainable_parameters()),lr=.03)
++    batch={'input_ids':torch.tensor([[3,4,5,6,7]]),
++           'attention_mask':torch.ones(1,5,dtype=torch.long),
++           'labels':torch.tensor([[3,4,5,6,7]])}
++    return model,adapter,optimizer,batch
++
++
++def test_mixture_forward_backward_and_local_critic_only(tmp_path):
++    sft=write(tmp_path,'sft.jsonl',[{'prompt':'Hi','response':'there'}])
++    ppo=write(tmp_path,'ppo.jsonl',[{'prompt':'Hi','reference':'yes'}])
++    args=make_args(tmp_path,sft_jsonl=sft,ppo_jsonl=ppo)
++    model,adapter,opt,batch=setup_model()
++    args._v65_mixer=MixedObjectiveTrainer(args,ToyTokenizer())
++    before=[p.detach().clone() for p in adapter.trainable_parameters()]
++    opt.zero_grad(set_to_none=True)
++    value_before=[p.detach().clone() for p in args._v65_mixer.critic.parameters()]
++    for _ in range(3):
++        loss=run_step(model,adapter,opt,batch,args)
++        assert torch.isfinite(torch.tensor(loss))
++        opt.step();opt.zero_grad(set_to_none=True)
++    assert args._v65_mixer.counts=={'pt':3,'sft':3,'ppo':3}
++    assert any(not torch.equal(x,y) for x,y in zip(before,adapter.trainable_parameters()))
++    assert any(not torch.equal(x,y) for x,y in zip(value_before,args._v65_mixer.critic.parameters()))
++    assert args._v65_mixer.cached['old_lp'].requires_grad is False
++    # Local critic must not be in signed adapter state.
++    assert not any(id(a)==id(p) for a in args._v65_mixer.critic.parameters() for p in adapter.trainable_parameters())
++    wire=adapter.export('peer',seq=1)
++    assert wire.startswith(b'FPAT1')
++    args._v65_mixer.close()
++
++
++def test_sft_labels_ignore_prompt_and_preserve_response(tmp_path):
++    sft=write(tmp_path,'sft.jsonl',[{'prompt':'abcdef','response':'xyz'}])
++    args=make_args(tmp_path,sft_jsonl=sft,pt_weight=0.,max_length=12)
++    model,adapter,opt,batch=setup_model()
++    mixer=MixedObjectiveTrainer(args,ToyTokenizer())
++    loss=mixer.sft_loss(model,torch.device('cpu'))
++    assert loss.requires_grad
++    loss.backward()
++    assert any(p.grad is not None for p in adapter.trainable_parameters())
++    mixer.close()
++
++
++def test_ppo_old_policy_is_frozen_clipping_and_reuse(tmp_path):
++    ppo=write(tmp_path,'ppo.jsonl',[{'prompt':'ab','reference':'c'}])
++    args=make_args(tmp_path,ppo_jsonl=ppo,ppo_reuse=2)
++    model,adapter,opt,batch=setup_model()
++    mixer=MixedObjectiveTrainer(args,ToyTokenizer())
++    torch.manual_seed(50)
++    a,critic,metric=mixer.ppo_loss(model,torch.device('cpu'))
++    assert a.requires_grad and critic.requires_grad
++    assert 0<=metric['reward']<=1
++    assert abs(metric['kl'])<1e-5
++    first=mixer.cached
++    a.backward();critic.backward()
++    opt.step();opt.zero_grad(set_to_none=True)
++    a2,_,metric2=mixer.ppo_loss(model,torch.device('cpu'))
++    assert mixer.cached is first and mixer.reuses==2
++    assert metric2['kl']>=0
++    mixer.ppo_loss(model,torch.device('cpu'))
++    assert mixer.cached is not first and mixer.reuses==1
++    mixer.close()
++
++
++def test_mixture_genesis_does_not_contain_local_paths(tmp_path):
++    args=make_args(tmp_path,sft_jsonl=tmp_path/'private/data.jsonl',ppo_jsonl=tmp_path/'private/rewards.jsonl')
++    d=spec(args)
++    assert 'private' not in json.dumps(d)
++    assert d['reward_source']=='ground-truth-reference-v1'
++    assert spec(make_args(tmp_path)) is None
++    other=make_args(tmp_path,sft_jsonl=args.sft_jsonl,ppo_jsonl=args.ppo_jsonl,ppo_clip=.1)
++    assert spec(other)!=spec(args)
++
++
++def test_invalid_schema_truncation_and_args_fail_closed(tmp_path):
++    p=write(tmp_path,'malformed.jsonl',[{'prompt':'a','response':'b'},
++                                         {'prompt':'only one field'}])
++    f=JsonlCycle(p)
++    assert f.next()['prompt']=='a'
++    assert f.next()['prompt']=='only one field'
++    f.close()
++    model,adapter,opt,batch=setup_model()
++    p2=write(tmp_path,'bad.jsonl',[{'prompt':'a','reference':''}])
++    args=make_args(tmp_path,ppo_jsonl=p2)
++    trainer=MixedObjectiveTrainer(args,ToyTokenizer())
++    with pytest.raises(MixedLearningError,match='nonempty'):
++        trainer.ppo_loss(model,torch.device('cpu'))
++    trainer.close()
++    args2=make_args(tmp_path,sft_jsonl=p,ppo_clip=0)
++    with pytest.raises(MixedLearningError,match='ppo_clip'):
++        validate_args(args2)
++    args3=make_args(tmp_path,sft_jsonl=p,hf_task='seq2seq-lm')
++    with pytest.raises(MixedLearningError,match='causal-lm'):
++        validate_args(args3)
++
++
++def test_mixed_integration_does_not_change_legacy_loss(tmp_path):
++    args=make_args(tmp_path)
++    model,adapter,opt,batch=setup_model()
++    loss=run_step(model,adapter,opt,batch,args)
++    assert loss>0
++    assert not hasattr(args,'_v65_mixer')
++
++
++def test_shared_room_policy_permits_specialized_data_peers(tmp_path):
++    sft=write(tmp_path,'sft.jsonl',[{'prompt':'x','response':'y'}])
++    ppo=write(tmp_path,'ppo.jsonl',[{'prompt':'x','reference':'y'}])
++    combined=make_args(tmp_path,sft_jsonl=sft,ppo_jsonl=ppo)
++    shared=tmp_path/'mix_policy.json'
++    shared.write_text(json.dumps(spec(combined)),encoding='utf8')
++    ptonly=make_args(tmp_path,mix_policy=shared)
++    sftonly=make_args(tmp_path,mix_policy=shared,sft_jsonl=sft,pt_weight=1.)
++    ppoonly=make_args(tmp_path,mix_policy=shared,ppo_jsonl=ppo)
++    assert spec(ptonly)==spec(sftonly)==spec(ppoonly)==spec(combined)
++    validate_args(ptonly)
++    shared_config=json.loads(shared.read_text());shared_config['weights'][1]=100
++    shared.write_text(json.dumps(shared_config))
++    with pytest.raises(MixedLearningError,match='disagree'):
++        validate_args(ptonly)
++
++
++def test_sft_only_can_skip_pretraining_dataset(tmp_path):
++    from patchlib.cli import training_batches
++    sft=write(tmp_path,'sft.jsonl',[{'prompt':'hi','response':'okay'}])
++    args=make_args(tmp_path,pt_weight=0.,sft_jsonl=sft)
++    args.batches_dir=args.text_file=args.jsonl=args.room_manifest=None
++    assert next(training_batches(args))=={}
++    model,adapter,opt,batch=setup_model()
++    args._v65_mixer=MixedObjectiveTrainer(args,ToyTokenizer())
++    assert run_step(model,adapter,opt,{},args)>0
++    assert args._v65_mixer.counts=={'pt':0,'sft':1,'ppo':0}
++    args._v65_mixer.close()
++
++
++def test_actual_local_train_command_exports_signed_adapter_with_all_three_losses(tmp_path,monkeypatch):
++    from patchlib import cli
++    from patchlib import mixed_learning_v65 as mix
++    sft=write(tmp_path,'supervision.jsonl',[{'prompt':'How? ','response':'Yes.'}])
++    ppo=write(tmp_path,'verifier.jsonl',[{'prompt':'Say ','reference':'yes'}])
++    model,adapter,_,batch=setup_model()
++    args=make_args(tmp_path,sft_jsonl=sft,ppo_jsonl=ppo)
++    args.peer_id='peer_test';args.steps=3;args.lr=.002;args.weight_decay=0.
++    args.disk_optimizer_dir=None;args.resume=None;args.output=str(tmp_path/'local.fpatch')
++    args.full_state_output=None;args.shard_state_manifest=None;args.shard_store=None
++    args.log_steps=1;args.wire_dtype='float16'
++    monkeypatch.setattr(cli,'load',lambda unused:(model,adapter))
++    monkeypatch.setattr(cli,'training_batches',lambda unused:iter([batch]*args.steps))
++    monkeypatch.setattr(mix,'build',lambda unused:MixedObjectiveTrainer(unused,ToyTokenizer()))
++    cli.train(args)
++    assert (tmp_path/'local.fpatch').read_bytes().startswith(b'FPAT1')
++    assert args._v65_mixer.counts=={'pt':3,'sft':3,'ppo':3}
++    args._v65_mixer.close()
++
++
++def test_ppo_refuses_unsupervised_self_grading(tmp_path):
++    data=write(tmp_path,'bad_ppo.jsonl',[{'prompt':'Any question','reward':100}])
++    args=make_args(tmp_path,ppo_jsonl=data)
++    model,adapter,opt,batch=setup_model()
++    trainer=MixedObjectiveTrainer(args,ToyTokenizer())
++    with pytest.raises(MixedLearningError,match='reference strings'):
++        trainer.ppo_loss(model,torch.device('cpu'))
++    trainer.close()
+--- /dev/null
++++ b/README_V65_STATUS.md
+@@ -0,0 +1,73 @@
++# Kagami v65 — concurrent pretraining + SFT + clipped PPO (experimental)
++
++## Scope
++
++This revision is an opt-in mixed-objective training path on top of v64. It computes
++three independent losses **inside each local optimizer microstep** and sends their
++accumulated gradients into the **same LoRA/LoHA adapter**. There is no global PT→SFT→PPO
++phase barrier: pretraining can continue while SFT and PPO are applied.
++
++- **PT:** retains the existing source (HF room dataset, pretokenized safetensors, or raw text).
++- **SFT:** local JSONL lines `{"prompt":"Question: ","response":"Answer"}`; loss masks all prompt tokens. Labels cover the response and EOS when present. Large examples error instead of silently removing response supervision.
++- **PPO:** local JSONL lines `{"prompt":"2+2=", "reference":"4"}`. Creates a fresh bounded on-policy completion, snapshots sampled action log-probabilities and local critic estimates, computes terminal ground-truth reward (position-wise token match, or exact token sequence), generalized advantage estimates, clipped policy ratio objective, separate clipped critic value loss, and bounded approximate KL relative to the **recorded behavior policy**. Maximum default reuse of each trajectory: **2 microsteps**. Samples/old logprobs are always detached.
++- **Value estimator:** compact local-only trainable scalar critic from bounded predictive-statistics features. It is NOT the language model grading itself, is not included in P2P signed patches, and currently is **not checkpointed durably**. Each restart reinitializes it and starts collecting new trajectories. Reinitialize on model/adapter generation changes as well.
++- **Security:** never load arbitrary reward Python scripts into the P2P process. PPO is *verifiable-answer reinforcement learning*, **not** human-feedback RLHF; a human-preference reward model or a persistent full-model critic would be a separate feature. Do not treat the proxy reward as human alignment.
++- **P2P:** each signed adapter event still uses the existing durable journal, rank layout, epoch protocol and origin signature. When mixed objectives are enabled, an exact shared training-protocol descriptor becomes part of the root genesis. Incorrect settings cannot silently join the same signed room. Local data paths are excluded from that identity. When using the optional `--mix-policy`, peers can specialize by providing different subsets of local datasets, so PT-only and SFT/PPO peers continue training at once.
++
++**No change to the existing behavior** when neither `--sft-jsonl`, `--ppo-jsonl` nor `--mix-policy` is used.
++
++## Usage
++
++Append the following options to an otherwise valid `python -m patchlib.cli train-elastic ...` invocation that already specifies model, revision, room and pretraining data:
++
++```bash
++--hf-task causal-lm \
++--sft-jsonl ./data/sft.jsonl \
++--ppo-jsonl ./data/ppo_prompts.jsonl \
++--pt-weight 1.0 \
++--sft-weight 0.5 \
++--ppo-weight 0.1 \
++--ppo-max-tokens 8 \
++--ppo-reuse 2 \
++--ppo-kl-coef 0.02
++```
++
++All three objectives are evaluated within **each** local training microstep. `--grad-accum` still controls when the shared adapter optimizer commits an update. To disable PT on a specialized peer, use `--pt-weight 0` and supply `--sft-jsonl` and/or `--ppo-jsonl`; no PT dataset is then needed for local `train` / `train-p2p`, and a PT fetch is skipped.
++
++The current **causal decoder logits** contract is required for autoregressive PPO. Arbitrary differentiable model parameters are still supported as LoRA/LoHA targets, but encoder-only, diffusion, opaque generation kernels, and seq2seq PPO require task-specific rollout adapters. Some Hugging Face model implementations may also need `--input-map` from v64.
++
++### P2P task specialization with shared policy
++
++Create one policy JSON from the model owner's selected settings (same field names and values as `patchlib.mixed_learning_v65.spec(args)`) and distribute the identical policy file to all peers. For example, for the default v65 objective coefficients and rollout options, a simple Python snippet can produce the complete file:
++
++```python
++import argparse, json
++from patchlib.mixed_learning_v65 import spec
++config = argparse.Namespace(sft_jsonl='enabled', ppo_jsonl='enabled', mix_policy=None,
++    pt_weight=1.0, sft_weight=1.0, ppo_weight=0.2,
++    ppo_clip=0.2, ppo_kl_coef=0.02, ppo_value_coef=0.5,
++    ppo_gamma=0.99, ppo_gae_lambda=0.95, ppo_max_tokens=8,
++    ppo_reuse=2, ppo_reward='token_match', input_map='')
++open('shared_mix_policy.json','w').write(json.dumps(spec(config), indent=2))
++```
++
++All members start their normal training command with `--mix-policy shared_mix_policy.json` and **matching weights, PPO options, input mappings**. Each peer may independently provide `--sft-jsonl`, `--ppo-jsonl`, either or neither (pretraining only), so long as the common policy enables that task. No file paths, private examples or live rewards are transmitted by this mechanism. If the policy differs, the room genesis differs and the existing authenticated handshake refuses to treat the peers as one model.
++
++### Runtime cost
++
++For each mixed microstep, there are up to 3 training forwards/backwards plus up to `--ppo-max-tokens` autoregressive sampling forwards. This is substantially more compute than PT alone, especially for large models. PPO is opt-in and should be first validated on a small model; `--ppo-max-tokens 4 --ppo-reuse 2` is a reasonable smoke-test configuration. Numeric weights scale gradient contributions, **not** computation cost.
++
++### Supported reward functions
++
++Only reference-based rewards `--ppo-reward token_match` (default) and `--ppo-reward exact` exist in v65. This supports automatically graded tasks. Arbitrary numeric ratings in JSONL are **not** trusted for model-generated completions: claiming a fixed reward for a different sampled response would train the wrong policy. The model itself never decides reward quality.
++
++## Remaining limitations / not implemented
++
++- Real Llama/DeepSeek model weights and large GPU training were **not exercised** in this environment.
++- PPO uses a deliberately small local value estimator; no durable critic optimizer state, distributed critic merging, preference reward model, or off-policy replay correction beyond bounded clipped reuse. It is **not yet an RLHF training stack**.
++- A new root genesis is required to enable mixed objectives in an existing P2P room. Existing v64 rooms/keys/journals must not silently be reinterpreted under a new objective protocol.
++- `--mix-policy` is a CLI feature. GUI configuration / remote local-file selection were **not** added in this revision.
++- Task-specialized peers can use different datasets, but each step within one peer is synchronous in execution (not three independently running model copies). Networked peers of course train concurrently.
++- The prior 300B, thousands-of-real-WAN-peers, infinite-duration storage and zero-pause epoch guarantees remain unproven.
++
++See `VALIDATION_V65.md` and `CHANGES_V65.patch` for tests and diff.
+--- /dev/null
++++ b/VALIDATION_V65.md
+@@ -0,0 +1,38 @@
++# Kagami v65 — verification
++
++Test environment: Python 3.11 / PyTorch 2.10.0+cpu, pytest 9.0.2; no real HF Llama/DeepSeek weights, WAN peers, or multi-GPU cluster provided.
++
++```
++cd kagami-v65
++PYTHONPATH=. pytest -q --disable-warnings
++787 passed, 3 skipped in 88.75s
++```
++
++Focused command:
++
++```
++PYTHONPATH=. pytest -q tests/test_mixed_learning_v65.py \
++  tests/test_model_contract_v64.py tests/test_cli.py \
++  tests/test_continual_elastic.py tests/test_epoch_v56_autonomy.py \
++  tests/test_epoch_v57_trainer.py tests/test_epoch_v58_frozen_export.py \
++  tests/test_factor_ledger_v62.py tests/test_live_disk_optimizer_v59.py \
++  tests/test_paged_mutable_v61.py tests/test_webview_gui.py tests/test_livefed.py
++85 passed in 10.94s
++```
++
++New tests (`tests/test_mixed_learning_v65.py`) cover:
++
++1. Mixed PT+response-masked SFT+clipped PPO actually backpropagates into an existing signed UniversalAdapter on every microstep; the independent critic is updated locally only.
++2. SFT prompt masking and response-only supervision for a causal logits model.
++3. PPO samples using current policy, freezes old log probabilities, constrains update reuse, computes finite clipped loss and KL, updates critic estimates.
++4. Objective-protocol hash excludes private local data paths and changes when clip coefficients change.
++5. Invalid JSONL, missing ground-truth references, incompatible task and dangerous hyperparameters fail early.
++6. Legacy PT-only run_step loss remains unchanged.
++7. Shared JSON room policy lets independent PT, SFT and PPO peers retain the same genesis contract, while mismatching parameters are rejected.
++8. SFT-only training uses no useless PT batch fetch.
++9. Full `cli.train` operation with PT/SFT/PPO produces a valid `.fpatch` update after multiple actual optimizer steps.
++10. A fabricated numeric reward without reference/ground truth is rejected (prevents pretending an off-policy constant score is a valid on-policy reward).
++
++**Not established by these tests**: reward-model RLHF, language-model-as-judge, general human preference optimization, a learned deep critic with distributed state, actual full 300B training, stable 4,096 WAN peers, live mixed training with external HF checkpoints. The PPO implementation uses an on-policy sample, GAE, a small local value estimator and a clipped actor ratio; it is a restricted algorithm for verifiable text answers.
++
++The GUI does not yet expose the new objective settings: launch through CLI. Older room genesi cannot silently enable new objectives in-place. Mixed training adds substantial computation per microstep compared with PT alone.
+--- /dev/null
++++ b/examples/v65-mixed-learning/sft.jsonl
+@@ -0,0 +1,2 @@
++{"prompt":"Q: What is 2 + 2?\nA:","response":" 4"}
++{"prompt":"Q: What is 3 + 5?\nA:","response":" 8"}
+--- /dev/null
++++ b/examples/v65-mixed-learning/ppo.jsonl
+@@ -0,0 +1,2 @@
++{"prompt":"Q: What is 2 + 2?\nA:","reference":" 4"}
++{"prompt":"Q: What is 3 + 5?\nA:","reference":" 8"}
+--- /dev/null
++++ b/examples/v65-mixed-learning/shared_mix_policy.json
+@@ -0,0 +1,23 @@
++{
++  "version": "pt-sft-clipped-ppo-v65",
++  "objectives": [
++    true,
++    true
++  ],
++  "weights": [
++    1.0,
++    1.0,
++    0.2
++  ],
++  "ppo_clip": 0.2,
++  "ppo_kl_coef": 0.02,
++  "ppo_value_coef": 0.5,
++  "ppo_gamma": 0.99,
++  "ppo_gae_lambda": 0.95,
++  "ppo_max_tokens": 8,
++  "ppo_reuse": 2,
++  "ppo_reward": "token_match",
++  "input_map": "",
++  "reward_source": "ground-truth-reference-v1",
++  "task": "causal-lm"
++}

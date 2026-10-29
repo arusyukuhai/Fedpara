@@ -1,15 +1,16 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8"/><meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>Fedpara P2P Patch Exchange</title>
-<style>body{font:15px system-ui,sans-serif;max-width:760px;margin:3em auto;padding:0 1em;line-height:1.6}label{display:block;margin:12px 0}input,button{font:inherit;padding:7px}button{cursor:pointer}input[type=text],input[type=password]{width:min(90%,470px)}pre{background:#f4f5f7;overflow:auto;max-height:240px;padding:12px;white-space:pre-wrap}small{color:#555}</style>
-</head><body><h1>Fedpara — WebRTCパッチ送受信</h1>
-<p><small>Mummyをシグナリングに使い、LoRA/LoHAパッチのバイト列そのものは暗号化されたDataChannelでピア間転送します。同じルームIDを双方で設定してください。</small></p>
-<label>ルームID <input id="room" type="text" autocomplete="off"></label>
-<label>APP_TOKEN <input id="token" type="password"></label>
-<button id="connect">接続</button> <button id="close">切断</button>
-<p>接続状態：<b id="state">未接続</b></p>
-<label>送信する .fpatch <input id="file" type="file" accept=".fpatch"></label>
-<button id="send" disabled>パッチを送信</button>
-<pre id="log"></pre>
+
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.10"></script></head><body class="min-h-screen bg-[#080e0b] text-[#e5f6ec] font-mono text-sm antialiased selection:bg-emerald-500 selection:text-[#080e0b] mx-auto max-w-[1100px] px-4 pb-16 pt-9 sm:px-7"><h1 class="mb-5 border-b-2 border-emerald-500 pb-3 text-3xl font-extrabold tracking-tight text-emerald-300 sm:text-4xl">Fedpara — WebRTCパッチ送受信</h1>
+<p class="my-3 leading-relaxed text-[#91a79b]"><small class="text-xs leading-relaxed text-[#91a79b]">Mummyをシグナリングに使い、LoRA/LoHAパッチのバイト列そのものは暗号化されたDataChannelでピア間転送します。同じルームIDを双方で設定してください。</small></p>
+<label class="my-3 block text-xs font-bold text-emerald-50">ルームID <input autocomplete="off" class="mt-1 min-w-0 w-full border border-emerald-900 bg-[#0c1912] px-3 py-2.5 text-sm text-emerald-50 placeholder:text-[#89a596] caret-emerald-400 focus:outline-2 focus:outline-offset-2 focus:outline-emerald-500 disabled:opacity-50" id="room" type="text"/></label>
+<label class="my-3 block text-xs font-bold text-emerald-50">APP_TOKEN <input class="mt-1 min-w-0 w-full border border-emerald-900 bg-[#0c1912] px-3 py-2.5 text-sm text-emerald-50 placeholder:text-[#89a596] caret-emerald-400 focus:outline-2 focus:outline-offset-2 focus:outline-emerald-500 disabled:opacity-50" id="token" type="password"/></label>
+<button class="inline-flex min-h-10 cursor-pointer items-center justify-center border border-emerald-500 bg-emerald-500 px-4 py-2 text-xs font-bold text-[#03170f] hover:bg-emerald-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:cursor-not-allowed disabled:opacity-50 mr-2 mt-2 mb-1" id="connect">接続</button> <button class="inline-flex min-h-10 cursor-pointer items-center justify-center border border-emerald-800 bg-[#0d1b13] px-4 py-2 text-xs font-bold text-emerald-100 hover:bg-emerald-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:cursor-not-allowed disabled:opacity-50 mr-2 mt-2 mb-1" id="close">切断</button>
+<p class="my-3 leading-relaxed text-[#91a79b]">接続状態：<b id="state">未接続</b></p>
+<label class="my-3 block text-xs font-bold text-emerald-50">送信する .fpatch <input accept=".fpatch" class="my-2 block w-full text-xs file:mr-3 file:cursor-pointer file:border file:border-emerald-600 file:bg-[#0d1b13] file:px-3 file:py-2 file:text-emerald-100" id="file" type="file"/></label>
+<button class="inline-flex min-h-10 cursor-pointer items-center justify-center border border-emerald-500 bg-emerald-500 px-4 py-2 text-xs font-bold text-[#03170f] hover:bg-emerald-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:cursor-not-allowed disabled:opacity-50 mr-2 mt-2 mb-1" disabled="" id="send">パッチを送信</button>
+<pre class="max-h-[280px] min-h-[90px] overflow-auto whitespace-pre-wrap break-words border border-emerald-900 bg-[#020705] p-4 text-xs leading-relaxed text-emerald-100" id="log"></pre>
 <script>
 'use strict';
 const $ = id=>document.getElementById(id), log=x=>{$('log').textContent+=x+'\n';};
@@ -98,3 +99,4 @@ $('send').onclick=async()=>{
  }catch(e){log('送信エラー: '+e.message);}
 };
 </script></body></html>
+

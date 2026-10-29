@@ -1,0 +1,11 @@
+# Optional Kagami EVAL dependencies. Install platform-compatible PyTorch first.
+# FP16 / BF16 / FP32 require a Transformers/PyTorch backend.
+transformers>=4.48
+accelerate>=1.1
+huggingface_hub>=0.25
+# For fp4/nf4/int8 on supported accelerators, separately install bitsandbytes.
+# For torchao-int4, separately install a torchao version compatible with torch.
+# These dependencies are optional and architecture/platform specific.
+safetensors>=0.4
+# For reliable disk dispatch on large learned checkpoints, install psutil too.
+psutil>=5.9

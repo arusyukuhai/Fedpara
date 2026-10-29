@@ -36,23 +36,9 @@ def ctrl(kind, **kwargs) -> str:
 
 
 async def _wait_buffer(channel, *, stall_seconds: float = 45.0):
-    """Bound an SCTP buffer stall independently of RTC's open/closed state.
-
-    Progress extends the deadline; queued bytes that never drain MUST fail
-    rather than leaving a snapshot sender silently suspended forever.
-    """
-    previous=None
-    deadline=time.monotonic()+stall_seconds
-    while channel.readyState == 'open' and channel.bufferedAmount > WINDOW:
-        amount=channel.bufferedAmount
-        if previous is None or amount < previous:
-            deadline=time.monotonic()+stall_seconds
-        if time.monotonic() >= deadline:
-            raise TimeoutError('snapshot SCTP send buffer made no progress')
-        previous=amount
-        await asyncio.sleep(.015)
-    if channel.readyState != 'open':
-        raise ConnectionError('WebRTC DataChannel closed')
+    """Use common event-driven SCTP backpressure on both shard and patch streams."""
+    from .p2p import wait_send_window
+    return await wait_send_window(channel,stall_seconds=stall_seconds)
 
 
 async def send_manifest(channel, payload: bytes, signer=None, on_progress=None):

@@ -1,0 +1,344 @@
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -1599,7 +1599,8 @@
+     optimizer=new_optimizer()
+     optimizer.zero_grad(set_to_none=True)
+     from .localprogress import restore_working, save_working, snapshot_path, AsyncWorkingSaver
+-    from .paired_checkpoint_v75 import AsyncPairedSaver, snapshot_path as paired_path, restore as restore_paired
++    from .paired_checkpoint_v75 import AsyncPairedSaver, snapshot_path as paired_path
++    from .paired_recovery_v76 import recover as recover_paired_v76
+     from .hf_mixed_datasets_v68 import source_selected as _v75_has_source
+     # The paired v75 format is local-only. Non-AdamW and disk-backed actor
+     # optimizers need a separately designed atomic moment protocol.
+@@ -1626,7 +1627,15 @@
+                 raise PatchError('paired v75 checkpoint requires a local PPO Critic')
+             pair_mixer._v75_paired=True
+             try:
+-                restored_steps=restore_paired(journal,adapter,optimizer,pair_mixer)
++                restored_steps,paired_recovery= recover_paired_v76(
++                    journal,adapter,optimizer,pair_mixer,verified_replay=True)
++                if paired_recovery is not None and paired_recovery.mode=='reset':
++                    print('PAIRED AUTO-RECOVERY: signed history advanced '
++                          f'{paired_recovery.previous_event_count} -> '
++                          f'{paired_recovery.current_event_count}; '
++                          'resetting uncommitted Actor optimizer and local Critic; '
++                          f'old_checkpoint_local_steps={paired_recovery.previous_checkpoint_local_steps}',
++                          flush=True)
+             except BaseException:
+                 # Even on a rejected mismatched WAL tip, release HF readers
+                 # without publishing an unrelated v66/v69 legacy snapshot.
+--- a/patchlib/paired_recovery_v76.py
++++ b/patchlib/paired_recovery_v76.py
+@@ -0,0 +1,121 @@
++"""Fail-closed automatic recovery when the signed journal outruns a v75 pair.
++
++The immutable, verified event replay (performed by the caller BEFORE invoking
++this module) is the authority for committed Actor state.  A stale paired file
++is *never* applied to that reconstructed Actor.  Only an append-only extension
++of the checkpoint's exact journal prefix permits a new local Actor/Critic
++checkpoint to be published with freshly initialized optimizer/value state.
++This cannot resurrect unpublished local gradients or Critic steps.
++"""
++from __future__ import annotations
++
++import json
++from dataclasses import dataclass
++
++from safetensors import safe_open
++
++from .core import PatchError
++from .localprogress import _tip
++from . import paired_checkpoint_v75 as paired
++
++
++@dataclass(frozen=True)
++class RecoveryDecision:
++    mode: str  # exact | reset
++    previous_checkpoint_local_steps: int = 0
++    previous_event_count: int = 0
++    current_event_count: int = 0
++
++
++def _event_at_index(journal, n):
++    """Event in append order, not origin/seq order, with no SQLite thread hop."""
++    if n == 0:
++        return None
++    row = journal.db.execute(
++        'SELECT origin,seq,digest FROM events ORDER BY rowid LIMIT 1 OFFSET ?',
++        (n - 1,),
++    ).fetchone()
++    return list(row) if row is not None else None
++
++
++def inspect(journal, adapter, mixer):
++    """Validate a checkpoint fully *before* authorizing discard of its state.
++
++    A journal count alone is insufficient; the exact saved last event must
++    still appear at the saved position.  engine.replay() must already have
++    verified the event stream and reconstructed the committed Actor base.
++    """
++    path = paired.snapshot_path(journal)
++    if not path.exists():
++        return None
++    if (path.is_symlink() or path.parent.is_symlink()
++            or path.stat().st_size > paired.MAX_BYTES + 1024**2):
++        raise PatchError('unsafe paired recovery checkpoint path or size')
++    with safe_open(str(path), framework='pt', device='cpu') as reader:
++        try:
++            meta = json.loads((reader.metadata() or {})['paired'])
++        except (KeyError, TypeError, ValueError) as exc:
++            raise PatchError('invalid paired recovery checkpoint metadata') from exc
++        actor = {'layout':adapter.layout,'kind':adapter.kind,'rank':adapter.rank,
++                 'alpha':adapter.alpha,
++                 'count':len(list(adapter.trainable_parameters()))}
++        if (meta.get('format') != paired.FORMAT or
++                meta.get('genesis') != journal.genesis or
++                meta.get('actor') != actor or
++                meta.get('critic') != paired._identity(mixer) or
++                meta.get('critic_count') != len(paired._critic_params(mixer))):
++            raise PatchError('paired recovery identity or layout mismatch')
++        saved = meta.get('tip')
++        if (not isinstance(saved, list) or len(saved) != 2 or
++                type(saved[0]) is not int or saved[0] < 0 or
++                (saved[0] == 0 and saved[1] is not None) or
++                (saved[0] > 0 and (not isinstance(saved[1], list) or
++                   len(saved[1]) != 3))):
++            raise PatchError('invalid paired recovery journal cursor')
++        if type(meta.get('steps')) is not int or meta['steps'] < 0 or (
++            type(meta.get('critic_steps')) is not int or meta['critic_steps'] < 0
++        ):
++            raise PatchError('invalid paired recovery optimizer counters')
++        keys = set(reader.keys())
++        if paired._tensor_digest({k:reader.get_tensor(k) for k in keys}) != meta.get('tensor_sha256'):
++            raise PatchError('paired recovery checkpoint tensor digest mismatch')
++        a, ak = paired._validated_params(reader, keys, 'a', list(adapter.trainable_parameters()))
++        c, ck = paired._validated_params(reader, keys, 'c', paired._critic_params(mixer))
++        if ak | ck != keys:
++            raise PatchError('paired recovery checkpoint contains unexpected tensors')
++        # The application is all-or-nothing; these validated tensors are NOT
++        # applied when the journal has moved beyond the snapshot boundary.
++    current = _tip(journal)
++    if saved == current:
++        return RecoveryDecision('exact', meta['steps'], saved[0], current[0])
++    if saved[0] >= current[0]:
++        raise PatchError('paired recovery journal rolled back or diverged')
++    if _event_at_index(journal, saved[0]) != saved[1]:
++        raise PatchError('paired recovery journal prefix diverged; refusing reset')
++    return RecoveryDecision('reset', meta['steps'], saved[0], current[0])
++
++
++def recover(journal, adapter, actor_optimizer, mixer, *, verified_replay=False):
++    """Restore exact paired state, or durably reset local-only state.
++
++    This is intentionally not callable as a replacement for engine.replay():
++    the caller MUST first verify signed events and replay them to reconstruct
++    the authoritative committed Actor model/anchor.  Fresh optimizer and
++    Critic objects must be supplied before this function is invoked.
++    """
++    if not verified_replay:
++        raise PatchError('paired recovery requires verified signed journal replay')
++    decision = inspect(journal, adapter, mixer)
++    if decision is None:
++        return None, None
++    if decision.mode == 'exact':
++        steps = paired.restore(journal, adapter, actor_optimizer, mixer)
++        return steps, decision
++    # We must NEVER apply the stale Actor factors, their AdamW moments, or the
++    # stale Critic head to the already-replayed signed model.  The caller has
++    # created clean optimizer/Critic state. Publish a new paired state BEFORE
++    # allowing the next training step; atomic rename provides retryability:
++    # if interrupted, the old pair is reconsidered on the next restart.
++    snap = paired.capture(journal, adapter, actor_optimizer, mixer, 0, journal_tip=_tip(journal))
++    paired.write(snap)
++    return 0, decision
+--- a/tests/test_paired_recovery_v76.py
++++ b/tests/test_paired_recovery_v76.py
+@@ -0,0 +1,140 @@
++"""Crash windows: signed event wins; local unpublished paired state is disposable."""
++import json
++
++import pytest
++import torch
++from safetensors import safe_open
++from safetensors.torch import save_file
++
++from patchlib.core import PatchError
++from patchlib.paired_checkpoint_v75 import capture, write, snapshot_path
++from patchlib.paired_recovery_v76 import recover, inspect
++from test_paired_checkpoint_v75 import setup
++
++
++def _values(module):
++    return [p.detach().clone() for p in module]
++
++
++def test_exact_checkpoint_restores_uncommitted_optimizer_and_critic(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,3))
++        actor=_values(a.trainable_parameters())
++        critic=_values(m.critic.parameters())
++        with torch.no_grad():
++            for p in a.trainable_parameters():p.zero_()
++            for p in m.critic.parameters():p.zero_()
++        steps, decision=recover(j,a,o,m,verified_replay=True)
++        assert (steps,decision.mode)==(3,'exact')
++        assert all(torch.equal(x,y) for x,y in zip(actor,a.trainable_parameters()))
++        assert all(torch.equal(x,y) for x,y in zip(critic,m.critic.parameters()))
++    finally:m.close();j.close()
++
++
++def test_advanced_signed_history_resets_local_state_without_rollback(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,4))
++        j.advance()
++        # Mimic engine.replay(): newly constructed base and clean optimizer.
++        # No stale saved state may be applied to the replayed base.
++        with torch.no_grad():
++            for p in a.trainable_parameters():p.add_(10)
++            for p in m.critic.parameters():p.sub_(3)
++        actor=_values(a.trainable_parameters())
++        critic=_values(m.critic.parameters())
++        o.state.clear();m.critic_optim.state.clear();m.critic_steps=0
++        steps, dec=recover(j,a,o,m,verified_replay=True)
++        assert steps==0 and dec.mode=='reset' and dec.previous_checkpoint_local_steps==4
++        assert dec.previous_event_count==0 and dec.current_event_count==1
++        assert all(torch.equal(x,y) for x,y in zip(actor,a.trainable_parameters()))
++        assert all(torch.equal(x,y) for x,y in zip(critic,m.critic.parameters()))
++        assert not o.state and not m.critic_optim.state
++        assert inspect(j,a,m).mode=='exact'
++        assert recover(j,a,o,m,verified_replay=True)[0]==0
++    finally:m.close();j.close()
++
++
++def test_advanced_multiple_signed_events_after_saved_tip(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        j.advance();write(capture(j,a,o,m,2));j.advance();j.advance()
++        steps,decision=recover(j,a,o,m,verified_replay=True)
++        assert steps==0 and decision.previous_event_count==1 and decision.current_event_count==3
++    finally:m.close();j.close()
++
++
++def test_fork_at_old_tip_fails_closed(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        j.advance();write(capture(j,a,o,m,2));j.advance()
++        j.db.execute("UPDATE events SET digest=? WHERE rowid=1",('0'*64,));j.db.commit()
++        before=snapshot_path(j).read_bytes()
++        with pytest.raises(PatchError,match='prefix diverged'):
++            recover(j,a,o,m,verified_replay=True)
++        assert snapshot_path(j).read_bytes()==before
++    finally:m.close();j.close()
++
++
++def test_rollback_and_same_count_divergence_rejected(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        j.advance();write(capture(j,a,o,m,5))
++        j.db.execute('DELETE FROM events');j.db.commit()
++        with pytest.raises(PatchError,match='rolled back or diverged'):
++            recover(j,a,o,m,verified_replay=True)
++    finally:m.close();j.close()
++
++
++def test_corrupted_stale_pair_is_not_silently_discarded(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,1))
++        with safe_open(str(snapshot_path(j)),framework='pt',device='cpu') as reader:
++            data={k:reader.get_tensor(k) for k in reader.keys()}
++            meta=reader.metadata()
++        key=next(k for k in data if k.startswith('c.p.'))
++        data[key]=data[key]+0.01
++        save_file(data,str(snapshot_path(j)),metadata=meta)
++        j.advance()
++        with pytest.raises(PatchError,match='digest mismatch'):
++            recover(j,a,o,m,verified_replay=True)
++    finally:m.close();j.close()
++
++
++def test_invalid_room_and_journal_replay_proof_rejected(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,0));j.advance()
++        with pytest.raises(PatchError,match='verified signed journal replay'):
++            recover(j,a,o,m)
++        m._critic_identity='other-room'
++        with pytest.raises(PatchError,match='identity or layout'):
++            recover(j,a,o,m,verified_replay=True)
++    finally:m.close();j.close()
++
++
++def test_publication_failure_retries_from_same_stale_snapshot(tmp_path,monkeypatch):
++    from patchlib import paired_recovery_v76 as rec
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,0));j.advance()
++        before=snapshot_path(j).read_bytes()
++        real=rec.paired.write
++        def fail(_):raise OSError('simulated power loss before rename')
++        monkeypatch.setattr(rec.paired,'write',fail)
++        with pytest.raises(OSError,match='simulated power loss'):
++            recover(j,a,o,m,verified_replay=True)
++        assert snapshot_path(j).read_bytes()==before
++        monkeypatch.setattr(rec.paired,'write',real)
++        assert recover(j,a,o,m,verified_replay=True)[1].mode=='reset'
++        assert recover(j,a,o,m,verified_replay=True)[1].mode=='exact'
++    finally:m.close();j.close()
++
++
++def test_empty_checkpoint_no_state(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        assert recover(j,a,o,m,verified_replay=True)==(None,None)
++    finally:m.close();j.close()
+--- a/README_V76_STATUS.md
++++ b/README_V76_STATUS.md
+@@ -0,0 +1,35 @@
++# Kagami v76 — verified signed-log replay and automatic paired-state recovery
++
++## Fixed: crash between durable journal append and paired checkpoint publication
++
++v75 correctly refused to load an Actor/Critic pair if the signed SQLite journal had moved beyond the pair's saved tip, but it then permanently blocked local training. v76 introduces `patchlib/paired_recovery_v76.py`, invoked during `train-elastic` startup **after** the existing authenticated `engine.replay()` reconstructs the signed Actor state.
++
++When the journal has advanced by a **verified append-only extension** of the stored checkpoint boundary:
++
++1. Validate snapshot identity (genesis, adapter layout, room/critic identity), step counters, all tensors, AdamW moment shapes, and SHA-256 payload digest. No stale tensors are applied.
++2. Check that the previous tip's complete `(origin, seq, digest)` entry still occurs at the same journal position, and that the current event count is strictly larger.
++3. Retain the Actor **already reconstructed from the committed, signed journal**. Use newly initialized Actor optimizer and PPO Critic/optimizer. The stale, uncommitted local states are explicitly discarded.
++4. Before the first new training step, capture the clean Actor/Critic pair at the *new* journal tip. Write and fsync it to a unique temporary file, replace the old pair atomically, then fsync the directory.
++5. If the process dies during this publication, the old file remains and the procedure can retry. If it dies after publication, the new file matches the current journal tip and restores normally.
++
++No signed event is invented, rewritten, deleted, or rolled back. No stale gradients or optimizer moments are silently replayed on a different base.
++
++## Fail-closed cases
++
++- Journal shorter than the checkpoint (loss/rollback), or forked/divergent event at the checkpoint boundary.
++- Incompatible genesis, model factor layout, or Critic identity.
++- Tampered/corrupt checkpoint bytes, missing/malformed AdamW state, or unsafe symlink/oversized file.
++- Failure of signed journal verification/replay prior to recovery, or failure to publish the replacement snapshot.
++- Unsupported optimizer formats and non-PPO rooms retain the v75 behavior.
++
++## What automatic recovery **does not** promise
++
++**This is not an atomic transaction across SQLite and the safetensors file.** Instead, it is *redo of authenticated committed events + bounded local-state reset* on restart. Critic updates and optimizer moments that have not been included in a compatible checkpoint cannot be reconstructed from signed Actor events; the reset may lose progress and alter the continuation trajectory. A previous checkpoint's `steps` is a recorded local-step count, **not an exact measure of how many steps were lost**.
++
++This is a recovery from process death during the journal-versus-checkpoint crash window, not fault-tolerant distributed exact-once PPO and not a zero-step-loss guarantee. True reproducible local PPO replay would require persistent rollout observations/rewards/random state and a separate fully ordered actor+critic training log. Network identity and certified epoch replay checks still apply. Actual power-loss, real GPU HF models, large-model long-WAN and 4,096-peer runs remain unverified.
++
++## Usage
++
++No new flag: restart the same `train-elastic` PPO+AdamW room with the same room, tokenizer, signed journal, and pinned Critic policy. The log prints `PAIRED AUTO-RECOVERY` with previous and current event counts if an append-only extension requires a reset. A correctly matching pair restores all supported moments without reset. A fork or corrupt file fails loudly rather than continuing. Existing `*.paired-v75.safetensors` paths remain compatible.
++
++See `VALIDATION_V76.md` for explicit crash-window scenarios and tests.
+--- a/VALIDATION_V76.md
++++ b/VALIDATION_V76.md
+@@ -0,0 +1,7 @@
++# v76 validation
++
++- New `tests/test_paired_recovery_v76.py`: exact-tip round-trip, advanced signed prefix (empty and nonempty prefix), no stale Actor/Critic/optimizer application, persistent reset and restart idempotence, fork rejection, rollback rejection, corrupt payload rejection, cross-room rejection, requirement for prior signed replay, simulated write crash and retry, absent snapshot.
++- v75 local paired checkpoint tests included to ensure compatibility with its format.
++- `train-elastic` connects replay-first recovery after `ContinualElasticEngine.replay()`.
++- Validation is on CPU with synthetic P2P journal rows; `verified_replay` is a contract enforced in code, and the production caller supplies it only after the signed replay call returns successfully. Synthetic rows themselves are not Ed25519 signatures, so tests do **not** prove on-the-wire signature verification.
++- Full pytest outcome is recorded in `PYTEST_V76_FULL.log`. No real Hugging Face large-model checkpoint, CPU/GPU mixed device or genuine WAN crash test was performed.

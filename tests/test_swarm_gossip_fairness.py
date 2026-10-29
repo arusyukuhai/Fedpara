@@ -65,6 +65,7 @@ def test_saturated_inventory_queue_does_not_close_good_sctp():
                          genesis='0'*64,unsafe=True)
         ch=FakeChannel();node._attach_channel(ch)
         node.hello_received=True
+        node.remote_genesis=node.genesis  # Authenticated HELLO pins this.
         while not node.controls.full():
             node.controls.put_nowait({'type':'inventory'})
         node.counter=0

@@ -53,7 +53,7 @@ def test_96_nodes_successive_join_leave_eventual_connectivity():
 
 
 def test_peer_caps_and_input_rejection():
-    with pytest.raises(ValueError):neighbors(ids(97)[0], ids(97))
+    with pytest.raises(ValueError):neighbors(ids(4097)[0], ids(4097))
     with pytest.raises(ValueError):neighbors(ids(3)[0], ids(3),max_degree=7)
     with pytest.raises(ValueError):neighbors(ids(3)[0], ['p0','p1'])
     with pytest.raises(ValueError):neighbors(ids(3)[0], 'malformed')
@@ -62,9 +62,11 @@ def test_peer_caps_and_input_rejection():
 def test_room_discovery_96_members_and_explicit_publication():
     first=ids(96)[0]
     d=RoomDiscovery('wss://example.test/ws','A'*32,first)
-    d.accept({'type':'group-members','peers':ids(96)[1:]})
-    assert len(d.members)==95
-    assert d.max_peers==96
+    d.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+              'revision':1,'online':96,
+              'peers':sorted(neighbors(first,ids(96)))})
+    assert len(d.members)<=8 and d.online_count==96
+    assert d.max_peers==4096
     assert not d.publish
     publish=RoomDiscovery('wss://example.test/ws','B'*32,first,publish=True,publish_token='operator')
     assert publish.publish and publish.publish_token=='operator'

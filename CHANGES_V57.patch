@@ -1,0 +1,991 @@
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -915,6 +915,8 @@
+     livefed.add_argument('--swarm-max-events',type=int,default=0,help=argparse.SUPPRESS)
+     livefed.add_argument('--epoch-v2-probe-committee',type=Path,help='EXPERIMENTAL: fixed JSON list of signed peer IDs for no-op Epoch Paxos WebRTC probe; does NOT change v1 training')
+     livefed.add_argument('--generation-v1-committee',type=Path,help='EXPERIMENTAL: pinned crash-fault committee for verified WebRTC generation certificate gossip. Does not automatically rebase model weights or delete history.')
++    livefed.add_argument('--generation-v2-trainer',action='store_true',help='EXPERIMENTAL: permit only fully verified paged-v2 quorum certificates to drive trainer recovery and step-boundary carry')
++    livefed.add_argument('--generation-v2-propose-every',type=int,default=0,help='EXPERIMENTAL: committee leader exports a fenced model checkpoint every N locally emitted signed events (0 disables; may pause local steps for large models)')
+     livefed.add_argument('--inbound-queue',type=int,default=32,
+         help='Maximum signed incoming updates awaiting asynchronous application (1..256)')
+     livefed.add_argument('--durable-every',type=int,default=0,help='Unpublished optimizer-state checkpoint every N local steps (0=off, signed events remain FULL durable)')
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -413,6 +413,7 @@
+         if self.bridge_only and kind not in ('hello','heartbeat',
+                 'generation-head','generation-need','generation-wire',
+                 'generation-have','generation-snapshot-request',
++                'generation-compact-have','generation-compact-snapshot-request',
+                 'generation-compact-head','generation-compact-need',
+                 'generation-carry-offer','generation-carry-need','generation-carry-chunk'):
+             return False  # A signed v1 update must never cross epochs.
+@@ -797,6 +798,7 @@
+                             'hello','heartbeat','generation-head','generation-need',
+                             'generation-wire','generation-have','generation-snapshot-request',
+                             'generation-compact-head','generation-compact-need',
++                            'generation-compact-have','generation-compact-snapshot-request',
+                             'generation-carry-offer','generation-carry-need',
+                             'generation-carry-chunk'):
+                         raise PatchError('cross-generation v1 traffic forbidden')
+@@ -1321,6 +1323,13 @@
+     root_genesis=genesis
+     epoch_dir=Path(str(args.journal)+'.live-epoch')
+     epoch_boot=None
++    if (getattr(args,'generation_v2_trainer',False) or
++            getattr(args,'generation_v2_propose_every',0)) and not getattr(args,'generation_v1_committee',None):
++        raise PatchError('compact trainer requires a pinned generation committee')
++    if getattr(args,'generation_v2_propose_every',0)<0:
++        raise PatchError('invalid automatic epoch export cadence')
++    if getattr(args,'generation_v2_propose_every',0) and not getattr(args,'generation_v2_trainer',False):
++        raise PatchError('automatic compact export requires --generation-v2-trainer')
+     if ((epoch_dir/'active-epoch.json').exists() or
+             (epoch_dir/'active-epoch.json').is_symlink()):
+         if not getattr(args,'generation_v1_committee',None) or not room_only:
+@@ -1335,9 +1344,29 @@
+             room=args.room_id,peer=args.peer_id,committee=boot_committee,
+             signer=signer,trusted=trusted,genesis=root_genesis)
+         try:
+-            epoch_boot=resolve_certified_boot(root=epoch_dir,journal_base=Path(args.journal),
+-                ledger=boot_ledger,root_genesis=root_genesis,
+-                max_state_bytes=args.max_state_gb*1024**3)
++            if getattr(args,'generation_v2_trainer',False):
++                from .epoch_certificate_v46 import CompactEpochLedger
++                from .epoch_autonomous_v56 import AutonomousPagedEpoch
++                from .epoch_compact_trainer_v57 import CertifiedCompactTrainerLedger
++                compact_boot=CompactEpochLedger(
++                    Path(str(args.journal)+'.generation-compact.sqlite3'),
++                    room=args.room_id,peer=args.peer_id,committee=boot_committee,
++                    signer=signer,trusted=trusted,genesis=root_genesis)
++                store_boot=AutonomousPagedEpoch(compact_boot,
++                    Path(str(args.journal)+'.generation-compact-stage.sqlite3'),
++                    local_checkpoint=lambda _p:None,
++                    local_export_verified=lambda _p:False)
++                try:
++                    v2_boot_ledger=CertifiedCompactTrainerLedger(compact_boot,store_boot)
++                    epoch_boot=resolve_certified_boot(root=epoch_dir,journal_base=Path(args.journal),
++                        ledger=v2_boot_ledger,root_genesis=root_genesis,
++                        max_state_bytes=args.max_state_gb*1024**3)
++                finally:
++                    store_boot.close();compact_boot.close()
++            else:
++                epoch_boot=resolve_certified_boot(root=epoch_dir,journal_base=Path(args.journal),
++                    ledger=boot_ledger,root_genesis=root_genesis,
++                    max_state_bytes=args.max_state_gb*1024**3)
+         finally:
+             boot_ledger.close()
+         if epoch_boot is None:
+@@ -1432,9 +1461,12 @@
+     generation_ledger=None
+     generation_compact_ledger=None
+     generation_compact_control=None
++    generation_trainer_ledger=None
+     generation_gc_runtime=None
+     generation_gc_next=0.0
+     generation_gc_task=None
++    generation_compact_vote_task=None
++    generation_compact_vote_next=0.0
+     if getattr(args,'generation_v1_committee',None):
+         if not room_only or args.unsafe_unsigned or signer is None:
+             raise PermissionError('generation control requires authenticated room mode')
+@@ -1449,7 +1481,7 @@
+             store_pin(committee_peer,pem,make_verifier(pub))
+     def maybe_start_generation_bridge():
+         nonlocal generation_bridge,generation_ledger,generation_gc_runtime
+-        nonlocal generation_compact_ledger,generation_compact_control
++        nonlocal generation_compact_ledger,generation_compact_control,generation_trainer_ledger
+         if generation_bridge is not None or generation_committee is None:
+             return
+         if any(k not in trusted for k in generation_committee):
+@@ -1482,13 +1514,29 @@
+             Path(str(args.journal)+'.generation-compact.sqlite3'),
+             room=args.room_id,peer=args.peer_id,committee=generation_committee,
+             signer=signer,trusted=trusted,genesis=root_genesis)
+-        # Never pretend that downloaded shard checksums prove an atomic local
+-        # model/optimizer export at the proposed frontier. External verified
+-        # exporter integration must explicitly unlock committee voting.
++        def compact_locally_verified(p):
++            if not getattr(args,'generation_v2_trainer',False):return False
++            # A committee member may only attest an epoch following the
++            # model/JOURNAL generation it is actually running. In particular,
++            # an empty signed frontier must not permit a stale trainer to
++            # vote for the next generation's unrelated checkpoint.
++            if (p['epoch']!=trainer_router.current.epoch+1 or
++                    journal.genesis!=trainer_router.current.genesis):
++                return False
++            return generation_compact_control.has_export_receipt(p)
++        def compact_local_files(p):
++            path=snapshot_recv/(p['manifest']+'.fmanifest')
++            if path.is_symlink() or not path.is_file():return None
++            return path,snapshot_store,journal.db
+         generation_compact_control=AutonomousPagedEpoch(generation_compact_ledger,
+             Path(str(args.journal)+'.generation-compact-stage.sqlite3'),
+-            local_checkpoint=lambda _p:None,
+-            local_export_verified=lambda _p:False)
++            local_checkpoint=compact_local_files,
++            local_export_verified=compact_locally_verified,
++            defer_votes=bool(getattr(args,'generation_v2_trainer',False)))
++        if getattr(args,'generation_v2_trainer',False):
++            from .epoch_compact_trainer_v57 import CertifiedCompactTrainerLedger
++            generation_trainer_ledger=CertifiedCompactTrainerLedger(
++                generation_compact_ledger,generation_compact_control)
+         generation_bridge=GenerationWebRTCBridge(
+             AutomaticGenerationControl(generation_ledger,locally_verified,locally_covered),
+             snapshot_available=has_snapshot,
+@@ -1992,7 +2040,27 @@
+                     if node.generation_controls.empty():break
+                     kind, fields=node.generation_controls.get_nowait()
+                     try:
+-                        if kind=='generation-snapshot-request':
++                        if kind=='generation-compact-snapshot-request':
++                            # The cert is a pinned CFT quorum. A bare hash or
++                            # peer hint NEVER authorizes a large file transfer.
++                            cert=(generation_compact_ledger.certified_epoch(fields['epoch'])
++                                  if generation_compact_ledger is not None else None)
++                            p=cert['proposal'] if cert else None
++                            if (p is not None and p['manifest']==fields['manifest']
++                                    and node.snapshot_link is not None):
++                                path=snapshot_recv/(p['manifest']+'.fmanifest')
++                                if not path.is_symlink() and path.is_file():
++                                    from .shards import read_manifest,verify_shards,semantic_shard_sha256
++                                    with path.open('rb') as fp:
++                                        digest=hashlib.file_digest(fp,'sha256').hexdigest()
++                                    if digest!=p['manifest']:
++                                        raise PatchError('compact checkpoint manifest corrupted')
++                                    meta=read_manifest(path,max_state_bytes=args.max_state_gb*1024**3)
++                                    await asyncio.to_thread(verify_shards,meta,snapshot_store)
++                                    if semantic_shard_sha256(meta)!=p['semantic']:
++                                        raise PatchError('compact checkpoint semantic mismatch')
++                                    node.snapshot_link.offer(path,signer)
++                        elif kind=='generation-snapshot-request':
+                             # Exact certified content only; never serve an
+                             # arbitrary file path named by the requesting peer.
+                             cert=generation_ledger.latest()
+@@ -2342,7 +2410,9 @@
+         return True
+ 
+     def make_auto_epoch_service():
+-        if generation_ledger is None:return None
++        selected_ledger=(generation_trainer_ledger if getattr(args,'generation_v2_trainer',False)
++                         else generation_ledger)
++        if selected_ledger is None:return None
+         # Reconstruct the active pointer FIRST at startup (v52). Only this
+         # verified trainer is allowed to open the v53 publishing service.
+         async def old_frozen(_old):return epoch_writer_frozen
+@@ -2351,7 +2421,7 @@
+             if not epoch_writer_frozen or bundle is None:
+                 raise PatchError('attempted carry without old ingress barrier')
+             bundle[2].verify_handoff_receipt()
+-        return LiveEpochSwitchService(ledger=generation_ledger,router=trainer_router,
++        return LiveEpochSwitchService(ledger=selected_ledger,router=trainer_router,
+             root=epoch_dir,build_shadow=build_epoch_shadow,
+             verify_local=verify_epoch_local,
+             flush_unpublished=freeze_old_epoch,carry_suffix=carry_complete,
+@@ -2463,6 +2533,75 @@
+                   f'events={journal.count()} peer={args.peer_id}',flush=True)
+             return
+ 
++    async def compact_vote_worker(p,pages):
++        """Verify full checkpoint bytes and journal cut off the asyncio loop."""
++        from .epoch_certificate_v46 import CompactEpochLedger
++        import sqlite3
++        def worker():
++            ledger=CompactEpochLedger(Path(str(args.journal)+'.generation-compact.sqlite3'),
++                room=args.room_id,peer=args.peer_id,committee=generation_committee,
++                signer=signer,trusted=trusted,genesis=root_genesis)
++            try:
++                with sqlite3.connect(journal.path,timeout=30) as cut_db:
++                    manifest=snapshot_recv/(p['manifest']+'.fmanifest')
++                    return ledger.vote(p,pages=pages,journal_db=cut_db,
++                                       manifest_path=manifest,shard_store=snapshot_store)
++            finally:ledger.close()
++        return await asyncio.to_thread(worker)
++
++    compact_last_export=0
++    compact_export_busy=False
++    async def maybe_propose_compact_epoch():
++        nonlocal compact_last_export,compact_export_busy
++        frequency=getattr(args,'generation_v2_propose_every',0)
++        if not frequency or compact_export_busy or not initial_complete:
++            return
++        if (generation_compact_control is None or generation_trainer_ledger is None or
++                args.peer_id!=min(generation_committee) or
++                emitted-compact_last_export<frequency):
++            return
++        latest=generation_compact_ledger.latest()
++        if latest is not None and latest['proposal']['epoch']>trainer_router.current.epoch:
++            return
++        if generation_compact_control.db.execute(
++                'SELECT 1 FROM proposals WHERE epoch=? LIMIT 1',
++                (trainer_router.current.epoch+1,)).fetchone():
++            return
++        from .epoch_export_v57 import export_at_step_boundary
++        import sqlite3
++        compact_export_busy=True
++        try:
++            await seal_if_needed()
++            async with inbound_commit_lock:
++                def export_worker():
++                    with sqlite3.connect(journal.path,timeout=30) as db:
++                        db.execute('PRAGMA query_only=ON')
++                        class CutView:
++                            pass
++                        view=CutView();view.db=db
++                        view.count=lambda:db.execute('SELECT COUNT(*) FROM events').fetchone()[0]
++                        return export_at_step_boundary(
++                            journal=view,model=model,adapter=adapter,
++                            store=snapshot_store,incoming=snapshot_recv,
++                            room=args.room_id,epoch=trainer_router.current.epoch+1,
++                            parent=generation_compact_ledger.head(),
++                            replicas=list(generation_compact_ledger.committee),
++                            signer=signer,peer=args.peer_id,
++                            max_state_bytes=args.max_state_gb*1024**3,
++                            shard_bytes=args.shard_mb*1024**2)
++                p,pages,receipt=await asyncio.to_thread(export_worker)
++                generation_compact_control.receive_export_receipt(receipt,p)
++                generation_compact_control.offer(p,pages)
++                compact_last_export=emitted
++                print(f'COMPACT EPOCH CANDIDATE epoch={p["epoch"]} '
++                      f'origins={p["frontier_header"]["total"]} '
++                      f'pages={len(pages)} manifest={p["manifest"][:16]}',flush=True)
++        except (PatchError,OSError,sqlite3.Error,ValueError) as exc:
++            compact_last_export=emitted
++            log.warning('fenced compact checkpoint export deferred: %s',exc)
++        finally:
++            compact_export_busy=False
++
+     async def maybe_checkpoint():
+         nonlocal next_checkpoint,optimizer
+         if next_checkpoint is None or journal.count()<next_checkpoint:return
+@@ -2531,9 +2670,26 @@
+         network_receiver_task=asyncio.create_task(network_receiver_loop(),name='fedpara-network-receiver')
+         wal_maintenance_task=asyncio.create_task(wal_maintenance(),name='fedpara-wal-checkpoint')
+         while not shutdown.is_set() and (args.rounds == 0 or emitted < args.rounds):
++            if generation_compact_vote_task is not None and generation_compact_vote_task.done():
++                try:
++                    vote= generation_compact_vote_task.result()
++                    if generation_compact_control is not None:
++                        generation_compact_control.receive('local',{'kind':'compact-vote','data':vote})
++                except (PatchError,OSError,ValueError,sqlite3.Error) as exc:
++                    log.warning('compact committee verification deferred: %s',exc)
++                generation_compact_vote_task=None
++            if (generation_compact_vote_task is None and generation_compact_control is not None
++                    and getattr(args,'generation_v2_trainer',False)
++                    and loop.time()>=generation_compact_vote_next):
++                generation_compact_vote_next=loop.time()+.5
++                ready=generation_compact_control.ready_for_vote()
++                if ready is not None:
++                    generation_compact_vote_task=asyncio.create_task(
++                        compact_vote_worker(*ready),name='kagami-compact-vote')
+             working_saver.check()
+             inbound_pipeline.check()
+-            if generation_ledger is not None and auto_epoch_service is None:
++            if (generation_trainer_ledger if getattr(args,'generation_v2_trainer',False)
++                    else generation_ledger) is not None and auto_epoch_service is None:
+                 auto_epoch_service=make_auto_epoch_service()
+                 from .epoch_multihop_v56 import MultiEpochCatchup
+                 auto_epoch_catchup=MultiEpochCatchup(auto_epoch_service,
+@@ -2560,7 +2716,7 @@
+                         auto_epoch_next=loop.time()+15.0
+                 if (auto_epoch_prepare is None and not auto_epoch_service.shadow_ready and
+                         loop.time()>=auto_epoch_next and
+-                        generation_ledger.certified_epoch(trainer_router.current.epoch+1) is not None):
++                        auto_epoch_service.ledger.certified_epoch(trainer_router.current.epoch+1) is not None):
+                     auto_epoch_next=loop.time()+2.0
+                     auto_epoch_prepare=asyncio.create_task(
+                         auto_epoch_service.activate_next(prepare_only=True),
+@@ -3081,6 +3237,7 @@
+                 await seal_if_needed()
+                 nonlocal_optimizer[0]=optimizer
+                 await maybe_checkpoint()
++                await maybe_propose_compact_epoch()
+             if local_steps==1 or local_steps%args.log_steps==0:
+                 channels=sum(bool(s.node and s.node.connected.is_set())
+                              for s in slots.values() if not s.disabled)
+--- a/patchlib/epoch_autonomous_v56.py
++++ b/patchlib/epoch_autonomous_v56.py
+@@ -33,7 +33,8 @@
+     are transactional. A process crash requires no peer-local volatile state.
+     """
+     def __init__(self, ledger:CompactEpochLedger, path:Path, *,
+-                 local_checkpoint, local_export_verified, max_origins=MAX_ORIGINS):
++                 local_checkpoint, local_export_verified, max_origins=MAX_ORIGINS,
++                 defer_votes=False):
+         if not isinstance(ledger,CompactEpochLedger) or not 1<=max_origins<=MAX_ORIGINS:
+             raise ValueError('invalid autonomous paged certificate configuration')
+         if not callable(local_checkpoint) or not callable(local_export_verified):
+@@ -42,6 +43,7 @@
+         self.local_checkpoint=local_checkpoint
+         self.local_export_verified=local_export_verified
+         self.max_origins=max_origins
++        self.defer_votes=bool(defer_votes)
+         path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+         self.db=sqlite3.connect(path,timeout=30)
+         self.db.execute('PRAGMA journal_mode=WAL')
+@@ -51,11 +53,14 @@
+         self.db.execute('CREATE TABLE IF NOT EXISTS pages (digest TEXT NOT NULL, idx INTEGER NOT NULL, wire TEXT NOT NULL, PRIMARY KEY(digest,idx))')
+         self.db.execute('CREATE TABLE IF NOT EXISTS votes (digest TEXT NOT NULL, peer TEXT NOT NULL, wire TEXT NOT NULL, PRIMARY KEY(digest,peer))')
+         self.db.execute('CREATE TABLE IF NOT EXISTS endorsements (digest TEXT PRIMARY KEY, wire TEXT NOT NULL)')
++        self.db.execute('CREATE TABLE IF NOT EXISTS exporter_receipts (digest TEXT PRIMARY KEY, wire TEXT NOT NULL)')
+         fingerprint=_digest([ledger.room, ledger.genesis, ledger.committee,max_origins])
+         with self.db:self.db.execute('INSERT OR IGNORE INTO config VALUES(?,?)',('fingerprint',fingerprint))
+         if self.db.execute("SELECT v FROM config WHERE k='fingerprint'").fetchone()[0]!=fingerprint:
+             raise PatchError('epoch coordinator config changed')
+         self._busy=False
++        self._seed_epoch=1
++        self._page_scan_epoch=1
+ 
+     def close(self):self.db.close()
+ 
+@@ -81,6 +86,24 @@
+         self.ledger._validate(p)
+         return _digest(p)
+ 
++    def receive_export_receipt(self,wire,p):
++        from .epoch_export_v57 import verify_receipt
++        verify_receipt(wire,p,trusted=self.ledger.trusted,committee=self.ledger.committee)
++        digest=self._validate_proposal(p)
++        raw=json.dumps(wire,sort_keys=True,separators=(',',':'))
++        row=self.db.execute('SELECT wire FROM exporter_receipts WHERE digest=?',(digest,)).fetchone()
++        if row is not None and row[0]!=raw:
++            raise PatchError('conflicting signed exporter receipts')
++        with self.db:self.db.execute('INSERT OR IGNORE INTO exporter_receipts VALUES(?,?)',(digest,raw))
++        return True
++
++    def has_export_receipt(self,p):
++        from .epoch_export_v57 import verify_receipt
++        wire=self.db.execute('SELECT wire FROM exporter_receipts WHERE digest=?',(_digest(p),)).fetchone()
++        if wire is None:return False
++        verify_receipt(json.loads(wire[0]),p,trusted=self.ledger.trusted,committee=self.ledger.committee)
++        return True
++
+     def offer(self,p,pages):
+         digest=self._validate_proposal(p)
+         if len(pages)!=p['frontier_header']['pages']:
+@@ -114,18 +137,32 @@
+             self.db.execute('INSERT OR IGNORE INTO endorsements VALUES(?,?)',(digest,raw))
+ 
+     def purge_committed(self):
+-        """Keep durable certificates in the ledger; discard obsolete page caches."""
+-        head=self.ledger.latest()
+-        if head is None:return 0
+-        height=head['proposal']['epoch']
+-        with self.db:
+-            rows=[x[0] for x in self.db.execute('SELECT digest FROM proposals WHERE epoch<=?',(height,))]
+-            for digest in rows:
+-                self.db.execute('DELETE FROM pages WHERE digest=?',(digest,))
+-                self.db.execute('DELETE FROM votes WHERE digest=?',(digest,))
+-                self.db.execute('DELETE FROM endorsements WHERE digest=?',(digest,))
+-                self.db.execute('DELETE FROM proposals WHERE digest=?',(digest,))
+-        return len(rows)
++        """Never discard certified frontier pages while trainer recovery needs them.
++
++        Compact certificates contain a root only; deleting their pages here
++        would permanently strand offline trainers with no way to reconstruct
++        the 4096-origin carry boundary. A future GC requires an explicit
++        replicated, audited page-retention/lease protocol.
++        """
++        return 0
++
++    def certified_pages(self, proposal):
++        """Read only complete Merkle-verified pages of a quorum-certified cut."""
++        cert=self.ledger.certified_epoch(proposal.get('epoch'))
++        if cert is None or cert['proposal']!=proposal:
++            raise PatchError('unsigned compact trainer boundary')
++        digest=_digest(proposal)
++        self._seed_committed(proposal)
++        pages=self._pages(digest)
++        if pages is not None:
++            from .frontier_commitment_v44 import verify_full_frontier
++            verify_full_frontier(proposal['frontier_header'],pages)
++        return pages
++
++    def _seed_committed(self, proposal):
++        """A signed quorum cert suffices to request missing historical pages."""
++        self._validate_proposal(proposal)
++        self._remember_proposal(proposal)
+ 
+     def _remember_proposal(self,p):
+         digest=self._validate_proposal(p)
+@@ -133,8 +170,11 @@
+         if row is not None and row[0]!=digest:
+             raise PatchError('conflicting candidate for same epoch; manual fork resolution required')
+         with self.db:
+-            self.db.execute('INSERT OR IGNORE INTO proposals VALUES(?,?,?)',
++            cur=self.db.execute('INSERT OR IGNORE INTO proposals VALUES(?,?,?)',
+                 (digest,p['epoch'],json.dumps(p,sort_keys=True,separators=(',',':'))))
++        # Rewind ONLY when a genuinely new historical proposal appears.
++        if cur.rowcount and p['epoch']<self._page_scan_epoch:
++            self._page_scan_epoch=p['epoch']
+         return digest
+ 
+     def _remember_page(self,digest,page):
+@@ -156,7 +196,26 @@
+             return None
+         return [json.loads(raw) for _,raw in rows]
+ 
++    def ready_for_vote(self):
++        """Choose one locally receipted, fully paged candidate for worker I/O.
++
++        No model hashing or journal scanning occurs on the WebRTC event loop.
++        """
++        for digest,wire in self.db.execute('SELECT digest,wire FROM proposals ORDER BY epoch'):
++            p=json.loads(wire)
++            if (self.ledger.peer not in p['replicas'] or
++                    self.ledger.peer not in self.ledger.committee or
++                    self.ledger.certified_epoch(p['epoch']) is not None or
++                    self.db.execute('SELECT 1 FROM votes WHERE digest=? AND peer=?',
++                         (digest,self.ledger.peer)).fetchone()):continue
++            if not self.local_export_verified(p):continue
++            if self.local_checkpoint(p) is None:continue
++            pages=self._pages(digest)
++            if pages is not None:return p,pages
++        return None
++
+     def _maybe_vote(self,digest):
++        if self.defer_votes:return
+         p=self._candidate(digest)
+         if p is None or self.ledger.peer not in p['replicas'] or self.ledger.peer not in self.ledger.committee:
+             return
+@@ -214,6 +273,10 @@
+             self._remember_endorsement(digest,data['endorsement'])
+             if self.ledger.certified_epoch(p['epoch']) is None:
+                 self._maybe_vote(digest)
++        elif kind=='compact-export-receipt':
++            if not isinstance(data,dict) or set(data)!={'proposal','receipt'}:
++                raise PatchError('malformed signed export receipt')
++            self.receive_export_receipt(data['receipt'],data['proposal'])
+         elif kind=='compact-page':
+             if not isinstance(data,dict) or set(data)!={'digest','page'}:
+                 raise PatchError('malformed frontier page envelope')
+@@ -256,17 +319,47 @@
+             p=json.loads(wire)
+             self._maybe_vote(digest)
+             endorsement=self.db.execute('SELECT wire FROM endorsements WHERE digest=?',(digest,)).fetchone()
+-            if endorsement is None:raise PatchError('missing candidate endorsement')
++            if endorsement is None:
++                # Signed certificates may arrive before their optional
++                # candidate envelope; no candidate broadcast without endorsement.
++                return []
+             result=[{'kind':'compact-proposal','data':{'proposal':p,'endorsement':json.loads(endorsement[0])}}]
++            receipt=self.db.execute('SELECT wire FROM exporter_receipts WHERE digest=?',(digest,)).fetchone()
++            if receipt is not None:
++                result.append({'kind':'compact-export-receipt',
++                    'data':{'proposal':p,'receipt':json.loads(receipt[0])}})
+             for (vote,) in self.db.execute('SELECT wire FROM votes WHERE digest=? ORDER BY peer',(digest,)):
+                 result.append({'kind':'compact-vote','data':json.loads(vote)})
+             return result
+         finally:self._busy=False
+ 
+     def missing_pages(self,limit=4):
+-        here=self.ledger.latest()
+-        current=here['proposal']['epoch'] if here else 0
+-        row=self.db.execute('SELECT digest,wire FROM proposals WHERE epoch>? ORDER BY epoch LIMIT 1',(current,)).fetchone()
++        # Also recover pages for committed epochs. A reconnecting trainer
++        # needs them to reconstruct the exact signed carry cut.
++        if type(limit) is not int or not 1<=limit<=32:
++            raise ValueError('invalid page request budget')
++        head=self.ledger.latest()
++        if head is not None:
++            # Lazy historical seeding: at most 4 committed certificates per
++            # tick, not an O(number of epochs) full scan on every neighbor.
++            for epoch in range(self._seed_epoch,
++                               min(head['proposal']['epoch']+1,self._seed_epoch+4)):
++                cert=self.ledger.certified_epoch(epoch)
++                if cert is None:raise PatchError('missing compact certificate chain')
++                self._seed_committed(cert['proposal'])
++                self._seed_epoch=epoch+1
++        row=None
++        # Bound idle control-plane work independently of the number of
++        # historical certified epochs; never walk all page sets per tick.
++        for _ in range(8):
++            found=self.db.execute('SELECT epoch,digest,wire FROM proposals WHERE epoch>=? '
++                'ORDER BY epoch LIMIT 1',(self._page_scan_epoch,)).fetchone()
++            if found is None:break
++            epoch,digest,raw=found;p=json.loads(raw)
++            n=self.db.execute('SELECT COUNT(*) FROM pages WHERE digest=?',(digest,)).fetchone()[0]
++            if n<p['frontier_header']['pages']:
++                row=(digest,raw);break
++            self._page_scan_epoch=epoch+1
+         if row is None:return []
+         digest,raw=row;p=json.loads(raw)
+         existing={x[0] for x in self.db.execute('SELECT idx FROM pages WHERE digest=?',(digest,))}
+--- a/patchlib/live_generation_transport.py
++++ b/patchlib/live_generation_transport.py
+@@ -56,6 +56,11 @@
+                 not isinstance(message['digest'],str) or len(message['digest'])!=64 or
+                 any(x not in '0123456789abcdef' for x in message['digest'])):
+             raise PatchError('invalid compact generation head')
++    elif kind in ('generation-compact-have','generation-compact-snapshot-request'):
++        if (set(message) != {'epoch','manifest'} or type(message['epoch']) is not int or
++            not 1 <= message['epoch'] < 2**32 or not isinstance(message['manifest'],str) or
++            len(message['manifest'])!=64 or any(c not in '0123456789abcdef' for c in message['manifest'])):
++            raise PatchError('invalid compact checkpoint control')
+     elif kind == 'generation-compact-need':
+         if set(message) != {'after'} or type(message['after']) is not int or not 0 <= message['after'] < 2**32:
+             raise PatchError('invalid compact generation recovery cursor')
+@@ -85,6 +90,13 @@
+     available_manifest: str | None = None
+     available_epoch: int = 0
+     advertised_compact_epoch: int = 0
++    compact_available_epoch: int = 0
++    compact_available_manifest: str | None = None
++    sent_compact_have: str | None = None
++    last_compact_have: float = 0.0
++    compact_missing_key: str | None = None
++    compact_snapshot_backoff: float = 3.0
++    last_compact_snapshot_request: float = 0.0
+     requested_compact_after: int = -1
+     sent_compact_head: str | None = None
+     last_compact_head: float = 0
+@@ -170,6 +182,18 @@
+             if fields['epoch']>current:
+                 state.requested_compact_after=current
+             return False
++        if kind == 'generation-compact-have':
++            if self.compact_ledger is None:
++                raise PatchError('compact generation is not configured')
++            state.compact_available_epoch=fields['epoch']
++            state.compact_available_manifest=fields['manifest']
++            return False
++        if kind == 'generation-compact-snapshot-request':
++            if self.compact_ledger is None:
++                raise PatchError('compact generation is not configured')
++            # Actual bytes are sent ONLY after the authenticated trainer
++            # rechecks this exact cert and every requested object hash.
++            return False
+         if kind == 'generation-compact-need':
+             if self.compact_ledger is None:
+                 raise PatchError('compact generation is not configured')
+@@ -241,6 +265,8 @@
+         if compact_epoch != self._last_compact_certificate:
+             self._last_compact_certificate=compact_epoch
+             for state in self.neighbors.values():state.forwarded.clear()
++        compact_manifest=(compact['proposal']['manifest'] if compact else None)
++        compact_available=bool(compact_manifest and self.snapshot_available(compact_manifest))
+         compact_digest = (_digest(compact['proposal']) if compact else
+                           self.compact_ledger.genesis if self.compact_ledger else None)
+         compact_messages=(self.compact_control.announcements()
+@@ -313,6 +339,29 @@
+                         state.last_compact_head=now
+                         state.sent_compact_head=compact_digest
+                         count+=1
++                if compact is not None and compact_available and (
++                        state.sent_compact_have!=compact_manifest or
++                        now-state.last_compact_have>=IDLE_HAVE_SECONDS):
++                    if node.control('generation-compact-have',epoch=compact_epoch,
++                                    manifest=compact_manifest):
++                        state.sent_compact_have=compact_manifest
++                        state.last_compact_have=now
++                        count+=1
++                if compact is not None and not compact_available and (
++                        peer in compact['proposal']['replicas'] or
++                        (state.compact_available_epoch==compact_epoch and
++                         state.compact_available_manifest==compact_manifest)):
++                    if state.compact_missing_key!=compact_manifest:
++                        state.compact_missing_key=compact_manifest
++                        state.compact_snapshot_backoff=3.0
++                        state.last_compact_snapshot_request=float('-inf')
++                    if now-state.last_compact_snapshot_request>=state.compact_snapshot_backoff:
++                        if node.control('generation-compact-snapshot-request',
++                                        epoch=compact_epoch,manifest=compact_manifest):
++                            state.last_compact_snapshot_request=now
++                            state.compact_snapshot_backoff=min(MAX_SNAPSHOT_BACKOFF_SECONDS,
++                                                               state.compact_snapshot_backoff*2)
++                            count+=1
+                 if state.advertised_compact_epoch > compact_epoch:
+                     if now-state.last_compact_need >= self.interval:
+                         if node.control('generation-compact-need',after=compact_epoch):
+--- a/patchlib/epoch_compact_trainer_v57.py
++++ b/patchlib/epoch_compact_trainer_v57.py
+@@ -0,0 +1,58 @@
++"""Fail-closed projection of a *verified* paged-v2 epoch into the v52 trainer.
++
++The projection is local ONLY, never signed or sent as a quorum proof. Every
++projected cut is reconstructed from the complete Merkle page set whose header
++is bound to a persisted, cryptographically verified compact quorum certificate.
++Missing even one page => not certified *for the local trainer*.
++"""
++from __future__ import annotations
++from .core import PatchError
++from .online_generation import _digest
++from .frontier_commitment_v44 import verify_full_frontier
++
++class CertifiedCompactTrainerLedger:
++    def __init__(self, compact_ledger, paged_store, *, max_epochs=16384):
++        self.compact=compact_ledger
++        self.store=paged_store
++        self.genesis=compact_ledger.genesis
++        self.max_epochs=max_epochs
++        self._projection={}
++
++    def certified_epoch(self, epoch):
++        if type(epoch) is not int or epoch<1 or epoch>self.max_epochs:
++            return None
++        # Consult the pinned cryptographic ledger even for cached projections.
++        base=self.compact.certified_epoch(epoch)
++        if base is None:return None
++        signed=base['proposal']
++        if epoch in self._projection:
++            cached=self._projection[epoch]
++            if cached['compact_proposal_digest']!=_digest(signed):
++                raise PatchError('certified compact proposal changed after projection')
++            return {'proposal':cached, 'compact_certificate':base}
++        # The signed certificate is NOT a frontier: the FULL set of individually
++        # verified pages is required, including for historical restart.
++        pages=self.store.certified_pages(signed)
++        if pages is None:return None
++        cutoffs=verify_full_frontier(signed['frontier_header'], pages)
++        if len(cutoffs)>4096:raise PatchError('oversized projected frontier')
++        predecessor=(self.genesis if epoch==1 else self.certified_epoch(epoch-1))
++        if predecessor is None:return None
++        parent=(predecessor if isinstance(predecessor,str)
++                else _digest(predecessor['proposal']))
++        projected=dict(signed)
++        projected.update({'protocol':'kagami-local-compact-trainer-projection-v57',
++            'parent':parent, 'cutoffs':cutoffs, 'cut':signed['inventory'],
++            'compact_proposal_digest':_digest(signed)})
++        self._projection[epoch]=projected
++        return {'proposal':projected,'compact_certificate':base}
++
++    def latest(self):
++        base=self.compact.latest()
++        if base is None:return None
++        # Never skip a missing page, predecessor or verified certificate.
++        return self.certified_epoch(base['proposal']['epoch'])
++
++    def head(self):
++        latest=self.latest()
++        return _digest(latest['proposal']) if latest else self.genesis
+--- a/patchlib/epoch_export_v57.py
++++ b/patchlib/epoch_export_v57.py
+@@ -0,0 +1,125 @@
++"""Signed locally fenced model/cut exports for compact crash-fault epochs.
++
++Only call `export_at_step_boundary` from the owner of the trainer optimizer
++loop, with local gradients SEALED and all journal append paths serialized by
++`inbound_commit_lock`. This trust assumption is NOT enforced by a remote flag.
++The exporter holds that lock while streaming model shards, so it is correct
++but NOT a strict zero-pause/300B exporter. Receipt verifies the pinned honest
++producer's assertion (CFT), not a Byzantine proof of model computation.
++"""
++from __future__ import annotations
++import hashlib
++import json
++import os
++from pathlib import Path
++import tempfile
++from .core import PatchError, _canonical_json
++from .frontier_commitment_v44 import build_frontier_pages
++from .epoch_certificate_v46 import proposal_v2
++from .online_generation import _digest, _sign, _verify
++from .shards import (export_state_sharded,read_manifest,semantic_shard_sha256,
++                     shard_map,_blob_path,verify_shards)
++from .epoch_live_rebase_v52 import verify_certified_cut
++
++RECEIPT_PROTOCOL='kagami-fenced-trainer-export-v57'
++MAX_EXPORT_ORIGINS=4096
++
++
++def _indexed_frontier(journal):
++    """O(origins) memory; reject holes instead of certifying max(seq)."""
++    frontier={}
++    sha=hashlib.sha256()
++    for origin,seq,digest in journal.db.execute('SELECT origin,seq,digest FROM events ORDER BY origin,seq'):
++        if seq!=frontier.get(origin,0)+1:
++            raise PatchError('cannot export noncontiguous signed journal prefix')
++        if not isinstance(digest,str) or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
++            raise PatchError('invalid signed journal event digest')
++        frontier[origin]=seq
++        if len(frontier)>MAX_EXPORT_ORIGINS:
++            raise PatchError('more than 4096 active origins in compact export')
++        sha.update(_canonical_json([origin,seq,digest])+b'\n')
++    return frontier,sha.hexdigest()
++
++
++def verify_receipt(wire,proposal,*,trusted,committee):
++    payload=_verify(wire,trusted)
++    expected={'protocol':RECEIPT_PROTOCOL,'room':proposal['room'],
++              'epoch':proposal['epoch'],'proposal':_digest(proposal),
++              'manifest':proposal['manifest'],'inventory':proposal['inventory'],
++              'frontier_digest':proposal['frontier_digest']}
++    if payload!=expected or wire['peer'] not in committee or wire['peer'] not in proposal['replicas']:
++        raise PatchError('untrusted or mismatching trainer cut receipt')
++    return True
++
++
++def export_at_step_boundary(*, journal, model, adapter, store, incoming, room, epoch,
++                            parent, replicas, signer, peer, max_state_bytes,
++                            shard_bytes=4*1024**2):
++    """Synchronous under a caller-owned TRAINER writer fence/ingress lock.
++
++    Must not be called from an arbitrary network callback; no concurrent
++    optimizer step, model apply, or journal writer may run in this interval.
++    The returned receipt is an independently signed assertion by the exporter.
++    """
++    if peer not in replicas or not callable(signer):
++        raise PatchError('exporter must be pinned committee replica')
++    frontier, inventory=_indexed_frontier(journal)
++    header,pages=build_frontier_pages(frontier)
++    incoming=Path(incoming);store=Path(store)
++    if incoming.is_symlink() or store.is_symlink():
++        raise PatchError('unsafe export location')
++    incoming.mkdir(parents=True,exist_ok=True)
++    store.mkdir(parents=True,exist_ok=True)
++    # Publish only a complete content-addressed manifest. No consumer may
++    # treat the unpublished name as a verified checkpoint.
++    fd,temporary=tempfile.mkstemp(prefix='.export-',suffix='.fmanifest',dir=incoming)
++    os.close(fd)
++    temp=Path(temporary)
++    try:
++        meta=export_state_sharded(model,store,temp,
++            model_id=adapter.model_id,revision=adapter.revision,peer_id=peer,
++            seq=journal.count(),adapter=adapter,shard_bytes=shard_bytes,
++            max_state_bytes=max_state_bytes)
++        # Harden the content-addressed blobs against a sudden power failure.
++        # The regular streaming exporter omits per-shard fsync for throughput;
++        # a *certified* checkpoint must not sign undurable shard bytes.
++        verify_shards(meta,store)
++        directories=set()
++        for digest in shard_map(meta):
++            shard=_blob_path(store,digest)
++            if shard.is_symlink():raise PatchError('unsafe export shard symlink')
++            with shard.open('rb') as fp:os.fsync(fp.fileno())
++            directories.add(shard.parent)
++        for directory in directories:
++            fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
++            try:os.fsync(fd)
++            finally:os.close(fd)
++        # A full indexed cut is checked again after export, preventing any
++        # accidentally unfenced DB mutation from silently becoming certified.
++        if _indexed_frontier(journal)!=(frontier,inventory):
++            raise PatchError('signed journal changed during snapshot export')
++        with temp.open('rb') as fp:
++            manifest_hash=hashlib.file_digest(fp,'sha256').hexdigest()
++        p=proposal_v2(room=room,epoch=epoch,parent=parent,
++            manifest=manifest_hash,semantic=semantic_shard_sha256(meta),
++            inventory=inventory,frontier_header=header,replicas=list(replicas))
++        verify_certified_cut(journal,frontier,inventory)
++        published=incoming/(manifest_hash+'.fmanifest')
++        if published.is_symlink():raise PatchError('unsafe published manifest')
++        if published.exists():
++            if hashlib.sha256(published.read_bytes()).hexdigest()!=manifest_hash:
++                raise PatchError('colliding published manifest')
++        else:
++            # fsync manifest and enclosing directory before signing receipt;
++            # export_state_sharded uses atomic rename but does not fsync itself.
++            with temp.open('rb') as fp:os.fsync(fp.fileno())
++            os.replace(temp,published)
++            dfd=os.open(incoming,os.O_RDONLY|os.O_DIRECTORY)
++            try:os.fsync(dfd)
++            finally:os.close(dfd)
++        receipt=_sign({'protocol':RECEIPT_PROTOCOL,'room':room,'epoch':epoch,
++             'proposal':_digest(p),'manifest':manifest_hash,
++             'inventory':inventory,'frontier_digest':p['frontier_digest']},peer,signer)
++        return p,pages,receipt
++    finally:
++        temp.unlink(missing_ok=True)
+--- a/tests/test_epoch_v57_trainer.py
++++ b/tests/test_epoch_v57_trainer.py
+@@ -0,0 +1,202 @@
++import hashlib
++import json
++import sqlite3
++import threading
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from patchlib.core import PatchError,_canonical_json
++from patchlib.epoch_export_v57 import export_at_step_boundary,verify_receipt
++from patchlib.epoch_compact_trainer_v57 import CertifiedCompactTrainerLedger
++from patchlib.epoch_autonomous_v56 import AutonomousPagedEpoch
++from patchlib.identity import generate_keypair, signer_from_pem, verifier_from_pem
++from patchlib.epoch_certificate_v46 import CompactEpochLedger
++from patchlib.online_generation import _digest
++from tests.test_epoch_v56_autonomy import make_network,deliver
++
++
++def test_compact_cert_only_is_not_a_trainer_cut(tmp_path):
++    p,pages,db,old,controls,ledgers,bridges=make_network(tmp_path,origins=4096)
++    try:
++        controls['a'].offer(p,pages)
++        for i in range(400):
++            deliver(bridges,'a','b',i+1.0)
++            deliver(bridges,'b','a',i+1.0)
++            if ledgers['a'].latest() and ledgers['b'].latest():break
++        assert ledgers['a'].latest()
++        adapter=CertifiedCompactTrainerLedger(ledgers['a'],controls['a'])
++        cp=adapter.certified_epoch(1)['proposal']
++        assert cp['cut']==p['inventory']
++        assert cp['cutoffs']['p04095']==1
++        assert cp['protocol']=='kagami-local-compact-trainer-projection-v57'
++        assert cp['compact_proposal_digest']==_digest(p)
++        # Recipient C received only the SIGNED certificate, not Merkle pages.
++        deliver(bridges,'a','c',500)
++        deliver(bridges,'c','a',501)
++        deliver(bridges,'a','c',502)
++        assert ledgers['c'].latest()
++        late=CertifiedCompactTrainerLedger(ledgers['c'],controls['c'])
++        assert late.certified_epoch(1) is None
++        assert controls['c'].missing_pages(1)[0]['data']['index']==0
++        # Even a forged page insertion cannot replace a committed Merkle leaf.
++        with pytest.raises(PatchError):
++            controls['c'].receive('a',{'kind':'compact-page','data':
++                {'digest':_digest(p),'page':{'index':0,'entries':[['evil',1]],'siblings':[]}}})
++        # Download all original pages (bounded message-by-message transfer).
++        digest=_digest(p)
++        for page in pages:controls['c'].receive('a',{'kind':'compact-page',
++                                'data':{'digest':digest,'page':page}})
++        assert late.certified_epoch(1)['proposal']==cp
++        assert controls['c'].purge_committed()==0
++        assert late.certified_epoch(1)['proposal']==cp
++    finally:
++        for x in controls.values():x.close()
++        for x in ledgers.values():x.close()
++        for x in old.values():x.close()
++        db.close()
++
++
++def test_exporter_signed_cut_is_bound_to_actual_local_manifest(tmp_path):
++    keys={};signers={};trusted={}
++    for peer in ('a','b','c'):
++        prv=tmp_path/(peer+'.key');pub=tmp_path/(peer+'.pub')
++        generate_keypair(prv,pub)
++        signers[peer]=signer_from_pem(prv)
++        trusted[peer]=verifier_from_pem(pub)
++    db=sqlite3.connect(':memory:')
++    db.execute('CREATE TABLE events(origin TEXT,seq INTEGER,digest TEXT, PRIMARY KEY(origin,seq))')
++    db.executemany('INSERT INTO events VALUES(?,?,?)',[
++        ('a',1,hashlib.sha256(b'event1').hexdigest()),
++        ('b',1,hashlib.sha256(b'event2').hexdigest())])
++    class Source:
++        def __init__(self,db):self.db=db
++        def count(self):return self.db.execute('SELECT COUNT(*) FROM events').fetchone()[0]
++    source=Source(db)
++    model=torch.nn.Linear(4,2)
++    adapter=SimpleNamespace(model_id='tiny',revision='r',groups=[],lock=threading.RLock())
++    p,pages,receipt=export_at_step_boundary(journal=source,model=model,adapter=adapter,
++        store=tmp_path/'objects',incoming=tmp_path/'incoming',room='room',epoch=1,
++        parent='0'*64,replicas=['a','b','c'],signer=signers['a'],peer='a',
++        shard_bytes=65536,max_state_bytes=1024**2)
++    assert verify_receipt(receipt,p,trusted=trusted,committee=['a','b','c'])
++    assert (tmp_path/'incoming'/(p['manifest']+'.fmanifest')).exists()
++    with pytest.raises(PatchError):verify_receipt(receipt,{**p,'inventory':'f'*64},trusted=trusted,committee=['a','b','c'])
++    # A hole is forbidden even if a max-frontier would have suggested coverage.
++    db.execute('INSERT INTO events VALUES(?,?,?)',('a',3,'a'*64))
++    with pytest.raises(PatchError,match='noncontiguous'):
++        export_at_step_boundary(journal=source,model=model,adapter=adapter,
++            store=tmp_path/'objects',incoming=tmp_path/'incoming',room='room',epoch=1,
++            parent='0'*64,replicas=['a','b','c'],signer=signers['a'],peer='a',
++            shard_bytes=65536,max_state_bytes=1024**2)
++    db.close()
++
++
++def test_receipt_cannot_be_forged_by_an_unpinned_peer(tmp_path):
++    p,pages,db,old,controls,ledgers,bridges=make_network(tmp_path,origins=2)
++    try:
++        with pytest.raises(PatchError):
++            controls['b'].receive_export_receipt({'payload':{},'peer':'evil','signature':'bad'},p)
++        assert controls['b'].has_export_receipt(p) is False
++    finally:
++        for x in controls.values():x.close()
++        for x in ledgers.values():x.close()
++        for x in old.values():x.close()
++        db.close()
++
++@pytest.mark.asyncio
++async def test_authenticated_v2_projection_reaches_step_boundary_service(tmp_path):
++    from patchlib.epoch_hot_swap_v45 import TrainerGeneration,TrainerStepRouter
++    from patchlib.live_epoch_switch_v48 import (LiveEpochSwitchService,PreparedEpoch,
++                                                 certified_genesis)
++    p,pages,db,old,controls,ledgers,bridges=make_network(tmp_path,origins=400)
++    try:
++        controls['a'].offer(p,pages)
++        for i in range(100):
++            deliver(bridges,'a','b',i+1.0)
++            deliver(bridges,'b','a',i+1.0)
++            if ledgers['a'].latest():break
++        ledger=CertifiedCompactTrainerLedger(ledgers['a'],controls['a'])
++        cp=ledger.certified_epoch(1)['proposal']
++        genesis=certified_genesis(cp)
++        prior=TrainerGeneration(0,'0'*64,'0'*64,object(),object(),object(),
++                                SimpleNamespace(genesis='0'*64))
++        after=TrainerGeneration(1,genesis,p['manifest'],object(),object(),object(),
++                                SimpleNamespace(genesis=genesis))
++        phases=[]
++        async def shadow(candidate):
++            phases.append('prepare')
++            assert candidate==cp
++            return PreparedEpoch(1,_digest(cp),p['manifest'],after,
++                tmp_path/'placeholder',tmp_path/'objects')
++        async def flush(_):phases.append('flush')
++        async def carry(*_):phases.append('carry')
++        async def attest(*_):phases.append('attest');return True
++        async def transport(*_):phases.append('transport');return True
++        service=LiveEpochSwitchService(ledger=ledger,router=TrainerStepRouter(prior),
++            root=tmp_path/'activation',build_shadow=shadow,validate_shards=False,
++            verify_local=lambda *_:True,flush_unpublished=flush,carry_suffix=carry,
++            transport_handoff=transport,attest_journal=attest)
++        assert await service.activate_next()
++        assert service.router.current is after
++        assert phases==['prepare','flush','carry','attest','transport']
++        assert not await service.activate_next()
++    finally:
++        for x in controls.values():x.close()
++        for x in ledgers.values():x.close()
++        for x in old.values():x.close()
++        db.close()
++
++
++def test_deferring_votes_keeps_p2p_callbacks_nonblocking(tmp_path):
++    p,pages,db,old,controls,ledgers,bridges=make_network(tmp_path,origins=64)
++    try:
++        # The production owner now defers expensive full-shard verification.
++        c=AutonomousPagedEpoch(ledgers['a'],tmp_path/'deferred.sqlite3',
++            local_checkpoint=lambda _: (_ for _ in ()).throw(AssertionError('blocking I/O')),
++            local_export_verified=lambda _:True,defer_votes=True)
++        try:
++            c.offer(p,pages) if False else None
++            # A trusted signed candidate may be stored and forwarded without
++            # a blocking vote (actual vote happens in a worker).
++            controls['a'].offer(p,pages)
++            c.receive('a',controls['a'].announcements()[0])
++            for page in pages:c.receive('a',{'kind':'compact-page','data':{'digest':_digest(p),'page':page}})
++            assert ledgers['a'].latest() is None
++        finally:c.close()
++    finally:
++        for x in controls.values():x.close()
++        for x in ledgers.values():x.close()
++        for x in old.values():x.close()
++        db.close()
++
++def test_compact_snapshot_transfer_is_requested_only_for_committed_manifest(tmp_path):
++    from patchlib.live_generation_transport import validate_control
++    from tests.test_v44_low_cost_generation import DummyNode
++    p,pages,db,old,controls,ledgers,bridges=make_network(tmp_path,origins=64)
++    try:
++        controls['a'].offer(p,pages)
++        for i in range(100):
++            deliver(bridges,'a','b',i+1.)
++            deliver(bridges,'b','a',i+1.)
++            if ledgers['a'].latest() and ledgers['b'].latest():break
++        assert ledgers['a'].latest() is not None
++        bridges['a'].snapshot_available=lambda m:m==p['manifest']
++        bridges['b'].snapshot_available=lambda m:False
++        avail=DummyNode();bridges['a'].tick([('b',avail)],now=1000.)
++        assert any(t=='generation-compact-have' and d['manifest']==p['manifest'] for t,d in avail.wires)
++        for kind,fields in avail.wires:
++            if kind=='generation-compact-have':
++                bridges['b'].receive('a',kind,fields)
++        request=DummyNode();bridges['b'].tick([('a',request)],now=1001.)
++        assert any(t=='generation-compact-snapshot-request' and d['manifest']==p['manifest']
++                   for t,d in request.wires)
++        with pytest.raises(PatchError):
++            validate_control('generation-compact-snapshot-request',
++                             {'epoch':1,'manifest':'not-a-digest'})
++    finally:
++        for x in controls.values():x.close()
++        for x in ledgers.values():x.close()
++        for x in old.values():x.close()
++        db.close()

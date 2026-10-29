@@ -1,0 +1,423 @@
+--- /dev/null
++++ v79/patchlib/offpolicy_critic_v79.py
+@@ -0,0 +1,98 @@
++"""Unclipped trajectory importance-sampling surrogate for a changing Actor.
++
++Assumptions for unbiasedness IN EXPECTATION:
++- Behavior log-probabilities correspond to the entire sampled action sequence.
++- The target Actor's action probabilities are evaluated on the same prefixes.
++- Both policies share the same action space / tokenizer and target has support
++  wherever the behavior policy places positive mass (autoregressive softmax).
++- Prompt distribution, terminal reward semantics, and environment dynamics
++  remain fixed across behavior/target policies.
++- Critic features are functions of state at the fixed target-policy snapshot.
++
++For a trajectory tau=(a_0,...a_{T-1}) sampled from mu and terminal reward R,
++state occupancy correction is w_{<t}=prod_{j<t} pi(a_j)/mu(a_j).
++The whole-trajectory correction is W=prod_{j<T} pi(a_j)/mu(a_j).
++Let G_t=gamma**(T-1-t)*R. Then this differentiable surrogate
++
++  L_hat = (1/(2T)) sum_t [w_{<t} V(s_t)^2 - 2 W V(s_t) G_t + W G_t^2]
++
++has expectation equal to 0.5 * E_pi[mean_t (V(s_t)-G_t)^2] and its
++Critic gradient is unbiased under the assumptions. Ratio weights are detached.
++It is NOT an exact finite-sample correction, nor an unbiased replay-based
++PPO actor update. Zero clipping means potentially enormous variance; we fail
++closed on numeric overflow rather than silently bias the estimator.
++"""
++from __future__ import annotations
++import math
++import torch
++
++
++class OffPolicyCorrectionError(ValueError):
++    pass
++
++
++def resolved_mode(args):
++    mode=getattr(args,'critic_offpolicy','auto')
++    if mode not in ('auto','gae','trajectory_is'):
++        raise OffPolicyCorrectionError('critic_offpolicy must be auto, gae or trajectory_is')
++    return ('trajectory_is' if bool(getattr(args,'distributed_critic',False)) else 'gae') if mode=='auto' else mode
++
++
++def exact_trajectory_value_surrogate(values, behavior_logp, target_logp, terminal_reward, gamma):
++    if not isinstance(values,torch.Tensor) or values.ndim!=1 or values.numel()<1 or values.numel()>128:
++        raise OffPolicyCorrectionError('Critic IS requires 1..128 state values')
++    if not isinstance(behavior_logp,torch.Tensor) or not isinstance(target_logp,torch.Tensor):
++        raise OffPolicyCorrectionError('IS requires behavior and target per-action log probabilities')
++    if behavior_logp.shape!=values.shape or target_logp.shape!=values.shape:
++        raise OffPolicyCorrectionError('IS actions and values have different lengths')
++    if not (isinstance(terminal_reward,(float,int)) and math.isfinite(terminal_reward)):
++        raise OffPolicyCorrectionError('IS requires a finite terminal reward')
++    if not (isinstance(gamma,(int,float)) and math.isfinite(gamma) and 0<float(gamma)<=1):
++        raise OffPolicyCorrectionError('IS requires gamma in (0,1]')
++    with torch.no_grad():
++        # Float64 reduces catastrophic cancellation of long log-likelihood
++        # products. No ratio clipping or fake normalization can preserve the
++        # exact target-policy gradient expectation.
++        old=behavior_logp.detach().to(dtype=torch.float64)
++        new=target_logp.detach().to(dtype=torch.float64)
++        if not bool(torch.isfinite(old).all() and torch.isfinite(new).all()):
++            raise OffPolicyCorrectionError('nonfinite behavior/target policy probabilities')
++        log_ratios=new-old
++        cumulative=torch.cumsum(log_ratios,dim=0)
++        prefix=torch.cat((torch.zeros_like(cumulative[:1]),cumulative[:-1]))
++        total=cumulative[-1]
++        # The maximum exponent for finite float64 is ~709.78; float32 output
++        # is validated below before entering the Critic optimizer.
++        if bool((prefix.abs()>700).any()) or bool(total.abs()>700):
++            raise OffPolicyCorrectionError('trajectory importance ratio overflow; resample on policy')
++        occupancy=prefix.exp()
++        all_actions=total.exp()
++        powers=torch.arange(values.numel()-1,-1,-1,device=values.device,dtype=torch.float64)
++        discounted=(float(gamma)**powers)*float(terminal_reward)
++        square=occupancy * values.detach().double().square()
++        cross=2.*all_actions*values.detach().double()*discounted
++        constant=all_actions*discounted.square()
++        if not bool(torch.isfinite(square-cross+constant).all()):
++            raise OffPolicyCorrectionError('nonfinite importance-weighted value objective')
++    # Keep weights as constants (no Actor gradients through the Critic
++    # objective). Evaluate the Critic expression in double precision to avoid
++    # overflow before validating its value and backward scale.
++    v=values.double()
++    result=(occupancy*v.square() - 2.*all_actions*discounted*v +
++            all_actions*discounted.square()).mean()*0.5
++    if not bool(torch.isfinite(result)):
++        raise OffPolicyCorrectionError('nonfinite off-policy Critic objective')
++    # Guard the actual *per-state* analytic derivative as well, so that a
++    # finite scalar after cancellation cannot hide an exploding value update.
++    grad=(occupancy*v.detach()-all_actions*discounted)/values.numel()
++    if not bool(torch.isfinite(grad).all()):
++        raise OffPolicyCorrectionError('nonfinite off-policy Critic gradient')
++    if values.dtype in (torch.float16,torch.bfloat16,torch.float32):
++        # Overflow when cast into the trainable head dtype would poison AdamW.
++        limit=torch.finfo(values.dtype).max
++        if bool((grad.abs()>limit).any()):
++            raise OffPolicyCorrectionError('off-policy gradient exceeds value tensor dtype')
++    return result, {'trajectory_ratio':float(all_actions),
++                    'max_log_ratio':float(log_ratios.abs().max()),
++                    'max_occupancy_ratio':float(occupancy.max()),
++                    'offpolicy_mode':'trajectory_is'}
+--- v78/patchlib/mixed_learning_v65.py
++++ v79/patchlib/mixed_learning_v65.py
+@@ -21,6 +21,7 @@
+ from .model_contract_v64 import invoke_model, training_loss, _loss_or_logits
+ from .hf_mixed_datasets_v68 import source_selected, source_spec, HFRowCycle
+ from .ppo_pipeline_v72 import PrefetchedRows
++from .offpolicy_critic_v79 import resolved_mode, exact_trajectory_value_surrogate, OffPolicyCorrectionError
+ 
+ 
+ class MixedLearningError(ValueError):
+@@ -72,6 +73,9 @@
+     if getattr(args,'distributed_critic',False):
+         generated['critic_distribution']='signed-root-critic-gossip-v78'
+         generated['version']='pt-sft-clipped-ppo-v78'
++    if resolved_mode(args)=='trajectory_is':
++        generated['critic_offpolicy']='unclipped-trajectory-is-mc-v79'
++        generated['version']='pt-sft-clipped-ppo-v79'
+     if not getattr(args,'mix_policy',None):
+         return generated
+     path=Path(args.mix_policy)
+@@ -100,6 +104,10 @@
+ def validate_args(args):
+     if not enabled(args) and not getattr(args,'mix_policy',None):
+         return
++    try:
++        resolved_mode(args)
++    except OffPolicyCorrectionError as exc:
++        raise MixedLearningError(str(exc)) from exc
+     if getattr(args,'distributed_critic',False):
+         if not source_selected(args,'ppo') or float(getattr(args,'ppo_weight',.2))<=0:
+             raise MixedLearningError('distributed Critic v78 currently needs a PPO dataset on every Critic participant')
+@@ -521,17 +529,35 @@
+             else:
+                 features=_features(logits,offset=start-1)[0]
+                 values=self.critic(features)
+-            previous=rollout['old_values']
+-            clipped_values=previous+(values-previous).clamp(-self.args.ppo_clip,self.args.ppo_clip)
+-            value_loss=.5*torch.maximum((values-rollout['returns']).square(),
+-                                         (clipped_values-rollout['returns']).square()).mean()
++            metrics={'reward':rollout['reward'],
++                     'kl':float(approx_kl.detach()),
++                     'entropy':float(entropy.detach())}
++            if resolved_mode(self.args)=='trajectory_is':
++                # Exact (unclipped) full-trajectory density-ratio correction
++                # for the Critic's terminal-reward Monte Carlo objective.
++                # It corrects BOTH state visitation and future action
++                # distribution, unlike suffix-only weighted regression.
++                # The old policy's chosen-action log probabilities are stored
++                # at sampling time and are immutable across PPO reuse.
++                try:
++                    value_loss, diagnostics=exact_trajectory_value_surrogate(
++                        values.flatten(),rollout['old_lp'].flatten(),chosen.flatten(),
++                        rollout['reward'],float(self.args.ppo_gamma))
++                except OffPolicyCorrectionError as exc:
++                    self.cached=None
++                    raise MixedLearningError(str(exc)) from exc
++                metrics.update(diagnostics)
++            else:
++                previous=rollout['old_values']
++                clipped_values=previous+(values-previous).clamp(-self.args.ppo_clip,self.args.ppo_clip)
++                value_loss=.5*torch.maximum((values-rollout['returns']).square(),
++                                             (clipped_values-rollout['returns']).square()).mean()
+             critic_loss=self.args.ppo_value_coef*value_loss
+-            if not torch.isfinite(actor_loss+critic_loss):
++            if not bool(torch.isfinite(actor_loss+critic_loss)):
++                self.cached=None
+                 raise MixedLearningError('nonfinite PPO objective')
+             self.reuses+=1;self.counts['ppo']+=1
+-            return actor_loss,critic_loss,{'reward':rollout['reward'],
+-                                           'kl':float(approx_kl.detach()),
+-                                           'entropy':float(entropy.detach())}
++            return actor_loss,critic_loss,metrics
+         finally:
+             model.train(was_training)
+ 
+--- v78/patchlib/cli.py
++++ v79/patchlib/cli.py
+@@ -1105,6 +1105,8 @@
+     p.add_argument('--critic-hidden',type=int,default=32,help='Local value critic hidden width (8..512)')
+     p.add_argument('--critic-lr',type=float,default=1e-3,help='Local PPO value critic learning rate')
+     p.add_argument('--distributed-critic',action='store_true',help='Opt-in independent signed P2P Critic value-head training (new room; PPO peers only)')
++    p.add_argument('--critic-offpolicy',choices=('auto','gae','trajectory_is'),default='auto',
++                   help='Critic value target: auto=unclipped trajectory IS in P2P mode, legacy GAE locally. No clipping; high variance possible')
+     p.add_argument('--critic-hf-repo',default='',help='Pinned HF scalar value-model repo (organization/name)')
+     p.add_argument('--critic-hf-revision',default='',help='Immutable 40-hex HF value critic revision')
+     p.add_argument('--critic-hf-loader',choices=('sequence_classification','token_classification'),default='sequence_classification')
+--- v78/patchlib/mix_gui_v66.py
++++ v79/patchlib/mix_gui_v66.py
+@@ -11,8 +11,8 @@
+ from types import SimpleNamespace
+ import secrets
+ 
+-FIELDS=('distributed_critic', 'sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'critic_hf_repo', 'critic_hf_revision', 'critic_hf_loader', 'critic_hf_device', 'critic_hf_max_length', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_idle_offload', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
+-DEFAULT={'distributed_critic': False, 'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'critic_hf_repo': '', 'critic_hf_revision': '', 'critic_hf_loader': 'sequence_classification', 'critic_hf_device': 'cpu', 'critic_hf_max_length': 512, 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_idle_offload': False, 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
++FIELDS=('critic_offpolicy','distributed_critic', 'sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'critic_hf_repo', 'critic_hf_revision', 'critic_hf_loader', 'critic_hf_device', 'critic_hf_max_length', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_idle_offload', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
++DEFAULT={'critic_offpolicy':'auto','distributed_critic': False, 'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'critic_hf_repo': '', 'critic_hf_revision': '', 'critic_hf_loader': 'sequence_classification', 'critic_hf_device': 'cpu', 'critic_hf_max_length': 512, 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_idle_offload': False, 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
+ 
+ 
+ def _path(value, *, ext, role=None, hf_reward=False):
+@@ -74,6 +74,8 @@
+     if type(values['reward_model_idle_offload']) is not bool:
+         raise ValueError('Reward idle offload must be a boolean')
+     if type(values['distributed_critic']) is not bool:raise ValueError('distributed_critic must be boolean')
++    if values['critic_offpolicy'] not in ('auto','gae','trajectory_is'):
++        raise ValueError('Critic off-policy correction must be auto, gae or trajectory_is')
+     if values['ppo_reward']=='hf_model':
+         from .reward_model_v67 import reward_spec
+         reward_spec(SimpleNamespace(**values))
+@@ -112,6 +114,7 @@
+             '--critic-lr',str(values['critic_lr']),
+             '--critic-state-dir',str(state_dir)]
+     if values['distributed_critic']:result.append('--distributed-critic')
++    result.extend(['--critic-offpolicy',values['critic_offpolicy']])
+     if values['critic_kind']=='hf':
+         for key,flag in (('critic_hf_repo','--critic-hf-repo'),
+                          ('critic_hf_revision','--critic-hf-revision'),
+--- v78/web/desktop_webview.html
++++ v79/web/desktop_webview.html
+@@ -71,7 +71,7 @@
+       <label><span>Score index</span><input id="mixRewardIndex" type="number" value="0" min="0" max="65535"></label>
+       <label><span>Reward multiplier</span><input id="mixRewardScale" type="number" value="1" min="0.001" max="100" step="0.1"></label>
+       <label><span>Max input tokens</span><input id="mixRewardMaxLength" type="number" value="512" min="16" max="8192"></label></div></div>
+-      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Independent value estimator for PPO/GAE. Optionally share its trained value-head updates over signed P2P gossip; this is never a Reward Model.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option><option value="hf">Hugging Face · pretrained Value Critic</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Critic training</span><select id="mixDistributedCritic"><option value="off">Local only · legacy</option><option value="on">P2P distributed · signed value head</option></select></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><div class="fieldgrid" id="mixCriticHub" hidden><label class="wide"><span>Hugging Face Value Critic</span><div class="mixed-path"><input id="mixCriticHfRepo" placeholder="organization/pretrained-scalar-value-model" spellcheck="false"><button type="button" id="mixCriticSearch">おすすめから選ぶ</button></div><select hidden id="mixCriticSearchResults" aria-label="HF Critic model search"><option value="">Search Hub for a compatible scalar value model…</option></select></label><label class="wide"><span>Immutable commit SHA</span><div class="mixed-path"><input id="mixCriticHfRevision" placeholder="40 hexadecimal characters"><button type="button" id="mixCriticPin">Pin current commit</button></div></label><label><span>Critic model type</span><select id="mixCriticHfLoader"><option value="sequence_classification">Scalar sequence classification</option><option value="token_classification">Scalar token classification</option></select></label><label><span>Critic device</span><select id="mixCriticHfDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label><label><span>Maximum Critic tokens</span><input id="mixCriticHfMaxLength" type="number" value="512" min="16" max="8192"></label><p class="footnote wide">Requires a checkpoint with an already-trained scalar value head. The backbone stays frozen; the value head trains locally or through signed P2P gossip. PPO state prefixes are retokenized for this Critic. The model may be substantially slower than the small local Critic.</p></div><label id="mixCriticLocalInit"><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">P2P mode shares signed value-head parameter updates with PPO peers. AdamW moments remain local and reset after remote merges; a new room is required. Local-only mode keeps v76 behavior.</p></div>
++      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Independent value estimator for PPO/GAE. Optionally share its trained value-head updates over signed P2P gossip; this is never a Reward Model.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option><option value="hf">Hugging Face · pretrained Value Critic</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Critic training</span><select id="mixDistributedCritic"><option value="off">Local only · legacy</option><option value="on">P2P distributed · signed value head</option></select></label><label><span>Off-policy value correction</span><select id="mixCriticOffpolicy"><option value="auto">Automatic · trajectory IS for P2P</option><option value="trajectory_is">Unclipped trajectory IS · target Actor</option><option value="gae">Legacy GAE · no off-policy correction</option></select></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><div class="fieldgrid" id="mixCriticHub" hidden><label class="wide"><span>Hugging Face Value Critic</span><div class="mixed-path"><input id="mixCriticHfRepo" placeholder="organization/pretrained-scalar-value-model" spellcheck="false"><button type="button" id="mixCriticSearch">おすすめから選ぶ</button></div><select hidden id="mixCriticSearchResults" aria-label="HF Critic model search"><option value="">Search Hub for a compatible scalar value model…</option></select></label><label class="wide"><span>Immutable commit SHA</span><div class="mixed-path"><input id="mixCriticHfRevision" placeholder="40 hexadecimal characters"><button type="button" id="mixCriticPin">Pin current commit</button></div></label><label><span>Critic model type</span><select id="mixCriticHfLoader"><option value="sequence_classification">Scalar sequence classification</option><option value="token_classification">Scalar token classification</option></select></label><label><span>Critic device</span><select id="mixCriticHfDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label><label><span>Maximum Critic tokens</span><input id="mixCriticHfMaxLength" type="number" value="512" min="16" max="8192"></label><p class="footnote wide">Requires a checkpoint with an already-trained scalar value head. The backbone stays frozen; the value head trains locally or through signed P2P gossip. PPO state prefixes are retokenized for this Critic. The model may be substantially slower than the small local Critic.</p></div><label id="mixCriticLocalInit"><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">P2P mode shares signed value-head parameter updates with PPO peers. Trajectory IS corrects local stale rollouts against the current Actor, without clipping; large importance weights can destabilize learning. It does NOT retroactively correct incoming parameter-only updates originating under other Actor policies. AdamW moments remain local. New rooms require v79 policies.</p></div>
+       <div id="mixedConfigStatus" class="footnote" role="status">These settings apply when launching a new worker; changing a room's pinned objective protocol requires a new room.</div>
+     </div>
+   </div>
+--- v78/web/desktop_webview.js
++++ v79/web/desktop_webview.js
+@@ -359,7 +359,7 @@
+   pt_weight:'mixPtWeight',sft_weight:'mixSftWeight',ppo_weight:'mixPpoWeight',
+   ppo_clip:'mixPpoClip',ppo_kl_coef:'mixPpoKl',ppo_value_coef:'mixValueCoef',
+   ppo_gamma:'mixGamma',ppo_gae_lambda:'mixGaeLambda',ppo_max_tokens:'mixPpoTokens',
+-  ppo_reuse:'mixPpoReuse',ppo_reward:'mixPpoReward',
++  ppo_reuse:'mixPpoReuse',ppo_reward:'mixPpoReward',critic_offpolicy:'mixCriticOffpolicy',
+   reward_model_id:'mixRewardModelId',reward_model_revision:'mixRewardRevision',
+   reward_model_device:'mixRewardDevice',reward_model_loader:'mixRewardLoader',reward_model_output:'mixRewardOutput',reward_model_format:'mixRewardFormat',
+   reward_model_index:'mixRewardIndex',reward_model_scale:'mixRewardScale',
+@@ -394,7 +394,7 @@
+ function applyMixed(data){$('mixEnabled').value=data?.enabled?'on':'off';for(const [field,id] of Object.entries(mixedIds)){
+   const value=data?.[field];const defaults={pt_weight:1,sft_weight:1,ppo_weight:.2,ppo_clip:.2,
+     ppo_kl_coef:.02,ppo_value_coef:.5,ppo_gamma:.99,ppo_gae_lambda:.95,
+-    ppo_max_tokens:8,ppo_reuse:2,ppo_reward:'token_match',
++    ppo_max_tokens:8,ppo_reuse:2,ppo_reward:'token_match',critic_offpolicy:'auto',
+     reward_model_id:'',reward_model_revision:'',reward_model_device:'cpu',reward_model_loader:'sequence_classification',
+     reward_model_output:'logits',reward_model_format:'plain',reward_model_index:0,reward_model_scale:1,reward_model_max_length:512,critic_kind:'mlp',critic_hidden:32,critic_lr:.001,critic_hf_repo:'',critic_hf_revision:'',critic_hf_loader:'sequence_classification',critic_hf_device:'cpu',critic_hf_max_length:512};
+   const hfDefaults={sft_hf_split:'train',sft_hf_prompt_column:'prompt',sft_hf_response_column:'response',ppo_hf_split:'train',ppo_hf_prompt_column:'prompt',ppo_hf_reference_column:'reference'};
+@@ -417,6 +417,7 @@
+      data.reward_model_scale=p.reward_model.scale;data.reward_model_max_length=p.reward_model.max_length;
+      data.reward_model_device='cpu';}
+    data.distributed_critic=p.critic_distribution==='signed-root-critic-gossip-v78';
++   data.critic_offpolicy=p.critic_offpolicy==='unclipped-trajectory-is-mc-v79'?'trajectory_is':'gae';
+    if(p.critic){data.critic_kind=p.critic.kind;data.critic_hidden=p.critic.hidden;data.critic_lr=p.critic.lr; if(p.critic.hf){data.critic_hf_repo=p.critic.hf.repo;data.critic_hf_revision=p.critic.hf.revision;data.critic_hf_loader=p.critic.hf.loader;data.critic_hf_max_length=p.critic.hf.max_length;data.critic_hf_device='cpu';}}
+  }
+  applyMixed(data);
+--- /dev/null
++++ v79/tests/test_offpolicy_critic_v79.py
+@@ -0,0 +1,153 @@
++"""Regression and exact finite-MDP enumeration of full-trajectory IS Critic."""
++import itertools
++import math
++from types import SimpleNamespace
++import pytest
++import torch
++from torch.nn import functional as F
++from patchlib.offpolicy_critic_v79 import (
++    exact_trajectory_value_surrogate as value_is, OffPolicyCorrectionError, resolved_mode)
++from patchlib.mixed_learning_v65 import MixedObjectiveTrainer, spec, MixedLearningError
++from test_mixed_learning_v65 import make_args, setup_model, write, ToyTokenizer
++
++
++def test_importance_weighted_critic_gradient_matches_target_exact_enumeration():
++    # 2-step binary autoregressive policy. Target is VERY different from
++    # behavior and rewards depend on both actions. Compute the true on-target
++    # expected gradient over all four complete trajectories, not MC estimates.
++    mu={(0,):.9,(1,):.1,(0,0):.8,(0,1):.2,(1,0):.3,(1,1):.7}
++    pi={(0,):.2,(1,):.8,(0,0):.4,(0,1):.6,(1,0):.6,(1,1):.4}
++    gamma=.93
++    total_is=torch.zeros(3,dtype=torch.double)
++    total_true=torch.zeros(3,dtype=torch.double)
++    for a,b in itertools.product((0,1),repeat=2):
++        p_mu=mu[(a,)]*mu[(a,b)]
++        p_pi=pi[(a,)]*pi[(a,b)]
++        old=torch.log(torch.tensor([mu[(a,)],mu[(a,b)]],dtype=torch.double))
++        new=torch.log(torch.tensor([pi[(a,)],pi[(a,b)]],dtype=torch.double))
++        reward=float(2*a+3*b-1)
++        theta=torch.tensor([.4,-.5,.7],dtype=torch.double,requires_grad=True)
++        values=torch.stack((theta[0],theta[1+a]))
++        surrogate,details=value_is(values,old,new,reward,gamma)
++        (p_mu*surrogate).backward()
++        total_is+=theta.grad.detach()
++        direct=torch.tensor([.4,-.5,.7],dtype=torch.double,requires_grad=True)
++        target=.5*torch.stack([((direct[0]-gamma*reward)**2),
++                                ((direct[1+a]-reward)**2)]).mean()
++        (p_pi*target).backward()
++        total_true+=direct.grad.detach()
++        assert math.isclose(details['trajectory_ratio'],p_pi/p_mu,rel_tol=1e-12)
++    torch.testing.assert_close(total_is,total_true,rtol=0,atol=1e-12)
++
++
++def test_unshifted_policy_is_gradient_identical_to_onpolicy_monte_carlo():
++    values=torch.tensor([.2,-.4,.7],dtype=torch.double,requires_grad=True)
++    old=torch.tensor([-.4,-1.7,-.3],dtype=torch.double)
++    surrogate,_=value_is(values,old,old.clone(),.8,.95)
++    reference=.5*((values-torch.tensor([.95**2*.8,.95*.8,.8],dtype=torch.double))**2).mean()
++    torch.testing.assert_close(surrogate,reference,atol=1e-12,rtol=0)
++    torch.testing.assert_close(torch.autograd.grad(surrogate,values)[0],
++                               torch.autograd.grad(reference,values)[0])
++
++
++def test_samplewise_suffix_only_is_not_sufficient_for_target_state_distribution():
++    old=torch.log(torch.tensor([.9,.8],dtype=torch.double))
++    new=torch.log(torch.tensor([.2,.4],dtype=torch.double))
++    x=torch.tensor([.5,.6],dtype=torch.double,requires_grad=True)
++    _,metrics=value_is(x,old,new,1.,.9)
++    assert math.isclose(metrics['max_occupancy_ratio'],1.0)  # t=0 has occupancy weight 1
++    assert math.isclose(metrics['trajectory_ratio'],(.2/.9)*(.4/.8))
++
++
++def test_exact_trajectory_weights_never_silently_clipped_and_do_not_update_actor():
++    v=torch.tensor([.3,.7],requires_grad=True)
++    actor=torch.tensor([2.0,0.0],requires_grad=True)
++    old=torch.tensor([-6.0,-1.0])
++    surrogate,diag=value_is(v,old,actor,.5,.9)
++    assert diag['trajectory_ratio']>1000
++    surrogate.backward()
++    assert v.grad is not None and v.grad.isfinite().all()
++    assert actor.grad is None  # this is a Critic, NOT an Actor objective
++
++
++def test_nonfinite_and_overflow_rejected_without_weight_clipping():
++    x=torch.ones(2,requires_grad=True)
++    a=torch.tensor([0.,0.])
++    with pytest.raises(OffPolicyCorrectionError,match='overflow'):
++        value_is(x,a,torch.tensor([400.,400.]),1.,1.)
++    with pytest.raises(OffPolicyCorrectionError,match='nonfinite'):
++        value_is(x,a,torch.tensor([0.,float('nan')]),1.,1.)
++    with pytest.raises(OffPolicyCorrectionError,match='finite terminal reward'):
++        value_is(x,a,a,float('inf'),1.)
++    with pytest.raises(OffPolicyCorrectionError,match='different lengths'):
++        value_is(x,a,a[:1],1.,1.)
++
++
++def test_distributed_defaults_to_unclipped_is_and_policy_version_pinned(tmp_path):
++    p=write(tmp_path,'ppo.jsonl',[{'prompt':'hi','reference':'there'}])
++    args=make_args(tmp_path,ppo_jsonl=p,distributed_critic=True)
++    assert resolved_mode(args)=='trajectory_is'
++    policy=spec(args)
++    assert policy['version']=='pt-sft-clipped-ppo-v79'
++    assert policy['critic_offpolicy']=='unclipped-trajectory-is-mc-v79'
++    assert spec(make_args(tmp_path,ppo_jsonl=p,distributed_critic=True,critic_offpolicy='gae')) != policy
++    assert resolved_mode(make_args(tmp_path,ppo_jsonl=p))=='gae'
++    with pytest.raises(MixedLearningError,match='critic_offpolicy'):
++        from patchlib.mixed_learning_v65 import validate_args
++        validate_args(make_args(tmp_path,ppo_jsonl=p,critic_offpolicy='invented'))
++
++
++def test_actual_ppo_critic_target_recomputes_on_actor_update(tmp_path):
++    p=write(tmp_path,'ppo.jsonl',[{'prompt':'hi','reference':'there'}])
++    args=make_args(tmp_path,ppo_jsonl=p,ppo_reuse=2,distributed_critic=True)
++    model,adapter,optim,_=setup_model()
++    mix=MixedObjectiveTrainer(args,ToyTokenizer())
++    try:
++        torch.manual_seed(48)
++        actor_loss,critic_loss,metrics=mix.ppo_loss(model,torch.device('cpu'))
++        assert actor_loss.requires_grad and critic_loss.requires_grad
++        assert metrics['offpolicy_mode']=='trajectory_is'
++        assert math.isclose(metrics['trajectory_ratio'],1.,rel_tol=1e-5,abs_tol=1e-5)
++        before=mix.cached
++        critic_loss.backward(retain_graph=True)
++        assert any(p.grad is not None and torch.isfinite(p.grad).all() for p in mix.critic.parameters())
++        optim.zero_grad(set_to_none=True)
++        actor_loss.backward()
++        optim.step()
++        with torch.no_grad():
++            for p in adapter.trainable_parameters():p.add_(.02)
++        _,value_again,new_metrics=mix.ppo_loss(model,torch.device('cpu'))
++        assert mix.cached is before
++        assert math.isfinite(new_metrics['trajectory_ratio'])
++        assert value_again.requires_grad
++    finally:
++        mix.close()
++
++
++def test_gui_cli_config_roundtrip(tmp_path):
++    from patchlib.mix_gui_v66 import normalize,command_options
++    p=write(tmp_path,'ppo.jsonl',[{'prompt':'Hi','reference':'yes'}])
++    data=normalize({'enabled':True,'ppo_jsonl':str(p),'distributed_critic':True,
++                    'critic_offpolicy':'trajectory_is','sft_weight':0.0},task='causal-lm')
++    opts=command_options(data,state_dir=tmp_path)
++    assert '--critic-offpolicy' in opts
++    assert opts[opts.index('--critic-offpolicy')+1]=='trajectory_is'
++    assert '--distributed-critic' in opts
++
++
++def test_hf_value_head_trains_with_trajectory_is_and_frozen_backbone(tmp_path,monkeypatch):
++    from test_hf_value_critic_v69 import settings,hf_mock,Tokenizer,Actor
++    hf_mock(monkeypatch)
++    (tmp_path/'ppo.jsonl').write_text('{"prompt":"abc","reference":"abcd"}\n')
++    args=settings(tmp_path,distributed_critic=True,critic_offpolicy='trajectory_is')
++    actor=Actor()
++    mixer=MixedObjectiveTrainer(args,Tokenizer())
++    try:
++        _,v,metrics=mixer.ppo_loss(actor,torch.device('cpu'))
++        assert metrics['offpolicy_mode']=='trajectory_is'
++        v.backward()
++        assert mixer.critic.head.weight.grad is not None
++        assert torch.isfinite(mixer.critic.head.weight.grad).all()
++        assert all(p.grad is None for p in mixer.critic.model.body.parameters())
++    finally:
++        mixer.close()
+--- v78/tests/test_distributed_critic_v77.py
++++ v79/tests/test_distributed_critic_v77.py
+@@ -114,7 +114,7 @@
+     from patchlib.mixed_learning_v65 import spec, validate_args, MixedLearningError
+     ds=tmp_path/'examples.jsonl'
+     ds.write_text('{"prompt":"Q","reference":"A"}\n')
+-    opts=SimpleNamespace(ppo_jsonl=ds,sft_jsonl=None,distributed_critic=True,
++    opts=SimpleNamespace(ppo_jsonl=ds,sft_jsonl=None,distributed_critic=True,critic_offpolicy='gae',
+         ppo_weight=.2,pt_weight=1.,sft_weight=1.,hf_task='causal-lm',
+         loss_policy='auto',ppo_clip=.2,ppo_kl_coef=.02,ppo_value_coef=.5,
+         ppo_gamma=.99,ppo_gae_lambda=.95,ppo_max_tokens=8,ppo_reuse=2,

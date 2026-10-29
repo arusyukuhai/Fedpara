@@ -1,0 +1,1148 @@
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/README.md /mnt/data/kagami_v82_work/kagami-v82/README.md
+--- /mnt/data/kagami_v82_reference/kagami-v81/README.md	2026-10-28 07:30:52.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/README.md	2026-10-28 07:43:02.152206802 +0000
+@@ -1,3 +1,5 @@
++> Kagami v82: LoHA behavior Actor replay and old-base CAS. See [README_V82_LOHA.md](README_V82_LOHA.md).
++
+ # Kagami v81 — reproducible old-Actor checkpoint verification
+ 
+ See [README_V81.md](README_V81.md) for the v81 implementation, mathematics, and operational limits.
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/README_V82_LOHA.md /mnt/data/kagami_v82_work/kagami-v82/README_V82_LOHA.md
+--- /mnt/data/kagami_v82_reference/kagami-v81/README_V82_LOHA.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/README_V82_LOHA.md	2026-10-28 07:42:35.776824460 +0000
+@@ -0,0 +1,116 @@
++# Kagami v82 — LoHA-aware Actor probability replay (2026-10-28)
++
++## Summary
++
++v81 captured requires_grad tensors, but treated all other behavior-policy
++parameters and buffers (including remote overlays and ReLoRA anchors) as one
++frozen-base digest. Peers may have different remote overlays or old anchors even
++when their unmodified frozen weights are identical. This could unnecessarily
++reject legitimate trajectories, and was not a complete LoHA state commitment.
++
++v82 explicitly snapshots:
++
++* all trainable tensors including *every* LoHA factor (A/B/C/D, and the LoRA
++  factors used for auto-selected embeddings/output heads);
++* the exact immutable anchor factors for each parametrized group;
++* the exact frozen remote contribution factors and the remote count, in sorted,
++  deterministic order; and
++* a SHA-256 commitment to all non-overlay frozen parameters and buffers.
++
++All fields are stored as safely bounded safetensors, and the complete
++checkpoint blob is SHA-256-addressed in KCP82 and KTR82 frames. Each frame is
++independently authenticated with new domain-separated signatures. The rollout
++is associated with a certified Actor epoch, and the verified replayed log-probs
++(not the sender's original claims) enter the off-policy Critic objective.
++
++## LoHA equation and reconstruction
++
++For each adapted parameter with local, anchor and remote contributions:
++
++    D_LoHA(A,B,C,D) = (alpha/r) * ((A @ B.T) * (C @ D.T))
++
++    W_effective = B_frozen + (D_local - D_anchor + sum D_remote) / (1 + n_remote)
++
++The second formula is exactly the current Overlay.forward implementation.
++The v82 verifier installs historical `D_local`, `D_anchor`, and
++`D_remote` on the recipient (under the existing adapter writer lock), computes
++the old Actor likelihoods in eval/no-grad mode, then restores all original
++weights, remote modules, anchors and heterogeneous training/eval mode flags
++in a `finally` block. Each field is checked before the first mutation.
++
++This format deliberately cannot be read as a v81 checkpoint and v82 peers
++advertise `trajectory_v82` separately. Older v81/v80 frames are not trusted.
++
++## Optional old-frozen-base replay across epochs
++
++`behavior_checkpoint_v82.capture_frozen_base(model)` exports a separate
++safetensors artifact (max 256 MiB) whose content is committed under the same
++base SHA-256 as the behavior checkpoint. `FrozenBaseCAS(directory)` stores it
++immutably by hash. A caller can supply `base_resolver=store` to
++`replay_logps(...)` or to `LohaVerifiedTrajectoryGossip(...)`. The receiver
++checks the full tensor digest, names, dtypes and shapes, substitutes the old
++base temporarily, verifies the sample probabilities, then restores its
++current base and all other live state, including on exception.
++
++**The old-base artifact is NOT part of the per-rollout wire transfer.**
++It must be obtained from a trusted/certified epoch snapshot process, and the
++source Actor-epoch ledger must authenticate the rollout. This base CAS is a
++bounded in-process recovery codec, not yet a remote-snapshot distribution
++implementation for multi-GiB/terabyte models.
++
++**Disk-mapped virtual mutable bases, streaming offload and Factor Ledger
++require a dedicated signed virtual-base replay manifest.** v82 explicitly
++rejects these configurations rather than producing false verification. On
++an unattested frozen-base mismatch it rejects the update. Critic receipts are
++never committed for such trajectories.
++
++## Next large-scale design (NOT claimed as shipped)
++
++1. Derive immutable, certified effective-base manifests from an Actor epoch's
++   quorum-certified snapshot root and its exact signed journal cut. Store
++   4-MiB content-addressed shards or journal-replayable factor deltas, using
++   SHA-256 Merkle proofs. Avoid whole-base copies on rollout boundaries.
++2. Separate **base-root** (epoch/cut, large and deduplicated) from **behavior
++   overlay root** (LoHA/LoRA factors, small, one per sampled Actor state).
++   Include both in the trajectory signature with tokenizer/model ABI.
++3. Request only missing base shards/committed deltas over the bounded gossip
++   overlay, with resumable chunk ranges and a rolling per-peer traffic budget.
++   Rely on snapshot seeding rather than every sender broadcasting N copies.
++4. Verify each streamed base tile, the authenticated Actor journal cut, and
++   the LoHA manifest before reconstituting the old model in an isolated
++   shadow evaluator. Do not mutate the live model during large old-base replay.
++5. Keep GC pins until all referenced trajectory/cut evidence is finalized,
++   expired under an explicit retention policy or safely compacted to a
++   replacement certified snapshot. Never GC an unacknowledged dependency.
++
++For `P` base parameters and LoHA rank `r`, the local factor payload is roughly
++`O(r sum_i (in_i+out_i))`, plus anchors/remotes. The base itself is still `O(P)`
++for a completely new, incomparable epoch: no lossless algorithm can promise a
++sublinear amount of independent new base information without shared state.
++
++## Security and mathematical limitations
++
++* Reconstructed log-probs certify a *replayable sampled-policy distribution*;
++  they do **not** prove that the sender actually drew tokens from that
++  distribution, or that the overlay factors came from a valid historical
++  model update journal. Exact historical journal lineage requires a future
++  proof binding `actor_tip` to the actual overlay manifest.
++* The off-policy trajectory-IS Critic expectation statement still requires
++  correct behavior sampling, shared tokenizer/action space, stationary reward
++  semantics, and support coverage. It does not guarantee finite-sample
++  convergence or PPO Actor update unbiasedness.
++* Nonstandard/opaque custom forward paths and mutable virtual weights are
++  not automatically covered. The 2e-3 log-prob tolerance is for numerical
++  cross-backend differences, NOT a target-policy importance-weight clipping.
++* 64 MiB is still the factor checkpoint cap. LoHA with many remote overlays,
++  huge dense fallback groups or ranks beyond this budget needs separately
++  sharded factor checkpoints before the mode can be enabled at scale.
++
++## Verification
++
++`PYTHONPATH=.:tests python -m pytest -q tests/test_behavior_checkpoint_v82.py`
++
++Tests cover explicit LoHA/LoRA overlay state, anchors/remotes differing by peer,
++a mixed auto scope with embedding/head LoRA, temporary old-base CAS replay,
++wrong base and wrong likelihood rejection, missing pages, the live CLI export,
++exception-safe state restoration and a fail-closed virtual-base guard.
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/patchlib/behavior_checkpoint_v82.py /mnt/data/kagami_v82_work/kagami-v82/patchlib/behavior_checkpoint_v82.py
+--- /mnt/data/kagami_v82_reference/kagami-v81/patchlib/behavior_checkpoint_v82.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/patchlib/behavior_checkpoint_v82.py	2026-10-28 07:41:37.825734144 +0000
+@@ -0,0 +1,343 @@
++"""Kagami v82: exact LoHA/LoRA behavior-Actor reconstruction.
++
++Unlike v81, remote Overlay contributions and ReLoRA anchors are NOT assumed
++identical on every peer. Their actual factor bytes are part of the signed,
++content-addressed behavior checkpoint. The frozen original weights/non-adapter
++buffers still require an independently pinned *identical* base; a different
++base is deliberately refused rather than silently substituted.
++
++This attests a replayable policy distribution, NOT honest random sampling.
++The caller must serialize capture/replay with adapter.lock and all model writes.
++"""
++from __future__ import annotations
++
++from contextlib import contextmanager
++import hashlib
++import json
++import math
++import os
++from pathlib import Path
++
++import torch
++from torch import nn
++from safetensors.torch import save as safe_save, load as safe_load
++
++from .core import PatchError, Overlay, FrozenDelta, _canonical_json
++from .behavior_checkpoint_v81 import (
++    PAGE_BYTES, MAX_CHECKPOINT_PAGES, MAX_CHECKPOINT_BYTES,
++    LOGP_ATOL, _tensor_digest, digest,
++)
++
++FORMAT='actor-loha-overlay-complete-v82'
++MAX_GROUPS=8192
++MAX_REMOTE_PER_GROUP=64  # guard against unbounded topology state / memory
++MAX_BASE_REPLAY_BYTES=256*1024**2  # limited in-process fallback; large bases need shadow model
++
++
++def _overlays(model):
++    # An offloaded/virtual base can have a different effective value than its
++    # PyTorch original Parameter. Never attest the original as the sampled
++    # Actor until a certified disk-source/ledger snapshot codec is available.
++    if (getattr(getattr(model,'_fedpara_lazy_mutable_weights',None),
++                '_fedpara_is_factor_ledger',False) or
++            any(getattr(m,'_fedpara_disk_path',None) for m in model.modules())):
++        raise PatchError('LoHA behavior replay requires a certified virtual/disk base snapshot; streamed or factor-ledger base not supported by v82')
++    # named_modules() deduplicates tied parametrizations and shared Overlays.
++    groups=[(path, mod) for path, mod in model.named_modules() if isinstance(mod, Overlay)]
++    if len(groups)>MAX_GROUPS:
++        raise PatchError('too many LoHA overlay groups for behavior replay')
++    if not groups or len({id(m) for _,m in groups})!=len(groups):
++        raise PatchError('missing or aliased LoHA overlay registration')
++    return groups
++
++
++def _base_and_live(model,groups):
++    excluded_p={id(p) for _,mod in groups for p in mod.parameters()}
++    excluded_b={id(b) for _,mod in groups for b in mod.buffers()}
++    live=[];base=[]
++    for name,p in model.named_parameters():
++        if p.requires_grad:
++            live.append((name,p))
++        elif id(p) not in excluded_p:
++            base.append(('parameter:'+name,p))
++    for name,b in model.named_buffers():
++        if id(b) not in excluded_b:
++            base.append(('buffer:'+name,b))
++    if not live:raise PatchError('no trainable Actor parameters for behavior checkpoint')
++    for _,ov in groups:
++        if any(not p.requires_grad for p in ov.local.parts):
++            raise PatchError('frozen LoHA local parts are unsupported for behavior replay')
++    return live,base
++
++
++def _schema(path,mod):
++    spec=mod.local
++    if spec.kind not in ('lora','loha') or not 1<=spec.rank<=256 or not math.isfinite(spec.alpha):
++        raise PatchError('invalid LoHA group specification')
++    remotes=sorted(mod.remotes.keys())
++    if len(remotes)>MAX_REMOTE_PER_GROUP or any(not isinstance(key,str) or
++           len(key)!=64 or any(c not in '0123456789abcdef' for c in key) for key in remotes):
++        raise PatchError('invalid or excessive LoHA remote overlays')
++    if hasattr(mod,'anchor') and not isinstance(mod.anchor,FrozenDelta):
++        raise PatchError('unknown LoHA anchor type')
++    if any(not isinstance(r,FrozenDelta) for r in mod.remotes.values()):
++        raise PatchError('unknown LoHA remote type')
++    return {'path':path, 'shape':list(spec.shape), 'kind':spec.kind,
++            'rank':spec.rank,'alpha':spec.alpha,'dense':spec.dense,
++            'anchor':hasattr(mod,'anchor'),'remotes':remotes}
++
++
++def _frozen_parts(mod,member):
++    if (member.kind!=mod.local.kind or member.rank!=mod.local.rank or
++            member.alpha!=mod.local.alpha or member.dense!=mod.local.dense or
++            tuple(member.shape)!=tuple(mod.local.shape)):
++        raise PatchError('remote/anchor LoHA tensor factor specification mismatch')
++    parts=[getattr(member,'part'+str(i)) for i in range(member.nparts)]
++    if len(parts)!=len(mod.local.parts):
++        raise PatchError('incorrect LoHA frozen factor count')
++    return parts
++
++
++def capture(model):
++    """Call before first sampled token, inside the model/adapter write fence."""
++    groups=_overlays(model)
++    live,base=_base_and_live(model,groups)
++    tensors={n:p.detach().to('cpu').contiguous().clone() for n,p in live}
++    if len(tensors)!=len(live):raise PatchError('duplicate trainable Actor tensor name')
++    descriptors=[]
++    for j,(path,mod) in enumerate(groups):
++        entry=_schema(path,mod)
++        for category,member in (([('anchor',mod.anchor)] if entry['anchor'] else [])+
++                                [('remote:'+key,mod.remotes[key]) for key in entry['remotes']]):
++            for k,t in enumerate(_frozen_parts(mod,member)):
++                name=f'v82.overlay.{j}.{category}.{k}'
++                if name in tensors:raise PatchError('LoHA snapshot key collision')
++                tensors[name]=t.detach().to('cpu').contiguous().clone()
++        descriptors.append(entry)
++    if not all(bool(torch.isfinite(t).all()) for t in tensors.values()):
++        raise PatchError('nonfinite LoHA behavior tensor')
++    meta={'version':FORMAT,'base_sha256':_tensor_digest(base),
++          'live_weights':sorted(n for n,_ in live),'overlays':descriptors,
++          'weights':sorted(tensors)}
++    blob=safe_save(tensors,metadata={'behavior':_canonical_json(meta).decode('utf8')})
++    if len(blob)>MAX_CHECKPOINT_BYTES:
++        raise PatchError('LoHA behavior checkpoint exceeds 64MiB bound; snapshot sharding required')
++    return blob
++
++
++
++def capture_frozen_base(model):
++    """Optional content-addressed old-epoch base artifact, NOT per-rollout wire.
++
++    Intended for a pinned actor-epoch snapshot/archive. The caller persists it
++    once per distinct SHA-256 base and distributes via a separate certified
++    snapshot/manifest path. Never attach this dense blob to each KTR82 rollout.
++    """
++    groups=_overlays(model)
++    _,base=_base_and_live(model,groups)
++    base_hash=_tensor_digest(base)
++    tensors={name:t.detach().cpu().contiguous().clone() for name,t in base}
++    wire=safe_save(tensors,metadata={'base_sha256':base_hash,
++                                    'version':'kagami-frozen-actor-base-v82'})
++    if len(wire)>MAX_BASE_REPLAY_BYTES:
++        raise PatchError('historical full base requires external sharded epoch snapshot')
++    return base_hash,wire
++
++
++def _validated_base(wire,base,expected_hash):
++    if not isinstance(wire,bytes) or not 8<len(wire)<=MAX_BASE_REPLAY_BYTES:
++        raise PatchError('historical base blob missing or exceeds bounded replay budget')
++    header_len=int.from_bytes(wire[:8],'little')
++    if not 0<header_len<=1024*1024 or header_len>len(wire)-8:
++        raise PatchError('invalid historical base artifact header')
++    try:
++        h=json.loads(wire[8:8+header_len]);meta=h['__metadata__']
++        tensors=safe_load(wire)
++    except (ValueError,TypeError,KeyError,RuntimeError,UnicodeDecodeError) as exc:
++        raise PatchError('invalid historical base artifact') from exc
++    if (not isinstance(meta,dict) or meta.get('version')!='kagami-frozen-actor-base-v82'
++            or meta.get('base_sha256')!=expected_hash or
++            set(tensors)!={name for name,_ in base} or
++            _tensor_digest(tensors.items())!=expected_hash):
++        raise PatchError('historical base contents fail commitment verification')
++    result=[]
++    for name,param in base:
++        value=tensors[name]
++        if value.dtype!=param.dtype or value.shape!=param.shape:
++            raise PatchError('historical base shape/dtype mismatch')
++        result.append((param,value.to(param.device)))
++    return result
++
++
++class FrozenBaseCAS:
++    """Local immutable CAS for optional historical base reconstruction.
++
++    Explicitly enrolled, certified epoch snapshots only. This is storage, not a
++    signed peer transfer protocol. The caller authenticates the epoch before
++    enrolling or using a snapshot; do not use arbitrary web-provided base files.
++    """
++    def __init__(self,folder):
++        self.folder=Path(folder)
++        self.folder.mkdir(parents=True,exist_ok=True)
++
++    def put(self,sha,blob):
++        if not isinstance(sha,str) or len(sha)!=64 or any(c not in '0123456789abcdef' for c in sha):
++            raise PatchError('bad historical base commitment')
++        if not isinstance(blob,bytes) or len(blob)>MAX_BASE_REPLAY_BYTES:
++            raise PatchError('oversized historical base object')
++        if len(blob)<8:raise PatchError('truncated historical base')
++        head=int.from_bytes(blob[:8],'little')
++        if not 0<head<=1024*1024 or head>len(blob)-8:
++            raise PatchError('invalid base object')
++        # Verify manifest against the actual stored tensors, NOT SHA(blob).
++        try:
++            meta=json.loads(blob[8:8+head])['__metadata__']
++            values=safe_load(blob)
++        except (ValueError,TypeError,KeyError,RuntimeError,UnicodeDecodeError) as exc:
++            raise PatchError('corrupt historical base CAS object') from exc
++        if (meta.get('base_sha256')!=sha or meta.get('version')!='kagami-frozen-actor-base-v82'
++                or _tensor_digest(values.items())!=sha):
++            raise PatchError('historical base CAS digest mismatch')
++        path=self.folder/(sha+'.safetensors')
++        if path.is_file():
++            if path.read_bytes()!=blob:raise PatchError('historical base equivocation')
++            return path
++        path_tmp=self.folder/(sha+'.'+os.urandom(8).hex()+'.tmp')
++        try:
++            with path_tmp.open('xb') as fh:
++                fh.write(blob);fh.flush();os.fsync(fh.fileno())
++            # Atomic replace is safe because content-addressed objects are
++            # verified before and after retrieval; concurrent writers must
++            # produce same canonical bytes (not assumed without validation).
++            if path.exists() and path.read_bytes()!=blob:
++                raise PatchError('base CAS concurrent equivocation')
++            os.replace(path_tmp,path)
++            directory_fd=os.open(self.folder,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
++            try:os.fsync(directory_fd)
++            finally:os.close(directory_fd)
++            return path
++        finally:path_tmp.unlink(missing_ok=True)
++
++    def __call__(self,sha):
++        if not isinstance(sha,str) or len(sha)!=64 or any(c not in '0123456789abcdef' for c in sha):
++            raise PatchError('invalid frozen base SHA-256')
++        p=self.folder/(sha+'.safetensors')
++        return p.read_bytes() if p.is_file() and p.stat().st_size<=MAX_BASE_REPLAY_BYTES else None
++
++def _decode(blob):
++    digest(blob)
++    if len(blob)<8:raise PatchError('truncated LoHA checkpoint')
++    hsize=int.from_bytes(blob[:8],'little')
++    if not 0<hsize<=1024*1024 or hsize>len(blob)-8:
++        raise PatchError('invalid LoHA checkpoint header')
++    try:
++        hdr=json.loads(blob[8:8+hsize])
++        meta=json.loads(hdr['__metadata__']['behavior'])
++        tensors=safe_load(blob)
++    except (UnicodeDecodeError,KeyError,ValueError,TypeError,RuntimeError) as exc:
++        raise PatchError('invalid LoHA checkpoint serialization') from exc
++    if (not isinstance(meta,dict) or set(meta)!={'version','base_sha256','live_weights','overlays','weights'}
++            or meta['version']!=FORMAT or not isinstance(meta['overlays'],list)
++            or not isinstance(meta['live_weights'],list) or not isinstance(meta['weights'],list)
++            or meta['weights']!=sorted(tensors) or len(meta['overlays'])>MAX_GROUPS):
++        raise PatchError('noncanonical LoHA checkpoint metadata')
++    return meta,tensors
++
++
++def _validated(model,blob,base_resolver=None):
++    meta,tensors=_decode(blob)
++    groups=_overlays(model)
++    live,base=_base_and_live(model,groups)
++    if len(groups)!=len(meta['overlays']):raise PatchError('LoHA overlay group layout mismatch')
++    if meta['live_weights']!=sorted(n for n,_ in live):
++        raise PatchError('LoHA live factor layout mismatch')
++    base_update=[]
++    if meta['base_sha256']!=_tensor_digest(base):
++        if base_resolver is None:
++            raise PatchError('frozen base differs; supply certified old base epoch snapshot before replay')
++        old_base=base_resolver(meta['base_sha256'])
++        if old_base is None:
++            raise PatchError('historical frozen base unavailable (pending certified epoch snapshot)')
++        base_update=_validated_base(old_base,base,meta['base_sha256'])
++    staged=[]; expected=set(meta['live_weights']); overlays=[]
++    for name,p in live:
++        t=tensors.get(name)
++        if t is None or t.shape!=p.shape or t.dtype!=p.dtype or not bool(torch.isfinite(t).all()):
++            raise PatchError('invalid LoHA live factor')
++        staged.append((p,t.to(p.device)))
++    for j,((path,ov),desc) in enumerate(zip(groups,meta['overlays'])):
++        if (not isinstance(desc,dict) or set(desc)!={'path','shape','kind','rank','alpha','dense','anchor','remotes'} or
++            desc['path']!=path or desc['shape']!=list(ov.local.shape) or
++            desc['kind']!=ov.local.kind or type(desc['rank']) is not int or desc['rank']!=ov.local.rank or
++            type(desc['alpha']) not in (float,int) or desc['alpha']!=ov.local.alpha or
++            type(desc['dense']) is not bool or desc['dense']!=ov.local.dense or
++            type(desc['anchor']) is not bool or not isinstance(desc['remotes'],list) or
++            len(desc['remotes'])>MAX_REMOTE_PER_GROUP or desc['remotes']!=sorted(set(desc['remotes'])) or
++            any(not isinstance(key,str) or len(key)!=64 or
++                any(c not in '0123456789abcdef' for c in key) for key in desc['remotes'])):
++            raise PatchError('LoHA factor layout/checkpoint metadata mismatch')
++        def restore_frozen(category):
++            # Require exact expected factor shape and dtype before ANY mutation.
++            parts=[]
++            for k,param in enumerate(ov.local.parts):
++                name=f'v82.overlay.{j}.{category}.{k}';expected.add(name)
++                t=tensors.get(name)
++                if (t is None or t.shape!=param.shape or t.dtype!=torch.float32 or
++                        not bool(torch.isfinite(t).all())):
++                    raise PatchError('LoHA anchor/remote factor mismatch')
++                parts.append(t.to(device=param.device))
++            return FrozenDelta(ov.local,parts).to(ov.local.parts[0].device)
++        anchor=restore_frozen('anchor') if desc['anchor'] else None
++        remotes=nn.ModuleDict({key:restore_frozen('remote:'+key) for key in desc['remotes']})
++        overlays.append((ov,anchor,remotes))
++    if set(tensors)!=expected:raise PatchError('unexpected LoHA snapshot tensor')
++    return staged,overlays,base_update
++
++
++@contextmanager
++def temporarily_loaded(model,blob,*,base_resolver=None):
++    """Atomic validation, then reversible installation of historical LoHA state."""
++    staged,overlays,base_update=_validated(model,blob,base_resolver)
++    originals=[(p,p.detach().clone()) for p,_ in staged]
++    old_base=[(p,p.detach().clone()) for p,_ in base_update]
++    old_overlays=[(ov,getattr(ov,'anchor',None),hasattr(ov,'anchor'),ov.remotes)
++                  for ov,_,_ in overlays]
++    # Preserve heterogeneous train/eval state (e.g. frozen dropout blocks).
++    modes=[(m,m.training) for m in model.modules()]
++    try:
++        with torch.no_grad():
++            for p,w in base_update:p.copy_(w)
++            for p,w in staged:p.copy_(w)
++            for ov,anchor,remotes in overlays:
++                if anchor is None:
++                    if hasattr(ov,'anchor'):del ov.anchor
++                else:ov.anchor=anchor
++                ov.remotes=remotes
++        model.eval()
++        yield
++    finally:
++        with torch.no_grad():
++            for p,w in originals:p.copy_(w)
++            for p,w in old_base:p.copy_(w)
++            for ov,anchor,present,remotes in old_overlays:
++                if present:ov.anchor=anchor
++                elif hasattr(ov,'anchor'):del ov.anchor
++                ov.remotes=remotes
++        for m,mode in modes:m.training=mode
++
++
++def replay_logps(model,blob,rollout,args,device,*,base_resolver=None):
++    """Verify old mu with the LoHA state restored, not with today's peer state."""
++    from torch.nn import functional as F
++    from .mixed_learning_v65 import _logits
++    prompt=rollout['prompt'];actions=rollout['tokens'];n=len(actions)
++    ids=torch.tensor([prompt+actions],device=device,dtype=torch.long)
++    with temporarily_loaded(model,blob,base_resolver=base_resolver),torch.no_grad():
++        out=_logits(model,ids,args,start=len(prompt)-1,length=n)
++        actual=F.log_softmax(out.float(),dim=-1).gather(
++            -1,torch.tensor(actions,device=device).view(1,n,1)).view(n)
++    claimed=torch.tensor(rollout['behavior_logp'],dtype=torch.float64,device=device)
++    if (actual.numel()!=n or not bool(torch.isfinite(actual).all()) or
++            not bool(torch.all(torch.abs(actual.double()-claimed)<=LOGP_ATOL))):
++        raise PatchError('behavior probabilities disagree with LoHA checkpoint')
++    return actual.detach().cpu().tolist()
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/patchlib/cli.py /mnt/data/kagami_v82_work/kagami-v82/patchlib/cli.py
+--- /mnt/data/kagami_v82_reference/kagami-v81/patchlib/cli.py	2026-10-28 07:24:58.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/patchlib/cli.py	2026-10-28 07:37:18.148500174 +0000
+@@ -567,7 +567,7 @@
+                     args._v77_critic_before=before
+                 if (getattr(args,'critic_rollout_gossip',False) and getattr(args,'mode',None)=='elastic'
+                         and mixer.reuses==1):
+-                    args._v80_rollout_pending=(mixer.export_rollout_v80(),mixer.cached['behavior_checkpoint_v81'])
++                    args._v80_rollout_pending=(mixer.export_rollout_v80(),mixer.cached['behavior_checkpoint_v82'])
+                 if mixer.critic_steps%10==0 and not getattr(mixer,'_v75_paired',False):
+                     mixer.save_critic()
+                 total+=float(ppo_actor.detach())*args.ppo_weight
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/patchlib/elasticnet.py /mnt/data/kagami_v82_work/kagami-v82/patchlib/elasticnet.py
+--- /mnt/data/kagami_v82_reference/kagami-v81/patchlib/elasticnet.py	2026-10-28 07:29:50.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/patchlib/elasticnet.py	2026-10-28 07:37:18.149957782 +0000
+@@ -424,7 +424,7 @@
+                 'generation-carry-offer','generation-carry-need','generation-carry-chunk'):
+             return False  # A signed v1 update must never cross epochs.
+         if kind != 'hello' and not self.hello_sent:
+-            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, critic_v78=True, trajectory_v81=True,
++            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, critic_v78=True, trajectory_v82=True,
+                     **({'generation_root':self.generation_root} if self.generation_root else {}),
+                     **({'pub':self.public_key} if self.public_key else {})):
+                 return False
+@@ -823,7 +823,7 @@
+                         # Capability negotiation preserves compatibility with
+                         # older v3 peers that do not understand 'frontier'.
+                         self.remote_supports_critic = decoded.get('critic_v78') is True
+-                        self.remote_supports_rollout = decoded.get('trajectory_v81') is True
++                        self.remote_supports_rollout = decoded.get('trajectory_v82') is True
+                         self.remote_supports_frontier = decoded.get('frontier_v1') is True
+                         self.remote_supports_aggregate = decoded.get('aggregate_v1') is True
+                         self.remote_supports_snapshot_pages = decoded.get('snapshot_tip_pages_v1') is True
+@@ -1727,13 +1727,13 @@
+             allowed_actor_epochs=critic_known_epochs,actor_epoch=genesis)
+         args._v65_mixer._v75_paired=_v75_paired_active
+         if getattr(args,'critic_rollout_gossip',False):
+-            from .trajectory_gossip_v81 import VerifiedTrajectoryGossip
+-            trajectory_gossip=VerifiedTrajectoryGossip(
+-                Path(str(args.journal)+'.trajectory-v81.sqlite3'),critic_gossip.genesis,args._v65_mixer,
++            from .trajectory_gossip_v82 import LohaVerifiedTrajectoryGossip
++            trajectory_gossip=LohaVerifiedTrajectoryGossip(
++                Path(str(args.journal)+'.trajectory-v82.sqlite3'),critic_gossip.genesis,args._v65_mixer,
+                 args.peer_id,signer,pub=room_pub if room_only else None,
+                 trusted=trusted,allowed_epochs=critic_gossip.known_actor_epochs,
+                 actor_epoch=genesis,max_bytes=min(args.max_journal_gb*1024**3,512*1024**2))
+-            print('V81 CHECKPOINT-VERIFIED TRAJECTORY REPLAY active; only fully reproduced behavior probabilities update Critic',flush=True)
++            print('V82 LOHA CHECKPOINT-VERIFIED TRAJECTORY REPLAY active; only fully reproduced behavior probabilities update Critic',flush=True)
+         print('DISTRIBUTED CRITIC active signed_events='
+               f'{critic_gossip.journal.count()} lane={critic_gossip.genesis[:16]}',flush=True)
+     critic_step_lock=asyncio.Lock()
+@@ -2417,7 +2417,7 @@
+                 wire=node.incoming.get_nowait()
+                 if not isinstance(wire,bytes):
+                     raise PatchError('nonbinary elastic event')
+-                if wire.startswith((b'KTR81\0',b'KCP81\0')):
++                if wire.startswith((b'KTR82\0',b'KCP82\0')):
+                     if trajectory_gossip is None or not node.remote_supports_rollout:
+                         raise PatchError('unexpected v81 trajectory/checkpoint frame')
+                     async with critic_step_lock:
+@@ -2609,7 +2609,7 @@
+                 wire=node.incoming.get_nowait()
+                 if not isinstance(wire,bytes):
+                     raise PatchError('malformed old DataChannel event at handoff')
+-                if wire.startswith((b'KTR81\0',b'KCP81\0')):
++                if wire.startswith((b'KTR82\0',b'KCP82\0')):
+                     if trajectory_gossip is None:
+                         raise PatchError('unexpected v81 trajectory/checkpoint at epoch handoff')
+                     async with critic_step_lock:
+@@ -3588,7 +3588,7 @@
+                                 # Fail locally before making a signed claim:
+                                 # full forward on the frozen source snapshot must
+                                 # reproduce all observed sampling log-probs.
+-                                from .behavior_checkpoint_v81 import replay_logps
++                                from .behavior_checkpoint_v82 import replay_logps
+                                 from .cli import input_device
+                                 replay_logps(model,checkpoint,rollout,args,input_device(model,args.device))
+                                 signed=trajectory_gossip.local(rollout,checkpoint=checkpoint,actor_tip=_tip(journal))
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/patchlib/mixed_learning_v65.py /mnt/data/kagami_v82_work/kagami-v82/patchlib/mixed_learning_v65.py
+--- /mnt/data/kagami_v82_reference/kagami-v81/patchlib/mixed_learning_v65.py	2026-10-28 07:24:58.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/patchlib/mixed_learning_v65.py	2026-10-28 07:37:18.148180831 +0000
+@@ -77,9 +77,9 @@
+         generated['critic_offpolicy']='unclipped-trajectory-is-mc-v79'
+         generated['version']='pt-sft-clipped-ppo-v79'
+     if getattr(args,'critic_rollout_gossip',False):
+-        generated['critic_distribution']='checkpoint-verified-trajectory-is-v81'
+-        generated['behavior_policy_proof']='content-addressed-trainable-checkpoint-frozen-base-sha256-v81'
+-        generated['version']='pt-sft-clipped-ppo-v81'
++        generated['critic_distribution']='loha-complete-checkpoint-verified-trajectory-is-v82'
++        generated['behavior_policy_proof']='content-addressed-loha-anchors-remotes-live-factors-frozen-base-sha256-v82'
++        generated['version']='pt-sft-clipped-ppo-v82'
+     if not getattr(args,'mix_policy',None):
+         return generated
+     path=Path(args.mix_policy)
+@@ -429,7 +429,7 @@
+         # run_step holds adapter.lock, so no concurrent P2P/optimizer write
+         # can change a tensor between this capture and rollout generation.
+         if getattr(self.args,'critic_rollout_gossip',False):
+-            from .behavior_checkpoint_v81 import capture
++            from .behavior_checkpoint_v82 import capture
+             checkpoint=capture(model)
+         else:
+             checkpoint=None
+@@ -506,7 +506,7 @@
+                         'old_lp':torch.stack(old_lp).detach(), 'old_values':old_values.detach(),
+                         'adv':adv.detach(),'returns':returns.detach(), 'reward':reward,
+                         'critic_prefixes':prefixes, 'reference_tokens':reference,
+-                        'behavior_checkpoint_v81':checkpoint}
++                        'behavior_checkpoint_v82':checkpoint, 'behavior_checkpoint_v81':checkpoint}
+         finally:
+             model.train(was_training)
+ 
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/patchlib/trajectory_gossip_v82.py /mnt/data/kagami_v82_work/kagami-v82/patchlib/trajectory_gossip_v82.py
+--- /mnt/data/kagami_v82_reference/kagami-v81/patchlib/trajectory_gossip_v82.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/patchlib/trajectory_gossip_v82.py	2026-10-28 07:39:05.204305329 +0000
+@@ -0,0 +1,296 @@
++"""Kagami v82: signed, content-addressed behavior checkpoint + verified PPO IS.
++
++KCP82 pages are independently authenticated, journaled, and requested through
++existing bounded trajectory frontier/need gossip. KTR82 references their exact
++checkpoint digest. A missing checkpoint NEVER produces an applied receipt.
++"""
++from __future__ import annotations
++import hashlib
++import json
++import math
++import struct
++from .core import PatchError, PEER_ID, _canonical_json
++from .trajectory_gossip_v80 import (TrajectoryGossip, validate_rollout,
++    MAX_WIRE, MAX_HEAD, _id)
++from .behavior_checkpoint_v82 import (PAGE_BYTES, MAX_CHECKPOINT_PAGES,
++    MAX_CHECKPOINT_BYTES, digest as checkpoint_digest, replay_logps)
++
++TR_MAGIC=b'KTR82\0'
++CP_MAGIC=b'KCP82\0'
++TR_DOMAIN=b'KAGAMI-V82-CHECKPOINTED-TRAJECTORY\0'
++CP_DOMAIN=b'KAGAMI-V82-CHECKPOINT-PAGE\0'
++
++
++def _seal(head,payload,signer,magic,domain):
++    signed=domain+_canonical_json(head)
++    head=dict(head)
++    head['signature']=signer(len(signed),hashlib.sha256(signed).hexdigest())
++    encoded=_canonical_json(head)
++    frame=magic+struct.pack('!I',len(encoded))+encoded+payload
++    if len(encoded)>MAX_HEAD or len(frame)>MAX_WIRE:
++        raise PatchError('checkpointed trajectory frame exceeds wire limit')
++    return frame
++
++
++def _open(wire,magic,domain,genesis,epochs,trusted):
++    if not isinstance(wire,bytes) or not wire.startswith(magic) or not len(magic)+4<len(wire)<=MAX_WIRE:
++        raise PatchError('invalid v82 trajectory/checkpoint frame')
++    hsize=struct.unpack('!I',wire[len(magic):len(magic)+4])[0]
++    if not 0<hsize<=MAX_HEAD or len(wire)<=len(magic)+4+hsize:
++        raise PatchError('invalid v82 event header size')
++    try:head=json.loads(wire[len(magic)+4:len(magic)+4+hsize])
++    except (UnicodeDecodeError,TypeError,ValueError) as exc:raise PatchError('invalid v82 signed header') from exc
++    if not isinstance(head,dict):raise PatchError('invalid v82 header fields')
++    origin=head.get('origin');seq=head.get('seq');epoch=head.get('actor_epoch')
++    if (not isinstance(origin,str) or not PEER_ID.fullmatch(origin) or
++        type(seq) is not int or not 1<=seq<2**63 or
++        head.get('genesis')!=genesis or not _id(epoch) or epoch not in epochs):
++        raise PatchError('v82 origin or certified Actor epoch mismatch')
++    payload=wire[len(magic)+4+hsize:]
++    if (type(head.get('size')) is not int or head['size']!=len(payload) or
++        not _id(head.get('sha256')) or hashlib.sha256(payload).hexdigest()!=head['sha256']):
++        raise PatchError('v82 payload commitment mismatch')
++    if 'pub' in head:
++        from .roomid import identity_from_public_b64
++        verify=identity_from_public_b64(head['pub'],origin)
++    else:verify=(trusted or {}).get(origin)
++    if verify is None:raise PatchError('unauthenticated v82 event origin')
++    sig=head.get('signature')
++    signed=domain+_canonical_json({k:v for k,v in head.items() if k!='signature'})
++    verify({'size':len(signed),'sha256':hashlib.sha256(signed).hexdigest(),'sig':sig})
++    return head,payload
++
++
++def _head(origin,seq,genesis,epoch,payload,pub):
++    if not isinstance(origin,str) or not PEER_ID.fullmatch(origin) or type(seq) is not int or not 1<=seq<2**63 or not _id(genesis) or not _id(epoch):
++        raise PatchError('invalid v82 signed event identity')
++    h={'origin':origin,'seq':seq,'genesis':genesis,'actor_epoch':epoch,
++       'size':len(payload),'sha256':hashlib.sha256(payload).hexdigest()}
++    if pub is not None:
++        from .roomid import identity_from_public_b64
++        identity_from_public_b64(pub,origin)
++        h['pub']=pub
++    return h
++
++
++def page_wire(origin,seq,genesis,epoch,blob,index,signer,*,pub=None):
++    if not isinstance(blob,bytes) or not blob or len(blob)>MAX_CHECKPOINT_BYTES:
++        raise PatchError('invalid v82 behavior checkpoint')
++    total=(len(blob)+PAGE_BYTES-1)//PAGE_BYTES
++    if total>MAX_CHECKPOINT_PAGES or type(index) is not int or not 0<=index<total:
++        raise PatchError('v82 checkpoint page index overflow')
++    payload=blob[index*PAGE_BYTES:(index+1)*PAGE_BYTES]
++    head=_head(origin,seq,genesis,epoch,payload,pub)
++    head.update(checkpoint=checkpoint_digest(blob),index=index,total=total,checkpoint_size=len(blob))
++    return _seal(head,payload,signer,CP_MAGIC,CP_DOMAIN)
++
++
++def parse_page(wire,genesis,epochs,trusted=None):
++    h,p=_open(wire,CP_MAGIC,CP_DOMAIN,genesis,epochs,trusted)
++    if (set(h)-{'origin','seq','genesis','actor_epoch','size','sha256','pub','signature',
++               'checkpoint','index','total','checkpoint_size'} or
++        not {'checkpoint','index','total','checkpoint_size','signature'}<=set(h) or
++        not _id(h['checkpoint']) or type(h['index']) is not int or
++        type(h['total']) is not int or type(h['checkpoint_size']) is not int or
++        not 1<=h['total']<=MAX_CHECKPOINT_PAGES or
++        not 0<=h['index']<h['total'] or not 0<h['checkpoint_size']<=MAX_CHECKPOINT_BYTES or
++        (h['checkpoint_size']+PAGE_BYTES-1)//PAGE_BYTES!=h['total'] or
++        len(p)!=min(PAGE_BYTES,h['checkpoint_size']-h['index']*PAGE_BYTES)):
++        raise PatchError('invalid v82 checkpoint page commitment')
++    return h,p
++
++
++def rollout_wire(origin,seq,genesis,epoch,rollout,checkpoint,signer,*,pub=None,actor_tip=None):
++    validate_rollout(rollout,max_length=4096)
++    if not _id(checkpoint):raise PatchError('missing behavior Actor checkpoint hash')
++    payload=_canonical_json(rollout)
++    head=_head(origin,seq,genesis,epoch,payload,pub)
++    head['checkpoint']=checkpoint
++    if actor_tip is not None:
++        if (not isinstance(actor_tip,list) or len(actor_tip)!=2 or type(actor_tip[0]) is not int or
++            actor_tip[0]<0 or not (actor_tip[1] is None or
++            (isinstance(actor_tip[1],list) and len(actor_tip[1])==3 and
++             isinstance(actor_tip[1][0],str) and PEER_ID.fullmatch(actor_tip[1][0]) and
++             type(actor_tip[1][1]) is int and actor_tip[1][1]>0 and _id(actor_tip[1][2])))):
++            raise PatchError('invalid v82 Actor journal cursor')
++        head['actor_tip']=actor_tip
++    return _seal(head,payload,signer,TR_MAGIC,TR_DOMAIN)
++
++
++def parse_rollout(wire,genesis,epochs,trusted=None,*,reward_mode,max_length):
++    h,p=_open(wire,TR_MAGIC,TR_DOMAIN,genesis,epochs,trusted)
++    if (set(h)-{'origin','seq','genesis','actor_epoch','size','sha256','pub','signature','checkpoint','actor_tip'} or
++        'signature' not in h or not _id(h.get('checkpoint'))):
++        raise PatchError('missing v82 authenticated behavior checkpoint commitment')
++    if 'actor_tip' in h:
++        tip=h['actor_tip']
++        if not (isinstance(tip,list) and len(tip)==2 and type(tip[0]) is int and tip[0]>=0 and
++                (tip[1] is None or (isinstance(tip[1],list) and len(tip[1])==3 and
++                isinstance(tip[1][0],str) and PEER_ID.fullmatch(tip[1][0]) and
++                type(tip[1][1]) is int and tip[1][1]>0 and _id(tip[1][2])))):
++            raise PatchError('invalid v82 signed journal cursor')
++    try:d=json.loads(p)
++    except (ValueError,UnicodeDecodeError,TypeError) as exc:raise PatchError('malformed v82 trajectory') from exc
++    validate_rollout(d,max_length=max_length,reward_mode=reward_mode)
++    return h,d
++
++
++class LohaVerifiedTrajectoryGossip(TrajectoryGossip):
++    """Fail-closed receiver of KCP82 pages and KTR82 trajectories.
++
++    Deduplicates signed pages; stores only page indices (not duplicate blobs).
++    Rebuilds an incomplete index from the durable event journal on restart.
++    """
++    def __init__(self,*args,**kwargs):
++        self.base_resolver=kwargs.pop('base_resolver',None)
++        kwargs['_lane_tag']='v82'
++        super().__init__(*args,**kwargs)
++        self.journal.db.execute('''CREATE TABLE IF NOT EXISTS v82_pages
++            (origin TEXT NOT NULL, checkpoint TEXT NOT NULL, idx INTEGER NOT NULL,
++             total INTEGER NOT NULL, checkpoint_size INTEGER NOT NULL,
++             actor_epoch TEXT NOT NULL, seq INTEGER NOT NULL,
++             PRIMARY KEY(origin,checkpoint,idx))''')
++        self.journal.db.execute('''CREATE TABLE IF NOT EXISTS v82_rollouts
++            (origin TEXT NOT NULL, seq INTEGER NOT NULL, checkpoint TEXT NOT NULL,
++             actor_epoch TEXT NOT NULL, PRIMARY KEY(origin,seq))''')
++        self.journal.db.commit()
++        self._reindex()
++
++    def _reindex(self):
++        # Rebuild orphaned index rows after a crash between EventJournal's
++        # fsynced append and v82 index commit (no cross-file transaction).
++        for origin,seq in self.journal.db.execute('''SELECT e.origin,e.seq FROM events e
++            LEFT JOIN v82_rollouts r ON e.origin=r.origin AND e.seq=r.seq
++            LEFT JOIN v82_pages p ON e.origin=p.origin AND e.seq=p.seq
++            WHERE r.seq IS NULL AND p.seq IS NULL ORDER BY e.origin,e.seq''').fetchall():
++            wire=self.journal.get(origin,seq)
++            if wire is None:raise PatchError('missing immutable v82 event archive')
++            self._index(wire,origin,seq)
++
++    def _index(self,wire,origin,seq):
++        if wire.startswith(CP_MAGIC):
++            h,_=parse_page(wire,self.genesis,self.allowed_epochs,self.trusted)
++            if (h['origin'],h['seq'])!=(origin,seq):raise PatchError('invalid v82 stored page identity')
++            prior=self.journal.db.execute('SELECT seq FROM v82_pages WHERE origin=? AND checkpoint=? AND idx=?',
++                (origin,h['checkpoint'],h['index'])).fetchone()
++            if prior is not None and prior[0]!=seq:
++                raise PatchError('conflicting behavior checkpoint page index')
++            with self.journal.db:
++                self.journal.db.execute('''INSERT OR IGNORE INTO v82_pages
++                    (origin,checkpoint,idx,total,checkpoint_size,actor_epoch,seq)
++                    VALUES(?,?,?,?,?,?,?)''',
++                    (origin,h['checkpoint'],h['index'],h['total'],h['checkpoint_size'],h['actor_epoch'],seq))
++        elif wire.startswith(TR_MAGIC):
++            h,_=parse_rollout(wire,self.genesis,self.allowed_epochs,self.trusted,
++                               reward_mode=self.reward_mode,max_length=self.max_length)
++            if (h['origin'],h['seq'])!=(origin,seq):raise PatchError('invalid v82 stored rollout identity')
++            with self.journal.db:
++                self.journal.db.execute('INSERT OR IGNORE INTO v82_rollouts(origin,seq,checkpoint,actor_epoch) VALUES(?,?,?,?)',
++                                      (origin,seq,h['checkpoint'],h['actor_epoch']))
++        else:raise PatchError('mixed v80/v82 or Actor event in v82 trajectory journal')
++
++    def local(self,rollout,*,checkpoint=None,actor_tip=None):
++        validate_rollout(rollout,max_length=self.max_length,reward_mode=self.reward_mode)
++        d=checkpoint_digest(checkpoint)
++        total=(len(checkpoint)+PAGE_BYTES-1)//PAGE_BYTES
++        frames=[]
++        existing=self.journal.db.execute('''SELECT idx,actor_epoch,total,checkpoint_size FROM v82_pages
++            WHERE origin=? AND checkpoint=?''',(self.self_id,d)).fetchall()
++        if any(e[1]!=self.actor_epoch or e[2]!=total or e[3]!=len(checkpoint) for e in existing):
++            raise PatchError('v82 checkpoint was already committed under a different Actor epoch')
++        have={e[0] for e in existing}
++        # Content addressing avoids re-shipping unchanged policies and also
++        # resumes a partially journaled checkpoint after a local crash.
++        for i in range(total):
++            if i in have:continue
++            seq=self.journal.next_seq(self.self_id)
++            wire=page_wire(self.self_id,seq,self.genesis,self.actor_epoch,checkpoint,i,self.signer,pub=self.pub)
++            if not self.journal.append(self.self_id,seq,wire):raise PatchError('duplicate local v82 checkpoint page')
++            self._index(wire,self.self_id,seq)
++            frames.append(wire)
++        seq=self.journal.next_seq(self.self_id)
++        wire=rollout_wire(self.self_id,seq,self.genesis,self.actor_epoch,rollout,d,self.signer,pub=self.pub,actor_tip=actor_tip)
++        if not self.journal.append(self.self_id,seq,wire):raise PatchError('duplicate local v82 trajectory')
++        self._index(wire,self.self_id,seq)
++        self.persist((self.self_id,seq))
++        frames.append(wire)
++        return frames
++
++    def ingest(self,wire):
++        if wire.startswith(CP_MAGIC):
++            h,_=parse_page(wire,self.genesis,self.allowed_epochs,self.trusted)
++        elif wire.startswith(TR_MAGIC):
++            h,_=parse_rollout(wire,self.genesis,self.allowed_epochs,self.trusted,
++                               reward_mode=self.reward_mode,max_length=self.max_length)
++        else:raise PatchError('v82 room rejects legacy or unsigned trajectories')
++        origin,seq=h['origin'],h['seq']
++        # Do not poison the immutable event archive with a second signed
++        # page for the same checkpoint offset at a different journal seq.
++        if wire.startswith(CP_MAGIC):
++            old=self.journal.db.execute('SELECT seq FROM v82_pages WHERE origin=? AND checkpoint=? AND idx=?',
++                (origin,h['checkpoint'],h['index'])).fetchone()
++            if old is not None and old[0]!=seq:
++                raise PatchError('conflicting behavior checkpoint page index')
++        prior=self.journal.has(origin,seq)
++        if prior:
++            if prior[0]!=hashlib.sha256(wire).hexdigest():raise PatchError('v82 event equivocation')
++            self._index(wire,origin,seq)
++            return False
++        if not self.journal.append(origin,seq,wire):raise PatchError('v82 event index race')
++        self._index(wire,origin,seq)
++        return True
++
++    def pending(self,limit=4):
++        rows=self.journal.db.execute('''SELECT r.origin,r.seq FROM v82_rollouts r
++            LEFT JOIN trajectory_applied a ON a.origin=r.origin AND a.seq=r.seq
++            WHERE a.origin IS NULL ORDER BY r.origin,r.seq LIMIT ?''',(limit,)).fetchall()
++        return [(o,s,self.journal.get(o,s)) for o,s in rows]
++
++    def _checkpoint(self,origin,checkpoint,epoch):
++        rows=self.journal.db.execute('''SELECT idx,total,checkpoint_size,actor_epoch,seq
++            FROM v82_pages WHERE origin=? AND checkpoint=? ORDER BY idx''',(origin,checkpoint)).fetchall()
++        if not rows:return None
++        total=rows[0][1];size=rows[0][2]
++        if (len(rows)<total or len(rows)>total or total>MAX_CHECKPOINT_PAGES or
++            size>MAX_CHECKPOINT_BYTES):return None
++        chunks=[]
++        for i,(idx,n,sz,ep,seq) in enumerate(rows):
++            if idx!=i or n!=total or sz!=size or ep!=epoch:
++                raise PatchError('v82 checkpoint index/epoch equivocation')
++            wire=self.journal.get(origin,seq)
++            if wire is None:raise PatchError('v82 missing archived checkpoint page')
++            h,p=parse_page(wire,self.genesis,self.allowed_epochs,self.trusted)
++            if h['checkpoint']!=checkpoint or h['index']!=i:
++                raise PatchError('v82 checkpoint page archive changed')
++            chunks.append(p)
++        blob=b''.join(chunks)
++        if len(blob)!=size or hashlib.sha256(blob).hexdigest()!=checkpoint:
++            raise PatchError('v82 behavior checkpoint digest mismatch')
++        return blob
++
++    def apply_pending(self,model,device,limit=1):
++        applied=0
++        for origin,seq,wire in self.pending(max(4,limit)):
++            if applied>=limit:break
++            if wire is None:raise PatchError('v82 missing durable trajectory')
++            head,data=parse_rollout(wire,self.genesis,self.allowed_epochs,self.trusted,
++                                    reward_mode=self.reward_mode,max_length=self.max_length)
++            blob=self._checkpoint(origin,head['checkpoint'],head['actor_epoch'])
++            if blob is None:continue  # future anti-entropy completes it; NEVER ACK
++            before=self._snapshot()
++            try:
++                checked_logps=replay_logps(model,blob,data,self.mixer.args,device,base_resolver=self.base_resolver)
++                # Use the independently RECOMPUTED mu, not the signed claim.
++                # The 2e-3 cross-backend comparison tolerance must never
++                # enter the IS estimator as a systematic log-ratio error.
++                verified=dict(data,behavior_logp=checked_logps)
++                self.mixer.train_imported_rollout(model,device,verified)
++                self.persist((origin,seq))
++            except BaseException:
++                with self.journal.db:
++                    self.journal.db.execute('''INSERT OR REPLACE INTO trajectory_state
++                        (id,tensors,digest,critic_steps) VALUES(1,?,?,?)''',before)
++                self._restore()
++                raise
++            applied+=1
++        return applied
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/tests/test_behavior_checkpoint_v81.py /mnt/data/kagami_v82_work/kagami-v82/tests/test_behavior_checkpoint_v81.py
+--- /mnt/data/kagami_v82_reference/kagami-v81/tests/test_behavior_checkpoint_v81.py	2026-10-28 07:28:12.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/tests/test_behavior_checkpoint_v81.py	2026-10-28 07:40:03.279240034 +0000
+@@ -32,7 +32,8 @@
+ def rollout(model,mix):
+     torch.manual_seed(23)
+     mix.ppo_loss(model,torch.device('cpu'))
+-    return mix.export_rollout_v80(),mix.cached['behavior_checkpoint_v81']
++    # Explicitly exercise the legacy v81 codec, which is no longer the live v82 protocol.
++    return mix.export_rollout_v80(),capture(model)
+ 
+ 
+ def finish(a,b,ma,mb):
+@@ -133,7 +134,7 @@
+     a,b,src,dst,ma,mb=peers(tmp_path)
+     try:
+         from patchlib.behavior_checkpoint_v81 import MAX_CHECKPOINT_BYTES
+-        assert spec(ma.args)['version']=='pt-sft-clipped-ppo-v81'
++        assert spec(ma.args)['version']=='pt-sft-clipped-ppo-v82'
+         assert spec(ma.args)['behavior_policy_proof'].startswith('content-addressed')
+         with pytest.raises(PatchError,match='checkpoint'):
+             a.local({'prompt':[3,4],'tokens':[5], 'behavior_logp':[-1],
+@@ -212,5 +213,6 @@
+         result=getattr(ma.args,'_v80_rollout_pending',None)
+         assert result is not None
+         sample,blob=result
+-        replay_logps(model,blob,sample,ma.args,torch.device('cpu'))
++        from patchlib.behavior_checkpoint_v82 import replay_logps as replay_v82
++        replay_v82(model,blob,sample,ma.args,torch.device('cpu'))
+     finally:finish(a,b,ma,mb)
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/tests/test_behavior_checkpoint_v82.py /mnt/data/kagami_v82_work/kagami-v82/tests/test_behavior_checkpoint_v82.py
+--- /mnt/data/kagami_v82_reference/kagami-v81/tests/test_behavior_checkpoint_v82.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/tests/test_behavior_checkpoint_v82.py	2026-10-28 07:41:50.234058564 +0000
+@@ -0,0 +1,212 @@
++"""LoHA-specific behavior distributions across diverged peer overlay states."""
++import pytest
++import torch
++from patchlib.core import PatchError, UniversalAdapter, FrozenDelta
++from patchlib.behavior_checkpoint_v82 import capture, replay_logps, temporarily_loaded
++from patchlib.trajectory_gossip_v82 import LohaVerifiedTrajectoryGossip
++from patchlib.mixed_learning_v65 import MixedObjectiveTrainer, spec
++from test_mixed_learning_v65 import SmallCausalLM, ToyTokenizer, make_args, write
++from test_trajectory_gossip_v80 import crypt
++
++
++def pair(tmp_path):
++    data=write(tmp_path,'s.jsonl',[{'prompt':'Hi','reference':'Ag'}])
++    args=make_args(tmp_path,ppo_jsonl=data,distributed_critic=True,critic_rollout_gossip=True,
++                   critic_offpolicy='trajectory_is')
++    def build():
++        torch.manual_seed(214)
++        model=SmallCausalLM()
++        adapter=UniversalAdapter(model,'toy','rev',kind='loha',rank=2,target_scope='linear')
++        return model,adapter
++    src,asrc=build();dst,adst=build()
++    ma=MixedObjectiveTrainer(args,ToyTokenizer())
++    mb=MixedObjectiveTrainer(args,ToyTokenizer())
++    sign,verify=crypt()
++    a=LohaVerifiedTrajectoryGossip(tmp_path/'a.db','a'*64,ma,'alpha',sign,
++        trusted={'alpha':verify,'beta':verify},allowed_epochs={'a'*64},actor_epoch='a'*64)
++    b=LohaVerifiedTrajectoryGossip(tmp_path/'b.db','a'*64,mb,'beta',sign,
++        trusted={'alpha':verify,'beta':verify},allowed_epochs={'a'*64},actor_epoch='a'*64)
++    return src,asrc,dst,adst,ma,mb,a,b
++
++
++def attach_history(adapter,peer,scale):
++    for g in adapter.groups:
++        parts=[torch.full_like(p,scale) for p in g.overlay.local.parts]
++        g.overlay.install(peer,parts)
++        g.overlay.anchor=FrozenDelta(g.overlay.local,[p.detach().clone()*scale for p in g.overlay.local.parts])
++
++
++def test_loha_old_actor_replays_across_peer_remote_and_anchor_divergence(tmp_path):
++    src,asrc,dst,adst,ma,mb,a,b=pair(tmp_path)
++    try:
++        attach_history(asrc,'alpha-before',.5)
++        attach_history(adst,'unrelated',.05)
++        torch.manual_seed(20)
++        ma.ppo_loss(src,torch.device('cpu'))
++        data=ma.export_rollout_v80()
++        blob=ma.cached['behavior_checkpoint_v82']
++        assert spec(ma.args)['version']=='pt-sft-clipped-ppo-v82'
++        original_params=[p.clone() for p in dst.parameters()]
++        original_overlay=[(g.overlay.anchor,g.overlay.remotes) for g in adst.groups]
++        # Sender can discard live old adapter immediately after taking rollout.
++        with torch.no_grad():
++            for p in asrc.trainable_parameters():p.add_(.1)
++        verified=replay_logps(dst,blob,data,ma.args,torch.device('cpu'))
++        assert max(abs(x-y) for x,y in zip(verified,data['behavior_logp']))<2e-3
++        assert all(torch.equal(p,was) for p,was in zip(dst.parameters(),original_params))
++        assert all((g.overlay.anchor is anchor and g.overlay.remotes is remotes)
++                   for g,(anchor,remotes) in zip(adst.groups,original_overlay))
++        frames=a.local(data,checkpoint=blob)
++        assert frames[0].startswith(b'KCP82\0')
++        assert frames[-1].startswith(b'KTR82\0')
++        for frame in reversed(frames):b.ingest(frame)
++        assert b.apply_pending(dst,torch.device('cpu'))==1
++        assert b.apply_pending(dst,torch.device('cpu'))==0
++    finally:
++        a.close();b.close();ma.close();mb.close()
++
++
++def test_loha_factor_forgery_and_missing_page_rejected(tmp_path):
++    src,asrc,dst,adst,ma,mb,a,b=pair(tmp_path)
++    try:
++        attach_history(asrc,'owner',.4)
++        torch.manual_seed(8);ma.ppo_loss(src,torch.device('cpu'))
++        data=ma.export_rollout_v80();blob=ma.cached['behavior_checkpoint_v82']
++        modified=dict(data,behavior_logp=[x-.9 for x in data['behavior_logp']])
++        frames=a.local(modified,checkpoint=blob)
++        b.ingest(frames[-1]);assert b.apply_pending(dst,torch.device('cpu'))==0
++        for frame in frames[:-1]:b.ingest(frame)
++        before=[p.clone() for p in mb.critic.parameters()]
++        with pytest.raises(PatchError,match='probabilities disagree'):
++            b.apply_pending(dst,torch.device('cpu'))
++        assert all(torch.equal(p,x) for p,x in zip(mb.critic.parameters(),before))
++    finally:a.close();b.close();ma.close();mb.close()
++
++
++def test_loha_cross_epoch_base_change_fails_closed(tmp_path):
++    src,asrc,dst,adst,ma,mb,a,b=pair(tmp_path)
++    try:
++        attach_history(asrc,'first',.2)
++        torch.manual_seed(8);ma.ppo_loss(src,torch.device('cpu'))
++        data=ma.export_rollout_v80();blob=ma.cached['behavior_checkpoint_v82']
++        with torch.no_grad():dst.emb.weight[0,0].add_(.2)
++        with pytest.raises(PatchError,match='frozen base differs'):
++            replay_logps(dst,blob,data,ma.args,torch.device('cpu'))
++    finally:a.close();b.close();ma.close();mb.close()
++
++
++def test_loha_replay_restores_state_after_exception(tmp_path):
++    src,asrc,dst,adst,ma,mb,a,b=pair(tmp_path)
++    try:
++        attach_history(asrc,'first',.1)
++        blob=capture(src)
++        old_params=[p.detach().clone() for p in dst.parameters()]
++        old_overlay=[(g.overlay.anchor if hasattr(g.overlay,'anchor') else None,
++                      g.overlay.remotes) for g in adst.groups]
++        with pytest.raises(ZeroDivisionError):
++            with temporarily_loaded(dst,blob):
++                assert all(hasattr(g.overlay,'anchor') for g in adst.groups)
++                assert all(len(g.overlay.remotes)==1 for g in adst.groups)
++                1/0
++        assert all(torch.equal(p,old) for p,old in zip(dst.parameters(),old_params))
++        assert all((getattr(g.overlay,'anchor',None) is anc and g.overlay.remotes is rem)
++                   for g,(anc,rem) in zip(adst.groups,old_overlay))
++    finally:a.close();b.close();ma.close();mb.close()
++
++
++def test_loha_checkpoint_rejects_any_old_checkpoint_layout(tmp_path):
++    src,asrc,dst,adst,ma,mb,a,b=pair(tmp_path)
++    try:
++        from patchlib.behavior_checkpoint_v81 import capture as legacy
++        # Old replay proof does not freeze remote contributions, so mixed versions
++        # are refused rather than trusted as equivalent.
++        blob=legacy(src)
++        with pytest.raises(PatchError,match='metadata'):
++            with temporarily_loaded(dst,blob):pass
++    finally:a.close();b.close();ma.close();mb.close()
++
++
++def test_loha_cross_epoch_replay_with_pinned_frozen_base_cas(tmp_path):
++    from patchlib.behavior_checkpoint_v82 import capture_frozen_base, FrozenBaseCAS
++    src,asrc,dst,adst,ma,mb,a,b=pair(tmp_path)
++    try:
++        attach_history(asrc,'older-source',.1)
++        torch.manual_seed(3);ma.ppo_loss(src,torch.device('cpu'))
++        data=ma.export_rollout_v80()
++        blob=ma.cached['behavior_checkpoint_v82']
++        hash_before,base_blob=capture_frozen_base(src)
++        store=FrozenBaseCAS(tmp_path/'historical')
++        store.put(hash_before,base_blob)
++        # Receiver has newer frozen weights and different LoHA history.
++        with torch.no_grad():
++            dst.emb.weight[0,0].add_(.23)
++            dst.head.bias[0].add_(.21)
++        attach_history(adst,'different-peer',.02)
++        before_params=[p.clone() for p in dst.parameters()]
++        before_buffers=[p.clone() for p in dst.buffers()]
++        logps=replay_logps(dst,blob,data,ma.args,torch.device('cpu'),base_resolver=store)
++        assert max(abs(x-y) for x,y in zip(logps,data['behavior_logp']))<2e-3
++        assert all(torch.equal(p,q) for p,q in zip(dst.parameters(),before_params))
++        assert all(torch.equal(p,q) for p,q in zip(dst.buffers(),before_buffers))
++        frames=a.local(data,checkpoint=blob)
++        b.base_resolver=store
++        for frame in frames:b.ingest(frame)
++        assert b.apply_pending(dst,torch.device('cpu'))==1
++        assert b.apply_pending(dst,torch.device('cpu'))==0
++    finally:a.close();b.close();ma.close();mb.close()
++
++
++def test_loha_historical_base_wrong_commitment_is_rejected(tmp_path):
++    from patchlib.behavior_checkpoint_v82 import capture_frozen_base, FrozenBaseCAS
++    src,asrc,dst,adst,ma,mb,a,b=pair(tmp_path)
++    try:
++        sha,blob=capture_frozen_base(src)
++        store=FrozenBaseCAS(tmp_path/'history')
++        with pytest.raises(PatchError,match='digest mismatch'):
++            store.put('a'*64,blob)
++        store.put(sha,blob)
++        with pytest.raises(PatchError,match='digest mismatch'):
++            store.put(sha,blob[:-1]+bytes([blob[-1]^1]))
++    finally:a.close();b.close();ma.close();mb.close()
++
++
++def test_loha_disk_virtual_base_requires_separate_certified_snapshot(tmp_path):
++    src,asrc,dst,adst,ma,mb,a,b=pair(tmp_path)
++    try:
++        src.linear._fedpara_disk_path='private-layer-cow'
++        with pytest.raises(PatchError,match='certified virtual/disk base'):
++            capture(src)
++    finally:a.close();b.close();ma.close();mb.close()
++
++
++def test_mixed_loha_lora_auto_scopes_and_heterogeneous_eval_flags(tmp_path):
++    torch.manual_seed(29)
++    model=SmallCausalLM()
++    adapter=UniversalAdapter(model,'toy','replay',kind='loha',rank=2,
++                             target_scope='auto',wide_lora_rank=2)
++    assert any(g.overlay.local.kind=='loha' for g in adapter.groups)
++    assert any(g.overlay.local.kind=='lora' for g in adapter.groups)
++    attach_history(adapter,'alpha',.2)
++    model.train();model.emb.eval()
++    old_modes=[m.training for m in model.modules()]
++    blob=capture(model)
++    # Different original model states must be restored after replay, not all train().
++    with temporarily_loaded(model,blob):
++        assert not model.training
++        assert all(not m.training for m in model.modules())
++    assert [m.training for m in model.modules()]==old_modes
++
++
++def test_loha_cli_live_mixed_training_exports_replayable_v82_checkpoint(tmp_path):
++    from patchlib.cli import run_step
++    src,asrc,dst,adst,ma,mb,a,b=pair(tmp_path)
++    try:
++        ma.args.mode='elastic';ma.args._v65_mixer=ma
++        optimizer=torch.optim.AdamW(list(asrc.trainable_parameters()),lr=.005)
++        batch={'input_ids':torch.tensor([[3,4,5]],dtype=torch.long),
++               'labels':torch.tensor([[3,4,5]],dtype=torch.long)}
++        run_step(src,asrc,optimizer,batch,ma.args)
++        data,blob=ma.args._v80_rollout_pending
++        from patchlib.behavior_checkpoint_v82 import replay_logps as verify
++        verify(dst,blob,data,ma.args,torch.device('cpu'))
++    finally:a.close();b.close();ma.close();mb.close()
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/kagami_v82_reference/kagami-v81/tests/test_trajectory_gossip_v80.py /mnt/data/kagami_v82_work/kagami-v82/tests/test_trajectory_gossip_v80.py
+--- /mnt/data/kagami_v82_reference/kagami-v81/tests/test_trajectory_gossip_v80.py	2026-10-28 07:26:02.000000000 +0000
++++ /mnt/data/kagami_v82_work/kagami-v82/tests/test_trajectory_gossip_v80.py	2026-10-28 07:40:03.279437516 +0000
+@@ -122,8 +122,8 @@
+     p=write(tmp_path,'ex.jsonl',[{'prompt':'abc','reference':'yes'}])
+     args=make_args(tmp_path,ppo_jsonl=p,distributed_critic=True,critic_rollout_gossip=True)
+     validate_args(args)
+-    assert spec(args)['critic_distribution']=='checkpoint-verified-trajectory-is-v81'
+-    assert spec(args)['version']=='pt-sft-clipped-ppo-v81'
++    assert spec(args)['critic_distribution']=='loha-complete-checkpoint-verified-trajectory-is-v82'
++    assert spec(args)['version']=='pt-sft-clipped-ppo-v82'
+     args.ppo_reward='hf_model'
+     with pytest.raises(MixedLearningError,match='reference rewards'):validate_args(args)
+     from patchlib.mix_gui_v66 import normalize, command_options

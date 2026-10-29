@@ -1,0 +1,936 @@
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/README_V77_STATUS.md ./README_V77_STATUS.md
+--- /mnt/data/work77/source-v76/kagami-v76/README_V77_STATUS.md	1970-01-01 00:00:00.000000000 +0000
++++ ./README_V77_STATUS.md	2026-10-28 03:13:53.654156206 +0000
+@@ -0,0 +1,43 @@
++# Kagami v77 — Distributed PPO Critic value-head training
++
++## Summary
++
++Opt-in `--distributed-critic` makes the PPO **value-head parameters** a second, signed, durable P2P training stream, independent of the Actor's `FPEL1` LoRA/LoHA stream. New rooms can enable it in **TRAINING → VALUE CRITIC → Critic training → P2P distributed**. Existing v76 rooms retain local-only Critic.
++
++Each PPO peer trains its Critic head with the existing PPO GAE/value loss. After AdamW steps, the **actual parameter delta** (CPU float32) is signed, committed to its separate event journal and sent over the existing authenticated WebRTC data channel. Remote peers verify the identity, model/initial-weight fingerprint, origin and sequence, payload digest, tensor shapes and finite values before adding the delta. Repeated deliveries are not applied twice. An `origin/seq` equivocation fails closed. Reconnection repairs missing per-origin sequences through bounded signed `critic-frontier` and `critic-need` controls. This is **asynchronous additive gossip**, not synchronous data-parallel SGD or averaged AdamW.
++
++For Hugging Face Critics the *pretrained scalar head* is distributed (backbone remains frozen); for local MLP and Linear critics the entire learnable local value head is shared. There is no Self-Critic reward scoring: Critic = PPO state-value estimator; Reward Model remains separate. Local AdamW optimizer moments are never transmitted. Foreign updates invalidate old PPO rollouts and reset the Critic AdamW moments to avoid carrying stale moments into the merged head.
++
++## Enabling
++
++- Create a **new** room with a PPO dataset and positive PPO loss weight. Every Critic-gossip participant currently requires a PPO dataset; PT-only peers are not yet Critic relays.
++- Choose **TRAINING → PT + SFT + PPO → VALUE CRITIC → Critic training: P2P distributed**. This setting is pinned into the room's immutable objective policy. Local-only remains the default for backward compatibility.
++- Or add `--distributed-critic` to `train-elastic` and all participating PPO peers. The independently signed Critic archive lives alongside the Actor journal as `<journal>.critic-v77.sqlite3` (and sidecar). No Critic data is included in Actor `FPEL1` events.
++- An existing local-only v76 paired checkpoint cannot be silently migrated into distributed Critic; start a new v77 room. A restart of the same v77 room replays its independently signed Critic archive from the pinned pretrained/deterministic common base.
++
++## Protocol details and safety
++
++- Wire `KVC77\0`: domain-separated signature over **all event metadata and payload SHA-256**; safetensors delta payload with 128-tensor/1 MiB uncompressed budget and 2 MiB wire cap. Identity is pinned to actor genesis, room Critic configuration, trainable shapes/dtypes, and initial tensor digest. Unsafe/unsigned Critic mode is forbidden.
++- The existing `EventJournal` is used for durable append, `origin/seq` idempotency and historical replay. This is a **separate journal** so Critic events never enter Actor epoch/rebase proof logic.
++- Only authenticated v77-capable neighbors exchange Critic events; periodic bounded frontiers request missing indexed ranges and enable late arrivals to catch up. On reception, `critic_step_lock` plus `adapter.lock` exclude simultaneous local Critic optimization and application.
++- Local signed critic updates are journaled **once** after each Critic optimizer step, but are **not** applied twice (the optimizer already modified the local head).
++- During restart, the v76 Actor replay/recovery still validates Actor events. The v77 Critic is **separately rebuilt from its pinned baseline + all signed Critic events**, not restored twice from an older paired value snapshot. Critic AdamW moments are reset on replay/foreign updates. Existing v75 paired snapshots still capture local states, but are not dual-journal atomic commits.
++- Signed Critic events record their producer's Actor journal-tip metadata, but v77 does **not** enforce that all participating Actors had the exact same tip at training time. PPO staleness is bounded by the existing v73 stale-rollout defenses; no V-trace or mathematically exact off-policy correction is claimed.
++
++## Limitations (important)
++
++1. **No automatic Critic cross-generation rebase.** `--distributed-critic` with generation-v1 committee / generation-v2 trainer is rejected explicitly rather than mixing old/new-generation value updates.
++2. **No simultaneous Actor+Critic journal transaction.** Two independently durable histories are replayed safely, but cannot recover unpublished local gradients or exactly reproduce every optimizer step after a power loss.
++3. **No per-peer privacy-preserving secure aggregation or poisoning-proof robust consensus.** Signatures detect forgery/equivocation, not a legitimately authenticated peer intentionally sending misleading finite gradients. Values are bounded per update.
++4. Only the **trainable Critic value head** participates. Fine-tuning the Hugging Face Critic backbone (LoRA/LoHA) is not implemented.
++5. Current event fanout is sparse, gossip is eventually consistent under continued connectivity, and CPU tensor arithmetic can have tiny order-dependent floating-point differences. Strict bitwise convergence at all peers is not guaranteed.
++6. No physical WAN/4,096-peer/GPU/real Hub Critic distributed training run in this environment. Tests cover real PPO gradients on a tiny PyTorch LM, signed lanes, replay, gap repair and failure cases.
++
++## Where to read
++
++- `patchlib/distributed_critic_v77.py` — wire and ledger
++- `patchlib/elasticnet.py` — WebRTC routing, anti-entropy, local step publication and epoch guard
++- `patchlib/mixed_learning_v65.py` / `patchlib/cli.py` — immutable policy and local value gradient capture
++- `patchlib/mix_gui_v66.py`, `web/desktop_webview.js`, `web/desktop_webview.html` — GUI selection
++- `tests/test_distributed_critic_v77.py` — reproductions and multi-peer convergence
++- `VALIDATION_V77.md` — exact test status
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/VALIDATION_V77.md ./VALIDATION_V77.md
+--- /mnt/data/work77/source-v76/kagami-v76/VALIDATION_V77.md	1970-01-01 00:00:00.000000000 +0000
++++ ./VALIDATION_V77.md	2026-10-28 03:13:53.654983505 +0000
+@@ -0,0 +1,15 @@
++# Kagami v77 validation
++
++- v77-specific: **7 passed** (two-peer signed value gossip, late join/missing sequence repair, idempotent delivery, tampering/mismatched base rejection, stale PPO rollout and AdamW-state reset, invalid numeric/layout rejection, immutable objective protocol, actual toy-LM PPO step → signed Critic delta → remote head application).
++- Related targeted regressions: **105 passed, 0 failed** (PPO, HF Reward/Value Critic, GUI, Actor elastic, frontier/epoch carry, v75-v76 paired recovery, etc.), run after latest functional changes. Separate final smoke rerun 39 passed.
++- `python -m compileall -q patchlib`: passed; `node --check web/desktop_webview.js`: passed.
++- Full suite: **not completed**. A direct run was terminated by execution timeout after approximately 48% of 889 collected tests with no reported failures up to that point; do not interpret this as a complete passing suite.
++- No real independent WAN peers or GPUs and no real Hub large-model runtime executed. No evidence for quantified scalability or training-quality convergence is claimed.
++
++### Manual local commands
++
++```sh
++python -m pytest -q tests/test_distributed_critic_v77.py
++python -m patchlib.cli train-elastic --help | grep distributed-critic
++node --check web/desktop_webview.js
++```
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/patchlib/cli.py ./patchlib/cli.py
+--- /mnt/data/work77/source-v76/kagami-v76/patchlib/cli.py	2026-10-27 16:12:40.000000000 +0000
++++ ./patchlib/cli.py	2026-10-28 03:05:24.131288277 +0000
+@@ -552,8 +552,18 @@
+                        for p in mixer.critic.parameters() if p.requires_grad):
+                     mixer.critic_optim.zero_grad(set_to_none=True)
+                     raise ValueError('nonfinite PPO Critic gradient; refusing optimizer update')
+-                mixer.critic_optim.step()  # critic is local; never part of signed P2P adapter
++                if getattr(args,'distributed_critic',False) and getattr(args,'mode',None)=='elastic':
++                    # CPU copy under the SAME lock as the value update. SQLite
++                    # commits and RTC fanout happen on the event loop, never
++                    # from this model-training worker thread.
++                    from .distributed_critic_v77 import critic_params
++                    before=[p.detach().float().cpu().clone() for p in critic_params(mixer)]
++                else:
++                    before=None
++                mixer.critic_optim.step()
+                 mixer.critic_steps+=1
++                if before is not None:
++                    args._v77_critic_before=before
+                 if mixer.critic_steps%10==0 and not getattr(mixer,'_v75_paired',False):
+                     mixer.save_critic()
+                 total+=float(ppo_actor.detach())*args.ppo_weight
+@@ -1094,6 +1104,7 @@
+     p.add_argument('--critic-kind',choices=('mlp','linear','hf'),default='mlp',help='PPO value critic: local MLP/Linear or pinned Hugging Face scalar value head')
+     p.add_argument('--critic-hidden',type=int,default=32,help='Local value critic hidden width (8..512)')
+     p.add_argument('--critic-lr',type=float,default=1e-3,help='Local PPO value critic learning rate')
++    p.add_argument('--distributed-critic',action='store_true',help='Opt-in independent signed P2P Critic value-head training (new room; PPO peers only)')
+     p.add_argument('--critic-hf-repo',default='',help='Pinned HF scalar value-model repo (organization/name)')
+     p.add_argument('--critic-hf-revision',default='',help='Immutable 40-hex HF value critic revision')
+     p.add_argument('--critic-hf-loader',choices=('sequence_classification','token_classification'),default='sequence_classification')
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/patchlib/distributed_critic_v77.py ./patchlib/distributed_critic_v77.py
+--- /mnt/data/work77/source-v76/kagami-v76/patchlib/distributed_critic_v77.py	1970-01-01 00:00:00.000000000 +0000
++++ ./patchlib/distributed_critic_v77.py	2026-10-28 03:10:05.529036732 +0000
+@@ -0,0 +1,288 @@
++"""Opt-in signed, durable, additive P2P gossip for PPO value heads.
++
++v77 is deliberately a SEPARATE journal/namespace from Actor FedSum. All
++critic parameters use the same pinned initial weights, signed per-step deltas
++and deterministic single-application replay. AdamW moments stay local, and are
++reset whenever foreign value updates enter the current critic.
++
++It is NOT a fully atomic multi-journal checkpoint / V-trace algorithm.
++"""
++from __future__ import annotations
++import hashlib
++import json
++import struct
++from pathlib import Path
++from collections import OrderedDict
++
++import torch
++from safetensors.torch import save as save_tensors, load as load_tensors
++from .core import PatchError, PEER_ID, _canonical_json
++from .elastic import EventJournal
++
++MAGIC=b'KVC77\0'
++MAX_EVENT=2*1024*1024
++MAX_HEAD=4096
++MAX_PARAMS=128
++MAX_TENSORS_BYTES=1024*1024
++
++
++def critic_params(mixer):
++    if mixer is None or mixer.critic is None:
++        raise PatchError('a PPO critic is required for signed value gossip')
++    p=(mixer.critic.trainable_parameters() if getattr(mixer.args,'critic_kind','mlp')=='hf'
++       else mixer.critic.parameters())
++    p=list(p)
++    if not p or len(p)>MAX_PARAMS or len({id(x) for x in p})!=len(p):
++        raise PatchError('invalid critic trainable parameter layout')
++    if any(not x.dtype.is_floating_point or x.numel()==0 for x in p):
++        raise PatchError('Critic gossip requires nonempty floating point tensors')
++    return p
++
++
++def critic_identity(mixer, actor_genesis):
++    from .paired_checkpoint_v75 import _identity
++    data={'domain':'critic-signed-additive-v77','actor_genesis':actor_genesis,
++          'critic':_identity(mixer),'architecture':[(list(x.shape),str(x.dtype)) for x in critic_params(mixer)]}
++    return hashlib.sha256(_canonical_json(data)).hexdigest()
++
++
++def pack(origin,seq,genesis,deltas,signer,public_key=None,actor_tip=None):
++    if not PEER_ID.fullmatch(origin) or type(seq) is not int or seq<1 or seq>=2**63:
++        raise PatchError('invalid critic event identity')
++    if not isinstance(genesis,str) or len(genesis)!=64:
++        raise PatchError('invalid critic genesis')
++    if not 1<=len(deltas)<=MAX_PARAMS:
++        raise PatchError('invalid critic tensor count')
++    tensors={}
++    size=0
++    for i,t in enumerate(deltas):
++        if not isinstance(t,torch.Tensor) or not t.dtype.is_floating_point or not bool(torch.isfinite(t).all()):
++            raise PatchError('nonfinite/nonfloating critic update')
++        # CPU float32 values preserve signed additive semantics independent of
++        # source BF16/FP16; on apply always round only once per incoming event.
++        val=t.detach().to('cpu',dtype=torch.float32).contiguous()
++        size+=val.numel()*val.element_size()
++        tensors[f'd.{i}']=val
++    if size>MAX_TENSORS_BYTES:
++        raise PatchError('critic event exceeds 1MiB tensor budget')
++    payload=save_tensors(tensors)
++    sha=hashlib.sha256(payload).hexdigest()
++    if not callable(signer):raise PatchError('critic gossip requires signed identity')
++    head={'origin':origin,'seq':seq,'genesis':genesis,'size':len(payload),
++          'sha256':sha}
++    if public_key is not None:
++        from .roomid import identity_from_public_b64
++        identity_from_public_b64(public_key,origin)
++        head['pub']=public_key
++    if actor_tip is not None:
++        if (not isinstance(actor_tip,list) or len(actor_tip)!=2 or
++                type(actor_tip[0]) is not int or actor_tip[0]<0):
++            raise PatchError('invalid actor lineage marker')
++        head['actor_tip']=actor_tip
++    # Domain-separated signed commitment covers all metadata + payload hash.
++    signing=b'KAGAMI-V77-CRITIC\0'+_canonical_json(head)
++    head['signature']=signer(len(signing),hashlib.sha256(signing).hexdigest())
++    raw=_canonical_json(head)
++    if len(raw)>MAX_HEAD or len(payload)+len(raw)+len(MAGIC)+4>MAX_EVENT:
++        raise PatchError('critic event too large')
++    return MAGIC+struct.pack('!I',len(raw))+raw+payload
++
++
++def unpack(wire,genesis,params,trusted=None,unsafe=False):
++    if not isinstance(wire,bytes) or not wire.startswith(MAGIC) or len(wire)>MAX_EVENT:
++        raise PatchError('bad critic wire magic/size')
++    if len(wire)<len(MAGIC)+4:
++        raise PatchError('truncated critic header')
++    hsize=struct.unpack('!I',wire[len(MAGIC):len(MAGIC)+4])[0]
++    if not 0<hsize<=MAX_HEAD or len(wire)<=len(MAGIC)+4+hsize:
++        raise PatchError('bad critic header bounds')
++    try:head=json.loads(wire[len(MAGIC)+4:len(MAGIC)+4+hsize])
++    except (ValueError,UnicodeDecodeError) as e:raise PatchError('invalid critic JSON') from e
++    payload=wire[len(MAGIC)+4+hsize:]
++    if (not isinstance(head,dict) or
++            set(head)-{'origin','seq','genesis','size','sha256','signature','pub','actor_tip'} or
++            not {'origin','seq','genesis','size','sha256','signature'}<=set(head)):
++        raise PatchError('unknown/missing critic header fields')
++    origin=head['origin'];seq=head['seq']
++    if (not isinstance(origin,str) or not PEER_ID.fullmatch(origin) or
++            type(seq) is not int or not 1<=seq<2**63 or head['genesis']!=genesis or
++            type(head['size']) is not int or head['size']!=len(payload) or
++            not isinstance(head['sha256'],str) or len(head['sha256'])!=64 or
++            hashlib.sha256(payload).hexdigest()!=head['sha256']):
++        raise PatchError('critic payload identity/genesis/checksum mismatch')
++    if 'actor_tip' in head:
++        tip=head['actor_tip']
++        if (not isinstance(tip,list) or len(tip)!=2 or
++                type(tip[0]) is not int or not 0<=tip[0]<2**63 or
++                not (tip[1] is None or (isinstance(tip[1],list) and len(tip[1])==3
++                     and isinstance(tip[1][0],str) and isinstance(tip[1][2],str)))):
++            raise PatchError('invalid critic actor lineage')
++    if not unsafe:
++        if 'pub' in head:
++            from .roomid import identity_from_public_b64
++            verify=identity_from_public_b64(head['pub'],origin)
++        else:
++            verify=(trusted or {}).get(origin)
++        if verify is None:raise PatchError('untrusted Critic origin')
++        bare={k:v for k,v in head.items() if k!='signature'}
++        signing=b'KAGAMI-V77-CRITIC\0'+_canonical_json(bare)
++        verify({'size':len(signing),'sha256':hashlib.sha256(signing).hexdigest(),
++                'sig':head['signature']})
++    try:tensors=load_tensors(payload)
++    except Exception as e:raise PatchError('invalid critic safetensors') from e
++    if len(tensors)!=len(params) or set(tensors)!={f'd.{i}' for i in range(len(params))}:
++        raise PatchError('critic parameter count mismatch')
++    result=[]
++    for i,p in enumerate(params):
++        val=tensors[f'd.{i}']
++        if (val.shape!=p.shape or val.dtype!=torch.float32 or
++                not bool(torch.isfinite(val).all())):
++            raise PatchError('critic delta shape, dtype or finite check failed')
++        if val.numel()>0 and float(val.abs().max())>10:
++            raise PatchError('excessive critic delta magnitude')
++        result.append(val)
++    return origin,seq,result
++
++
++class CriticGossip:
++    """One writer per peer, signed independent critic log + bounded gossip.
++
++    The caller MUST begin with a common base value head, then replay. The
++    receiving thread must serialize with local training on the actor lock.
++    """
++    def __init__(self, path, actor_genesis, mixer, self_id, *, signer, public_key=None,
++                 trusted=None, unsafe=False, max_bytes=2*1024**3, lock=None, baseline=None):
++        if signer is None and not unsafe:raise PatchError('Critic P2P requires a signer')
++        self.mixer=mixer
++        self.params=critic_params(mixer)
++        self._original=[x.detach().to('cpu').clone() for x in (baseline if baseline is not None else self.params)]
++        if len(self._original)!=len(self.params) or any(a.shape!=b.shape or a.dtype!=b.dtype for a,b in zip(self._original,self.params)):
++            raise PatchError('critic baseline layout mismatch')
++        self._initial_hash=self.base_digest()
++        self.genesis=hashlib.sha256((critic_identity(mixer,actor_genesis)+self._initial_hash).encode('ascii')).hexdigest()
++        self.journal=EventJournal(Path(path),self.genesis,max_bytes=max_bytes)
++        self.self_id=self_id
++        self.signer=signer
++        self.public_key=public_key
++        self.trusted=trusted or {}
++        self.unsafe=unsafe
++        self.lock=lock
++        self._applied=set()
++        self._baseline=[p.detach().clone() for p in self._original]
++        try:
++            self._install_base_hash()
++            self.replay()
++        except BaseException:
++            self.journal.close()
++            raise
++
++    def base_digest(self):
++        h=hashlib.sha256()
++        for p in self._original:
++            t=p.to(torch.float32).contiguous()
++            h.update(str(tuple(t.shape)).encode());h.update(memoryview(t.reshape(-1).view(torch.uint8).numpy()))
++        return h.hexdigest()
++
++    def _install_base_hash(self):
++        row=self.journal.db.execute("SELECT value FROM meta WHERE name='critic_initial_sha'").fetchone()
++        if row and row[0]!=self._initial_hash:
++            raise PatchError('different initial Critic head for the same signed journal')
++        with self.journal.db:
++            self.journal.db.execute("INSERT OR IGNORE INTO meta(name,value) VALUES('critic_initial_sha',?)",(self._initial_hash,))
++
++    def _apply(self,values):
++        # Verify entire resulting state before mutating ANY parameter.
++        proposal=[]
++        for p,d in zip(self.params,values):
++            value=p.detach().float()+d.to(p.device)
++            if not bool(torch.isfinite(value).all()):raise PatchError('critic update overflow')
++            proposal.append(value.to(p.dtype))
++        with torch.no_grad():
++            for p,value in zip(self.params,proposal):p.copy_(value)
++
++    def replay(self):
++        # Caller supplies a NEW baseline, not a partially saved previous
++        # version. Each event is authenticated before it touches the head.
++        with torch.no_grad():
++            for p,initial in zip(self.params,self._baseline):p.copy_(initial)
++        self._applied.clear()
++        for wire in self.journal.events():
++            origin,seq,deltas=unpack(wire,self.genesis,self.params,self.trusted,self.unsafe)
++            key=(origin,seq)
++            if key in self._applied:raise PatchError('duplicate durable critic event')
++            self._apply(deltas)
++            self._applied.add(key)
++        self.reset_optimizer()
++        return len(self._applied)
++
++    def reset_optimizer(self):
++        # AdamW moments of one local gradient history do not represent a
++        # synchronized optimizer state after foreign signed deltas.
++        if self.mixer.critic_optim is not None:
++            self.mixer.critic_optim.state.clear()
++            self.mixer.critic_optim.zero_grad(set_to_none=True)
++        self.mixer.cached=None
++        self.mixer.reuses=0
++
++    def record_local(self,before,actor_tip=None):
++        if len(before)!=len(self.params):raise PatchError('critic before/after layout changed')
++        delta=[]
++        for earlier,current in zip(before,self.params):
++            if earlier.shape!=current.shape:raise PatchError('critic local parameter layout changed')
++            difference=current.detach().float().cpu()-earlier.detach().float().cpu()
++            if not bool(torch.isfinite(difference).all()):raise PatchError('nonfinite local critic update')
++            delta.append(difference)
++        seq=self.journal.next_seq(self.self_id)
++        wire=pack(self.self_id,seq,self.genesis,delta,self.signer,self.public_key,actor_tip)
++        # Already applied by local optimizer; commit ONLY, never reapply.
++        if not self.journal.append(self.self_id,seq,wire):
++            raise PatchError('duplicate local critic update')
++        self._applied.add((self.self_id,seq))
++        return wire
++
++    def ingest(self,wire):
++        origin,seq,delta=unpack(wire,self.genesis,self.params,self.trusted,self.unsafe)
++        key=(origin,seq)
++        if key in self._applied:
++            found=self.journal.has(origin,seq)
++            if not found or found[0]!=hashlib.sha256(wire).hexdigest():
++                raise PatchError('critic equivocation')
++            return False
++        # Durable before apply, so interruption permits clean baseline replay.
++        self.journal.append(origin,seq,wire)
++        self._apply(delta)
++        self._applied.add(key)
++        if origin!=self.self_id:self.reset_optimizer()
++        return True
++
++    def need(self,heads,limit=16):
++        if not isinstance(heads,list) or len(heads)>128:raise PatchError('invalid critic frontier')
++        result=[]
++        for item in heads:
++            if (not isinstance(item,list) or len(item)!=2 or
++                    not isinstance(item[0],str) or not PEER_ID.fullmatch(item[0]) or
++                    type(item[1]) is not int or not 1<=item[1]<2**63):
++                raise PatchError('malformed critic frontier')
++            # Request missing *gaps*, not merely the new maximum.
++            count,local=self.journal.db.execute('SELECT COUNT(*),COALESCE(MAX(seq),0) FROM events WHERE origin=?',(item[0],)).fetchone()
++            if count==local:
++                first=int(local)+1
++            else:
++                # First missing ordinal: COUNT(ids<=mid)==mid exactly when
++                # the entire 1..mid prefix exists. Indexed binary search.
++                low,high=1,int(local)
++                while low<high:
++                    mid=(low+high)//2
++                    present=self.journal.db.execute('SELECT COUNT(*) FROM events WHERE origin=? AND seq<=?',(item[0],mid)).fetchone()[0]
++                    if present==mid:low=mid+1
++                    else:high=mid
++                first=low
++
++            last=min(int(item[1]),first+63)
++            if first>last:continue
++            for key in self.journal.missing_range(item[0],first,last):
++                result.append(key)
++                if len(result)>=limit:return result
++        return result
++
++    def close(self):self.journal.close()
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/patchlib/elasticnet.py ./patchlib/elasticnet.py
+--- /mnt/data/work77/source-v76/kagami-v76/patchlib/elasticnet.py	2026-10-28 02:34:24.000000000 +0000
++++ ./patchlib/elasticnet.py	2026-10-28 03:12:32.451516095 +0000
+@@ -330,6 +330,9 @@
+         self.remote_genesis = None
+         self.bridge_only = False
+         self.remote_supports_generation = False
++        self.remote_supports_critic = False
++        self.last_critic_frontier = 0.0
++        self.critic_frontier_offset = 0
+         self.counter = 0
+         self.remote_counter = -1
+         self.ready = False
+@@ -418,7 +421,7 @@
+                 'generation-carry-offer','generation-carry-need','generation-carry-chunk'):
+             return False  # A signed v1 update must never cross epochs.
+         if kind != 'hello' and not self.hello_sent:
+-            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation,
++            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, critic_v77=True,
+                     **({'generation_root':self.generation_root} if self.generation_root else {}),
+                     **({'pub':self.public_key} if self.public_key else {})):
+                 return False
+@@ -816,6 +819,7 @@
+                         self.hello_received=True
+                         # Capability negotiation preserves compatibility with
+                         # older v3 peers that do not understand 'frontier'.
++                        self.remote_supports_critic = decoded.get('critic_v77') is True
+                         self.remote_supports_frontier = decoded.get('frontier_v1') is True
+                         self.remote_supports_aggregate = decoded.get('aggregate_v1') is True
+                         self.remote_supports_snapshot_pages = decoded.get('snapshot_tip_pages_v1') is True
+@@ -909,7 +913,7 @@
+                         # requests retried). Closing an authenticated DTLS
+                         # link because its small control queue is temporarily
+                         # full creates a reconnect storm under 8+ peers.
+-                        if decoded.get('type') in ('heartbeat','inventory','hello-ack','hello','snapshot-request','snapshot-status','epoch-v2-wire'):
++                        if decoded.get('type') in ('heartbeat','inventory','hello-ack','hello','snapshot-request','snapshot-status','epoch-v2-wire','critic-frontier'):
+                             self.backpressure_drops+=1
+                             return
+                         # Snapshot controls are NOT silently dropped. A fresh
+@@ -1070,7 +1074,7 @@
+     return result
+ 
+ 
+-async def run_step_offloop(run_step, model, adapter, optimizer, batch_iter, args):
++async def run_step_offloop(run_step, model, adapter, optimizer, batch_iter, args, *, supplied_batch=None):
+     """Run both dataset fetch and optimization off the WebRTC event loop.
+ 
+     Remote Parquet streaming legitimately issues repeated HTTP 302/206 requests.
+@@ -1083,7 +1087,7 @@
+     started=stage['since']
+     def worker():
+         try:
+-            batch=next(batch_iter)
++            batch=next(batch_iter) if supplied_batch is None else supplied_batch
+         except StopIteration as exc:
+             raise RuntimeError('training dataset exhausted; configure repetition or finite rounds') from exc
+         fetched=time.monotonic()
+@@ -1326,6 +1330,10 @@
+     # The active event genesis, by contrast, changes with each certificate.
+     # NEVER open the genesis journal after a durable successor pointer exists.
+     root_genesis=genesis
++    if getattr(args,'distributed_critic',False) and (getattr(args,'generation_v1_committee',None)
++        or getattr(args,'generation_v2_trainer',False)
++        or getattr(args,'generation_v2_propose_every',0)):
++        raise PatchError('v77 distributed Critic has no cross-generation signed Critic rebasing yet; disable generation auto-adoption')
+     epoch_dir=Path(str(args.journal)+'.live-epoch')
+     epoch_boot=None
+     if (getattr(args,'generation_v2_trainer',False) or
+@@ -1612,6 +1620,35 @@
+         # provided this optional path; CLI elastic rooms get a private one.
+         args.critic_state_dir=Path(str(journal.path)+'.critic')
+     args._v75_paired_active=_v75_paired_active
++    # v77: every Critic participant starts from an identical room-pinned
++    # value-head baseline; the separate signed Critic journal is authoritative.
++    # The original v75 paired file may restore local optimizer state, but the
++    # Critic head is reconstructed from its OWN journal after that restore.
++    critic_gossip=None
++    critic_baseline=None
++    distributed_critic=bool(getattr(args,'distributed_critic',False))
++    critic_journal_path=Path(str(args.journal)+'.critic-v77.sqlite3')
++    if distributed_critic:
++        from .mixed_learning_v65 import build as _v77_build_mixer
++        from .distributed_critic_v77 import critic_params as _v77_params
++        import torch as _v77_torch
++        args._v75_skip_legacy_critic=True
++        try:
++            with _v77_torch.random.fork_rng(devices=[]):
++                _v77_torch.manual_seed(int(genesis[:16],16) % (2**63-1))
++                initial_mixer=_v77_build_mixer(args)
++        finally:
++            args._v75_skip_legacy_critic=False
++        if initial_mixer is None or initial_mixer.critic is None:
++            raise PatchError('distributed Critic requires an active PPO dataset')
++        critic_baseline=[p.detach().cpu().clone() for p in _v77_params(initial_mixer)]
++        # Disallow silently upgrading a local-only v76 pair: unpublished
++        # local value steps have no signed journal to reconstruct from.
++        if paired_path(journal).exists() and not critic_journal_path.exists():
++            initial_mixer.close()
++            raise PatchError('cannot adopt an old local-only Critic checkpoint in place; start a new v77 room')
++        args._v65_mixer=initial_mixer
++        args._v65_mixer_adapter=adapter
+     paired_saver=AsyncPairedSaver()
+     paired_exists=paired_path(journal).exists()
+     if paired_exists and not _v75_paired_active:
+@@ -1622,7 +1659,7 @@
+         from .mixed_learning_v65 import build as _v75_build_mixer
+         args._v75_skip_legacy_critic=True
+         try:
+-            pair_mixer=_v75_build_mixer(args)
++            pair_mixer=(initial_mixer if distributed_critic else _v75_build_mixer(args))
+             if pair_mixer is None or pair_mixer.critic is None:
+                 raise PatchError('paired v75 checkpoint requires a local PPO Critic')
+             pair_mixer._v75_paired=True
+@@ -1647,6 +1684,19 @@
+             args._v75_skip_legacy_critic=False
+     else:
+         restored_steps=restore_working(journal,adapter,optimizer)
++    if distributed_critic:
++        from .distributed_critic_v77 import CriticGossip
++        # Actor replay has already verified the signed genesis and events.
++        # The Critic baseline is the same pinned HF value head or deterministic
++        # seeded MLP head on every participant.
++        critic_gossip=CriticGossip(critic_journal_path,genesis,args._v65_mixer,
++            args.peer_id,signer=signer,public_key=room_pub if room_only else None,
++            trusted=trusted,unsafe=False,max_bytes=args.max_journal_gb*1024**3,
++            baseline=critic_baseline,lock=adapter.lock)
++        args._v65_mixer._v75_paired=_v75_paired_active
++        print('DISTRIBUTED CRITIC active signed_events='
++              f'{critic_gossip.journal.count()} lane={critic_gossip.genesis[:16]}',flush=True)
++    critic_step_lock=asyncio.Lock()
+     working_saver=AsyncWorkingSaver()
+     if restored_steps:
+         print(f'elastic restored unfinished local block: {restored_steps} steps and AdamW state',flush=True)
+@@ -2104,6 +2154,23 @@
+ 
+     async def read_peer_events():
+         maybe_start_generation_bridge()
++        if critic_gossip is not None:
++            now=loop.time()
++            for ps in slots.values():
++                nd=ps.node
++                if (nd is None or nd.bridge_only or not nd.verified_at or
++                        not nd.remote_supports_critic or now<nd.last_critic_frontier+2.0):
++                    continue
++                heads=critic_gossip.journal.frontiers()
++                # Bound controls even in a room with thousands of origins.
++                if heads:
++                    k=nd.critic_frontier_offset%len(heads)
++                    page=(heads[k:]+heads[:k])[:32]
++                    if nd.control('critic-frontier',heads=page):
++                        nd.critic_frontier_offset=(k+len(page))%len(heads)
++                        nd.last_critic_frontier=now
++                else:
++                    nd.last_critic_frontier=now
+         for slot in list(slots.values()):
+             node=slot.node
+             if node is None or slot.disabled: continue
+@@ -2244,6 +2311,25 @@
+                     snapshot_tips[slot.peer]=(digest,tip,count,cutoffs)
+                     node.latest_snapshot_tip_counter=msg['counter']
+                     print(f'SNAPSHOT TIP peer={slot.peer} events={count}',flush=True)
++                elif typ == 'critic-frontier':
++                    if critic_gossip is not None and node.remote_supports_critic:
++                        needed=critic_gossip.need(msg.get('heads'),limit=16)
++                        if needed:
++                            node.control('critic-need',events=[list(x) for x in needed])
++                elif typ == 'critic-need':
++                    if critic_gossip is not None and node.remote_supports_critic:
++                        requests=msg.get('events')
++                        if not isinstance(requests,list) or len(requests)>16:
++                            raise PatchError('invalid critic need list')
++                        from .core import PEER_ID as _v77_PEER_ID
++                        for entry in requests:
++                            if (not isinstance(entry,list) or len(entry)!=2 or
++                                not isinstance(entry[0],str) or not _v77_PEER_ID.fullmatch(entry[0]) or
++                                type(entry[1]) is not int or not 1<=entry[1]<2**63):
++                                raise PatchError('invalid critic need identity')
++                            wire=critic_gossip.journal.get(*entry)
++                            if wire is not None and not node.outgoing.full():
++                                node.outgoing.put_nowait(wire)
+                 elif typ in ('hello-ack','heartbeat'):
+                     if controller is not None:
+                         controller.observe(slot.peer,msg.get('cap'))
+@@ -2257,6 +2343,22 @@
+                 wire=node.incoming.get_nowait()
+                 if not isinstance(wire,bytes):
+                     raise PatchError('nonbinary elastic event')
++                if wire.startswith(b'KVC77\0'):
++                    if critic_gossip is None or not node.remote_supports_critic:
++                        raise PatchError('unexpected signed Critic frame in a non-v77 room')
++                    async with critic_step_lock:
++                        with adapter.lock:
++                            applied=critic_gossip.ingest(wire)
++                    if applied:
++                        # Relay on the same bounded RTC queues. A missed
++                        # broadcast is recovered via critic-frontier/need.
++                        for ps in slots.values():
++                            other=ps.node
++                            if (ps.peer!=slot.peer and other is not None and
++                                    other.remote_supports_critic and other.verified_at and
++                                    not other.outgoing.full() and not other.bridge_only):
++                                other.outgoing.put_nowait(wire)
++                    continue
+                 if not inbound_pipeline.submit(slot.peer,wire):
+                     # The byte budget can reject an item even while the
+                     # queue has free *slots*. Retain its exact signed bytes
+@@ -3325,7 +3427,34 @@
+             # iteration. Never run another step after reaching the event cap.
+             if args.rounds and emitted >= args.rounds:
+                 break
+-            loss=await run_step_offloop(run_step,model,adapter,optimizer,batch_iter,args)
++            if critic_gossip is not None:
++                # Prevent network ingestion between the local Critic optimizer
++                # step and durable commit of its signed delta.
++                # Fetch slow HF streaming rows OUTSIDE the Critic publication
++                # fence; authenticated value traffic must remain responsive
++                # while the remote data provider is slow.
++                def _fetch_v77_batch():
++                    try:
++                        return next(batch_iter)
++                    except StopIteration as exc:
++                        raise RuntimeError('training dataset exhausted before distributed Critic step') from exc
++                batch=await asyncio.to_thread(_fetch_v77_batch)
++                async with critic_step_lock:
++                    loss=await run_step_offloop(run_step,model,adapter,optimizer,batch_iter,args,
++                                                supplied_batch=batch)
++                    before=getattr(args,'_v77_critic_before',None)
++                    args._v77_critic_before=None
++                    if before is not None:
++                        from .localprogress import _tip
++                        with adapter.lock:
++                            critic_wire=critic_gossip.record_local(before,actor_tip=_tip(journal))
++                        for ps in slots.values():
++                            nd=ps.node
++                            if (nd is not None and nd.remote_supports_critic and
++                                    nd.verified_at and not nd.outgoing.full() and not nd.bridge_only):
++                                nd.outgoing.put_nowait(critic_wire)
++            else:
++                loss=await run_step_offloop(run_step,model,adapter,optimizer,batch_iter,args)
+             local_steps+=1; pending[0]+=1; recent_loss=loss
+             total_steps+=1
+             record_telemetry()
+@@ -3486,6 +3615,7 @@
+         if generation_compact_control is not None:generation_compact_control.close()
+         if generation_compact_ledger is not None:generation_compact_ledger.close()
+         if carry_relay is not None:carry_relay.close()
++        if critic_gossip is not None:critic_gossip.close()
+         journal.close()
+         if hasattr(optimizer,'close'):optimizer.close()
+         # An abandoned shadow should not hold an SSD optimizer allocation.
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/patchlib/mix_gui_v66.py ./patchlib/mix_gui_v66.py
+--- /mnt/data/work77/source-v76/kagami-v76/patchlib/mix_gui_v66.py	2026-10-27 15:36:14.000000000 +0000
++++ ./patchlib/mix_gui_v66.py	2026-10-28 03:05:24.131692363 +0000
+@@ -11,8 +11,8 @@
+ from types import SimpleNamespace
+ import secrets
+ 
+-FIELDS=('sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'critic_hf_repo', 'critic_hf_revision', 'critic_hf_loader', 'critic_hf_device', 'critic_hf_max_length', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_idle_offload', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
+-DEFAULT={'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'critic_hf_repo': '', 'critic_hf_revision': '', 'critic_hf_loader': 'sequence_classification', 'critic_hf_device': 'cpu', 'critic_hf_max_length': 512, 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_idle_offload': False, 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
++FIELDS=('distributed_critic', 'sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'critic_hf_repo', 'critic_hf_revision', 'critic_hf_loader', 'critic_hf_device', 'critic_hf_max_length', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_idle_offload', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
++DEFAULT={'distributed_critic': False, 'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'critic_hf_repo': '', 'critic_hf_revision': '', 'critic_hf_loader': 'sequence_classification', 'critic_hf_device': 'cpu', 'critic_hf_max_length': 512, 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_idle_offload': False, 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
+ 
+ 
+ def _path(value, *, ext, role=None, hf_reward=False):
+@@ -73,6 +73,7 @@
+         raise ValueError('Unsupported critic or PPO reward type')
+     if type(values['reward_model_idle_offload']) is not bool:
+         raise ValueError('Reward idle offload must be a boolean')
++    if type(values['distributed_critic']) is not bool:raise ValueError('distributed_critic must be boolean')
+     if values['ppo_reward']=='hf_model':
+         from .reward_model_v67 import reward_spec
+         reward_spec(SimpleNamespace(**values))
+@@ -110,6 +111,7 @@
+             '--critic-hidden',str(values['critic_hidden']),
+             '--critic-lr',str(values['critic_lr']),
+             '--critic-state-dir',str(state_dir)]
++    if values['distributed_critic']:result.append('--distributed-critic')
+     if values['critic_kind']=='hf':
+         for key,flag in (('critic_hf_repo','--critic-hf-repo'),
+                          ('critic_hf_revision','--critic-hf-revision'),
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/patchlib/mixed_learning_v65.py ./patchlib/mixed_learning_v65.py
+--- /mnt/data/work77/source-v76/kagami-v76/patchlib/mixed_learning_v65.py	2026-10-27 15:58:24.000000000 +0000
++++ ./patchlib/mixed_learning_v65.py	2026-10-28 03:05:24.131555531 +0000
+@@ -69,6 +69,9 @@
+             from .hf_value_critic_v69 import critic_spec
+             generated['version']='pt-sft-clipped-ppo-v69'
+             generated['critic']['hf']=critic_spec(args)
++    if getattr(args,'distributed_critic',False):
++        generated['critic_distribution']='signed-value-head-gossip-v77'
++        generated['version']='pt-sft-clipped-ppo-v77'
+     if not getattr(args,'mix_policy',None):
+         return generated
+     path=Path(args.mix_policy)
+@@ -97,6 +100,13 @@
+ def validate_args(args):
+     if not enabled(args) and not getattr(args,'mix_policy',None):
+         return
++    if getattr(args,'distributed_critic',False):
++        if not source_selected(args,'ppo') or float(getattr(args,'ppo_weight',.2))<=0:
++            raise MixedLearningError('distributed Critic v77 currently needs a PPO dataset on every Critic participant')
++        if getattr(args,'critic_init',None):
++            raise MixedLearningError('distributed Critic requires a common pinned initial head; --critic-init is local-only')
++        if getattr(args,'unsafe_unsigned',False):
++            raise MixedLearningError('distributed Critic requires signed authenticated peers')
+     if getattr(args,'ppo_kv_cache','auto') not in ('auto','off'):
+         raise MixedLearningError('ppo_kv_cache must be auto or off')
+     if getattr(args,'hf_task','causal-lm') != 'causal-lm':
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/tests/test_distributed_critic_v77.py ./tests/test_distributed_critic_v77.py
+--- /mnt/data/work77/source-v76/kagami-v76/tests/test_distributed_critic_v77.py	1970-01-01 00:00:00.000000000 +0000
++++ ./tests/test_distributed_critic_v77.py	2026-10-28 03:10:05.699907824 +0000
+@@ -0,0 +1,188 @@
++"""Signed distributed value-head convergence/replay/Byzantine-input tests."""
++from pathlib import Path
++from types import SimpleNamespace
++import torch
++import pytest
++from patchlib.core import PatchError
++from patchlib.distributed_critic_v77 import CriticGossip, pack, unpack, critic_params
++from patchlib.mixed_learning_v65 import LocalValueHead
++
++
++def peer(tmp_path, name, genesis, peers=('alpha','beta','gamma'), kind='linear'):
++    torch.manual_seed(177)
++    critic=LocalValueHead(kind,32)
++    mixer=SimpleNamespace(critic=critic,critic_optim=torch.optim.AdamW(critic.parameters(),lr=.01),
++        args=SimpleNamespace(critic_kind=kind,critic_hidden=32),
++        _critic_identity='shared-room-id',cached=None,reuses=0)
++    def sign(n,d):return 'sig:'+d
++    def verify(info):
++        if info['sig']!='sig:'+info['sha256']:raise PatchError('bad signature')
++    lane=CriticGossip(tmp_path/(name+'.sqlite3'),genesis,mixer,name,signer=sign,
++                     trusted={p:verify for p in peers})
++    return lane
++
++
++def weights(lane):return [p.detach().clone() for p in lane.params]
++
++def update(lane, amount=.01):
++    before=weights(lane)
++    with torch.no_grad():
++        for p in lane.params:p.add_(amount)
++    return lane.record_local(before,actor_tip=[0,None])
++
++
++def test_signed_critic_two_peer_gossip_and_replay(tmp_path):
++    a=peer(tmp_path,'alpha','a'*64);b=peer(tmp_path,'beta','a'*64)
++    try:
++        ab=update(a,.01)
++        assert b.ingest(ab)
++        assert not b.ingest(ab)
++        assert [torch.equal(x,y) for x,y in zip(weights(a),weights(b))]==[True]*len(a.params)
++        ba=update(b,.02)
++        assert a.ingest(ba)
++        for x,y in zip(weights(a),weights(b)):assert torch.allclose(x,y,atol=1e-6)
++        expected=weights(a)
++    finally:
++        a.close();b.close()
++    a2=peer(tmp_path,'alpha','a'*64)
++    try:
++        assert a2.journal.count()==2
++        for x,y in zip(weights(a2),expected):assert torch.allclose(x,y,atol=1e-6)
++    finally:a2.close()
++
++
++def test_late_join_gap_repair_and_duplicate(tmp_path):
++    a=peer(tmp_path,'alpha','b'*64);b=peer(tmp_path,'beta','b'*64)
++    try:
++        wires=[update(a,.001) for _ in range(10)]
++        assert b.ingest(wires[-1])
++        assert b.need(a.journal.frontiers())[:3]==[('alpha',1),('alpha',2),('alpha',3)]
++        for ident in b.need(a.journal.frontiers(),limit=16):
++            assert b.ingest(a.journal.get(*ident))
++        assert not b.need(a.journal.frontiers())
++        for x,y in zip(weights(a),weights(b)):
++            assert torch.allclose(x,y,atol=1e-6)
++    finally:a.close();b.close()
++
++
++def test_tamper_wrong_identity_and_wrong_base(tmp_path):
++    a=peer(tmp_path,'alpha','c'*64);b=peer(tmp_path,'beta','c'*64)
++    try:
++        wire=update(a,.001)
++        before=weights(b)
++        bad=bytearray(wire);bad[-1]^=1
++        with pytest.raises(PatchError):b.ingest(bytes(bad))
++        for x,y in zip(before,weights(b)):assert torch.equal(x,y)
++        with pytest.raises(PatchError):unpack(wire,'d'*64,b.params,b.trusted)
++        with pytest.raises(PatchError):unpack(wire,b.genesis,b.params,{'alpha':lambda info:(_ for _ in ()).throw(PatchError('not trusted'))})
++    finally:a.close();b.close()
++    # Different deterministic initial weights: cannot accidentally join same lane.
++    torch.manual_seed(999)
++    actor=LocalValueHead('linear',32)
++    mixer=SimpleNamespace(critic=actor,critic_optim=torch.optim.AdamW(actor.parameters()),
++        args=SimpleNamespace(critic_kind='linear',critic_hidden=32),
++        _critic_identity='shared-room-id',cached=None,reuses=0)
++    with pytest.raises((PatchError,ValueError)):
++        lane=CriticGossip(tmp_path/'alpha.sqlite3','c'*64,mixer,'alpha',signer=lambda n,d:'sig:'+d)
++        lane.close()
++
++
++def test_foreign_update_resets_stale_moments_and_rollout(tmp_path):
++    a=peer(tmp_path,'alpha','d'*64);b=peer(tmp_path,'beta','d'*64)
++    try:
++        b.mixer.critic_optim.state[b.params[0]]={'step':torch.tensor(1.)}
++        b.mixer.cached={'stale':1};b.mixer.reuses=3
++        assert b.ingest(update(a,.01))
++        assert not b.mixer.critic_optim.state
++        assert b.mixer.cached is None and b.mixer.reuses==0
++    finally:a.close();b.close()
++
++
++def test_nonfinite_overlarge_and_layout_rejected(tmp_path):
++    a=peer(tmp_path,'alpha','e'*64)
++    try:
++        n=len(a.params)
++        zeros=[torch.zeros_like(p) for p in a.params]
++        with pytest.raises(PatchError):pack('alpha',1,a.genesis,[torch.full_like(x,float('nan')) for x in zeros],a.signer)
++        with pytest.raises(PatchError):a.ingest(pack('alpha',1,a.genesis,[torch.full_like(x,11) for x in zeros],a.signer))
++        wire=pack('alpha',1,a.genesis,[torch.zeros(2) for _ in range(n)],a.signer)
++        with pytest.raises(PatchError):a.ingest(wire)
++    finally:a.close()
++
++
++def test_critics_are_protocol_pinned_and_local_paths_not_shared(tmp_path):
++    from patchlib.mixed_learning_v65 import spec, validate_args, MixedLearningError
++    ds=tmp_path/'examples.jsonl'
++    ds.write_text('{"prompt":"Q","reference":"A"}\n')
++    opts=SimpleNamespace(ppo_jsonl=ds,sft_jsonl=None,distributed_critic=True,
++        ppo_weight=.2,pt_weight=1.,sft_weight=1.,hf_task='causal-lm',
++        loss_policy='auto',ppo_clip=.2,ppo_kl_coef=.02,ppo_value_coef=.5,
++        ppo_gamma=.99,ppo_gae_lambda=.95,ppo_max_tokens=8,ppo_reuse=2,
++        max_length=128,critic_kind='linear',critic_hidden=32,critic_lr=.001,
++        ppo_reward='token_match')
++    validate_args(opts)
++    policy=spec(opts)
++    assert policy['version']=='pt-sft-clipped-ppo-v77'
++    assert policy['critic_distribution']=='signed-value-head-gossip-v77'
++    assert str(ds) not in str(policy)
++    opts.distributed_critic=False
++    assert spec(opts)!=policy
++    opts.distributed_critic=True;opts.critic_init=tmp_path/'local.safetensors'
++    with pytest.raises(MixedLearningError,match='common pinned'):
++        validate_args(opts)
++
++
++def test_real_ppo_step_seals_critic_update_and_remote_receives(tmp_path):
++    from patchlib.cli import run_step
++    from patchlib.core import UniversalAdapter
++    from patchlib.mixed_learning_v65 import MixedObjectiveTrainer
++    from torch import nn
++    class ToyTokenizer:
++        eos_token_id=2
++        def encode(self,text,add_special_tokens=False):return [3+(ord(c)%12) for c in text]
++    class Tiny(nn.Module):
++        def __init__(self):
++            super().__init__()
++            self.emb=nn.Embedding(18,12)
++            self.lin=nn.Linear(12,12)
++            self.head=nn.Linear(12,18)
++        def forward(self,input_ids,attention_mask=None):
++            return {'logits':self.head(torch.tanh(self.lin(self.emb(input_ids))))}
++    ds=tmp_path/'ppo.jsonl';ds.write_text('{"prompt":"hi","reference":"ok"}\n')
++    args=SimpleNamespace(ppo_jsonl=ds,sft_jsonl=None,distributed_critic=True,mode='elastic',
++        ppo_weight=.2,pt_weight=0.,sft_weight=0.,ppo_clip=.2,
++        ppo_kl_coef=.02,ppo_value_coef=.5,ppo_gamma=.99,ppo_gae_lambda=.95,
++        ppo_max_tokens=3,ppo_reuse=2,max_length=32,critic_kind='linear',
++        critic_hidden=32,critic_lr=.001,ppo_reward='token_match',
++        hf_task='causal-lm',loss_policy='auto',device='cpu',grad_accum=1,
++        telemetry_file=None,input_map='',batch_size=1)
++    torch.manual_seed(24)
++    model=Tiny();adapter=UniversalAdapter(model,'toy','head',kind='lora',rank=2,target_scope='linear')
++    optim=torch.optim.AdamW(list(adapter.trainable_parameters()),lr=.003)
++    mixer=MixedObjectiveTrainer(args,ToyTokenizer())
++    args._v65_mixer=mixer;args._v65_mixer_adapter=adapter
++    gen='f'*64
++    def signer(n,d):return 'signed:'+d
++    def verifier(info):
++        if info['sig']!='signed:'+info['sha256']:raise PatchError('forged')
++    def fresh_mixer():
++        return MixedObjectiveTrainer(args,ToyTokenizer())
++    first=[p.detach().clone() for p in critic_params(mixer)]
++    a=CriticGossip(tmp_path/'a.sqlite3',gen,mixer,'alpha',signer=signer,
++                   trusted={'alpha':verifier,'beta':verifier})
++    other=fresh_mixer()
++    # Same initial model for a separate PPO peer's value head.
++    with torch.no_grad():
++        for p,original in zip(critic_params(other),first):p.copy_(original)
++    b=CriticGossip(tmp_path/'b.sqlite3',gen,other,'beta',signer=signer,
++                   trusted={'alpha':verifier,'beta':verifier})
++    try:
++        result=run_step(model,adapter,optim,{},args)
++        assert result>0
++        assert len(args._v77_critic_before)==len(a.params)
++        wire=a.record_local(args._v77_critic_before)
++        assert b.ingest(wire)
++        for x,y in zip(a.params,b.params):
++            torch.testing.assert_close(x,y,atol=1e-5,rtol=1e-5)
++    finally:
++        a.close();b.close();mixer.close();other.close()
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/web/desktop_webview.html ./web/desktop_webview.html
+--- /mnt/data/work77/source-v76/kagami-v76/web/desktop_webview.html	2026-10-27 15:36:14.000000000 +0000
++++ ./web/desktop_webview.html	2026-10-28 03:07:50.511733845 +0000
+@@ -71,7 +71,7 @@
+       <label><span>Score index</span><input id="mixRewardIndex" type="number" value="0" min="0" max="65535"></label>
+       <label><span>Reward multiplier</span><input id="mixRewardScale" type="number" value="1" min="0.001" max="100" step="0.1"></label>
+       <label><span>Max input tokens</span><input id="mixRewardMaxLength" type="number" value="512" min="16" max="8192"></label></div></div>
+-      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Separate local value estimator for PPO/GAE. This is not a reward judge or part of signed model updates.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option><option value="hf">Hugging Face · pretrained Value Critic</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><div class="fieldgrid" id="mixCriticHub" hidden><label class="wide"><span>Hugging Face Value Critic</span><div class="mixed-path"><input id="mixCriticHfRepo" placeholder="organization/pretrained-scalar-value-model" spellcheck="false"><button type="button" id="mixCriticSearch">おすすめから選ぶ</button></div><select hidden id="mixCriticSearchResults" aria-label="HF Critic model search"><option value="">Search Hub for a compatible scalar value model…</option></select></label><label class="wide"><span>Immutable commit SHA</span><div class="mixed-path"><input id="mixCriticHfRevision" placeholder="40 hexadecimal characters"><button type="button" id="mixCriticPin">Pin current commit</button></div></label><label><span>Critic model type</span><select id="mixCriticHfLoader"><option value="sequence_classification">Scalar sequence classification</option><option value="token_classification">Scalar token classification</option></select></label><label><span>Critic device</span><select id="mixCriticHfDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label><label><span>Maximum Critic tokens</span><input id="mixCriticHfMaxLength" type="number" value="512" min="16" max="8192"></label><p class="footnote wide">Requires a checkpoint with an already-trained scalar value head. The backbone stays frozen; the value head learns locally. PPO state prefixes are retokenized for this Critic. The model may be substantially slower than the small local Critic.</p></div><label id="mixCriticLocalInit"><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">Critic weights and AdamW state are saved in the selected room's private local storage and reused after restart.</p></div>
++      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Independent value estimator for PPO/GAE. Optionally share its trained value-head updates over signed P2P gossip; this is never a Reward Model.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option><option value="hf">Hugging Face · pretrained Value Critic</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Critic training</span><select id="mixDistributedCritic"><option value="off">Local only · legacy</option><option value="on">P2P distributed · signed value head</option></select></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><div class="fieldgrid" id="mixCriticHub" hidden><label class="wide"><span>Hugging Face Value Critic</span><div class="mixed-path"><input id="mixCriticHfRepo" placeholder="organization/pretrained-scalar-value-model" spellcheck="false"><button type="button" id="mixCriticSearch">おすすめから選ぶ</button></div><select hidden id="mixCriticSearchResults" aria-label="HF Critic model search"><option value="">Search Hub for a compatible scalar value model…</option></select></label><label class="wide"><span>Immutable commit SHA</span><div class="mixed-path"><input id="mixCriticHfRevision" placeholder="40 hexadecimal characters"><button type="button" id="mixCriticPin">Pin current commit</button></div></label><label><span>Critic model type</span><select id="mixCriticHfLoader"><option value="sequence_classification">Scalar sequence classification</option><option value="token_classification">Scalar token classification</option></select></label><label><span>Critic device</span><select id="mixCriticHfDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label><label><span>Maximum Critic tokens</span><input id="mixCriticHfMaxLength" type="number" value="512" min="16" max="8192"></label><p class="footnote wide">Requires a checkpoint with an already-trained scalar value head. The backbone stays frozen; the value head learns locally. PPO state prefixes are retokenized for this Critic. The model may be substantially slower than the small local Critic.</p></div><label id="mixCriticLocalInit"><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">P2P mode shares signed value-head parameter updates with PPO peers. AdamW moments remain local and reset after remote merges; a new room is required. Local-only mode keeps v76 behavior.</p></div>
+       <div id="mixedConfigStatus" class="footnote" role="status">These settings apply when launching a new worker; changing a room's pinned objective protocol requires a new room.</div>
+     </div>
+   </div>
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' '--exclude=CHANGES_V77.patch' /mnt/data/work77/source-v76/kagami-v76/web/desktop_webview.js ./web/desktop_webview.js
+--- /mnt/data/work77/source-v76/kagami-v76/web/desktop_webview.js	2026-10-27 15:36:14.000000000 +0000
++++ ./web/desktop_webview.js	2026-10-28 03:07:50.512257667 +0000
+@@ -380,6 +380,7 @@
+    const raw=get(id);data[field]=mixedNumeric.has(field)?Number(raw):raw;
+    if(mixedNumeric.has(field)&&(!raw||!Number.isFinite(data[field])||(mixedInt.has(field)&&!Number.isInteger(data[field]))))throw Error('Invalid '+field);
+  }
++ data.distributed_critic=get('mixDistributedCritic')==='on';
+  data.reward_model_idle_offload=get('mixRewardIdleOffload')==='on';
+  for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){if(get('mix'+tag+'Source')==='hf')data[role+'_jsonl']='';else{for(const key of Object.keys(data))if(key.startsWith(role+'_hf_'))data[key]='';}}
+  if(!data.sft_jsonl&&!data.ppo_jsonl&&!data.sft_hf_repo&&!data.ppo_hf_repo&&data.pt_weight<=0)throw Error('Select an SFT/PPO dataset or assign a positive PT weight');
+@@ -398,7 +399,7 @@
+     reward_model_output:'logits',reward_model_format:'plain',reward_model_index:0,reward_model_scale:1,reward_model_max_length:512,critic_kind:'mlp',critic_hidden:32,critic_lr:.001,critic_hf_repo:'',critic_hf_revision:'',critic_hf_loader:'sequence_classification',critic_hf_device:'cpu',critic_hf_max_length:512};
+   const hfDefaults={sft_hf_split:'train',sft_hf_prompt_column:'prompt',sft_hf_response_column:'response',ppo_hf_split:'train',ppo_hf_prompt_column:'prompt',ppo_hf_reference_column:'reference'};
+   $(id).value=value??defaults[field]??hfDefaults[field]??'';
+- }$('mixRewardIdleOffload').value=data?.reward_model_idle_offload?'on':'off';for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){$('mix'+tag+'Source').value=data?.[role+'_hf_repo']?'hf':data?.[role+'_jsonl']?'local':'hf';}syncMixed();}
++ }$('mixDistributedCritic').value=data?.distributed_critic?'on':'off';$('mixRewardIdleOffload').value=data?.reward_model_idle_offload?'on':'off';for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){$('mix'+tag+'Source').value=data?.[role+'_hf_repo']?'hf':data?.[role+'_jsonl']?'local':'hf';}syncMixed();}
+ async function reloadMixed(room){
+  const data=await api('mixedSettings',{room});mixedPinnedPolicy=data.pinned_policy||null;
+  if(mixedPinnedPolicy&&!data.enabled){
+@@ -415,6 +416,7 @@
+      data.reward_model_output=p.reward_model.output;data.reward_model_loader=p.reward_model.loader;data.reward_model_format=p.reward_model.format;data.reward_model_index=p.reward_model.index;
+      data.reward_model_scale=p.reward_model.scale;data.reward_model_max_length=p.reward_model.max_length;
+      data.reward_model_device='cpu';}
++   data.distributed_critic=p.critic_distribution==='signed-value-head-gossip-v77';
+    if(p.critic){data.critic_kind=p.critic.kind;data.critic_hidden=p.critic.hidden;data.critic_lr=p.critic.lr; if(p.critic.hf){data.critic_hf_repo=p.critic.hf.repo;data.critic_hf_revision=p.critic.hf.revision;data.critic_hf_loader=p.critic.hf.loader;data.critic_hf_max_length=p.critic.hf.max_length;data.critic_hf_device='cpu';}}
+  }
+  applyMixed(data);
+@@ -437,6 +439,7 @@
+ }
+ $('mixEnabled').addEventListener('change',syncMixed);
+ $('mixCriticKind').addEventListener('change',syncMixed);
++$('mixDistributedCritic').addEventListener('change',syncMixed);
+ $('mixCriticSearch').addEventListener('click',safe('HF Critic Hub',()=>openHubPicker('critic',$('mixCriticSearch'))));
+ $('mixCriticSearchResults').addEventListener('change',()=>{
+  const sel=$('mixCriticSearchResults');if(!sel.value)return;

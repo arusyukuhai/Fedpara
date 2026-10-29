@@ -89,7 +89,7 @@ def test_main_load_model_full_scope_tied_embeddings_frozen(monkeypatch):
         moe_plan=None,max_state_gb=32,kind='loha',rank=16,alpha=None,max_peers=8,
         target_scope='auto',init_style='balanced',gradient_checkpointing=False)
     model,adapter=load_model(args,use_adapter=True)
-    assert args.target_scope=='gpt_neo_full'
+    assert args.target_scope=='auto'  # universal model-agnostic scope
     assert set(g.canonical for g in adapter.groups)>={'transformer.wte.weight', 'transformer.wpe.weight'}
     assert any('lm_head.weight' in g.aliases for g in adapter.groups)
     assert sum('lm_head.weight' in g.aliases for g in adapter.groups)==1

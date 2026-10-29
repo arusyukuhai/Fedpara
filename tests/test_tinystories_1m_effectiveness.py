@@ -130,10 +130,11 @@ def test_tinystories_1m_uses_disjoint_hf_splits(monkeypatch):
 
 def test_tinystories_1m_gui_defaults_and_validations(tmp_path):
     html=compose_html()
-    assert 'id="benchModel"' in html and 'id="benchDataset"' in html
-    assert 'option value="tinystories-1m" selected' in html
-    assert 'option value="tinystories" selected' in html
-    assert 'id="benchInitialization"' in html
+    # The current desktop design has one training screen, not a standalone
+    # embedded benchmark form. Benchmark input validation remains in backend.
+    assert 'id="panel-training"' in html
+    assert 'id="model"' in html
+    assert 'id="trainReinitEvery"' in html
     ctl=WebviewController(tmp_path)
     try:
         with pytest.raises(ValueError):ctl.start_benchmark({'model':'forged-model'})

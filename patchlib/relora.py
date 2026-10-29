@@ -18,6 +18,10 @@ def _refresh_spec(spec):
     """Keep Parameter identity stable; callers rebuild the optimizer separately."""
     fresh = FactorDelta(spec.shape, spec.kind, spec.rank, spec.alpha,
                         init_style=spec.init_style)
+    if len(spec.parts) != len(fresh.parts) or any(
+            tuple(param.shape) != tuple(value.shape)
+            for param, value in zip(spec.parts, fresh.parts)):
+        raise PatchError('cannot refresh incompatible mixed-rank adapter factors')
     for param, value in zip(spec.parts, fresh.parts):
         param.copy_(value.to(device=param.device, dtype=param.dtype))
         param.grad = None

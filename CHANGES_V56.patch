@@ -1,0 +1,1117 @@
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/README_V56_STATUS.md kagami-v56/README_V56_STATUS.md
+--- original55/kagami-v55/README_V56_STATUS.md	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v56/README_V56_STATUS.md	2026-10-27 02:59:55.845514825 +0000
+@@ -0,0 +1,36 @@
++# Kagami v56 — scalable epoch coordination and conservative recovery building blocks
++
++**Status (2026-10-27): partial integration, NOT end-to-end 4096-device autonomous training or a validated 300B zero-pause trainer.** All candidate generation, model changes, and deletion remain subject to independently verified checkpoint/cut and writer-fence requirements. Missing evidence fails closed.
++
++## Changes
++
++### 1. 4096-origin compact autonomous epoch certificate assembly
++
++- `patchlib/epoch_autonomous_v56.py`: durable, sparse P2P compact-candidate endorsements, on-demand authenticated Merkle frontier page requests, committee votes, quorum assembly, and recovery after disconnect. A 4096-origin frontier uses 128 pages of 32 entries. Each peer validates page proofs and **all pages** before voting. Proposals are first Ed25519-endorsed by a pinned committee exporter. Ordinary nodes may relay without forging votes.
++- `patchlib/live_generation_transport.py`: `generation-wire` carries compact candidate/page/need/vote traffic over the existing authenticated control plane. Per-neighbor queues and page requests are bounded; large existing archives are not broadcast in bulk. Old `generation-compact-head/need/certificate` anti-entropy remains.
++- `patchlib/epoch_certificate_v46.py`: verified historical certificate retrieval with explicit parent-chain checks.
++- `patchlib/elasticnet.py`: train-live instantiates the compact ledger and authenticated wire relay when the existing pinned-generation committee is enabled. **Local export verification remains disabled in this production integration** (`local_export_verified=False`): a download matching hashes is NOT sufficient to claim a model/optimizer was exported at a specific cut. A real crash-consistent live exporter and trustworthy cut receipt must be wired before the committee may self-propose/vote.
++- The committee has at most 31 pinned voters (crash-fault quorum), not 4096 voters. The test uses 4096 signed-update **origins**, not 4096 active WAN devices; not Byzantine tolerant.
++
++### 2. Multi-epoch catch-up and conservative offline-update retention
++
++- `patchlib/epoch_multihop_v56.py`: validates the signed parent chain before any transition; `MultiEpochCatchup` advances by adjacent certified epochs only, never skips missing checkpoints or carries. A bounded per-poll budget prevents an offline catch-up loop monopolizing local scheduling. Verified chain tips are cached, with each cached tip rechecked.
++- `patchlib/elasticnet.py`: prewarmed conditional auto-adoption now calls this checked one-hop catch-up gate at the step boundary, retaining the v53 carry verification and writer fence.
++- `DurableOfflineOutbox`: persists original (not rewritten) signed event bytes; same `(epoch, origin, seq)` must have identical bytes; quota is enforced using a durable SQLite trigger counter in O(1) per append. It *backpressures* on capacity, does not drop the oldest events. A removal requires a matching durable `CrossEpochCarryArchive` event, including identical bytes. **This new outbox is an available component; production train-live does not yet feed all its local unpublished events through it.**
++- When all retainers of an event disappear or a device never rejoins, a certificate cannot recreate a missing original signed event. Indefinitely bounded storage and exact retention of all unknown peer updates cannot both be guaranteed without an explicit expiration/data-loss policy.
++
++### 3. Sharded no-copy epoch pointer handoff primitive (300B preparation)
++
++- `patchlib/epoch_sharded_rcu_v56.py`: `ShardedEpochRCU` independently verifies the next checkpoint/optimizer directory using an injected local verifier, prepares while old steps continue, fences admission at a local optimizer step boundary, drains old writers, atomically fsync-publishes a tiny durable pointer, and lets existing immutable readers finish on old shards. New readers receive only the new epoch. Memory used by this metadata router does not scale with total parameter count.
++- This is **not yet bound to the normal PyTorch `train-live` full-model engine**. v55 still constructs a full shadow model and optimizer on a certified switch. The router does NOT itself offload each live layer, ensure optimizer moment crash consistency, merge arbitrary signed LoHA steps into shards, or verify 300B network throughput. The final local writer fence may introduce a short step-boundary pause; there is no mathematically strict zero-latency cutover.
++- No automatic garbage collection of old shards is performed; GC must wait for verified retirement and all outstanding leases. `ShardedEpochRCU` currently tracks in-process readers only, not cross-process durable leases.
++
++## Risk, scale and correctness
++
++1. Trust model: pinned CFT committee (strict majority), integrity of local state/keys, signed transport, SHA-256 content integrity and a **trusted local exporter receipt**. Not proof against a Byzantine voter who intentionally signs invalid weights.
++2. The v1 trainer still limits inline `cutoffs` to 256 origins. Compact v2 certificates are transmitted separately and **cannot yet activate the v1 trainer**. Using v2 proofs as a substitute for v1 in the current trainer would be unsafe; integration is blocked until a complete local v2-to-training cut validator and signed optimizer snapshot exporter exist.
++3. Staged checkpoint verification can take O(model bytes) disk I/O, even though atomically swapping the verified *pointer* is O(1). Local committee votes currently perform synchronous verification and must be moved to an isolated disk/verification executor for 300B production.
++4. Need storage for verifiable checkpoints and pending signed data. A disk budget cannot magically guarantee availability if all full copies are lost. WAN network partitions, adversarial origin equivocation, 4096 real peers, and 300B GPU execution are not benchmarked here.
++5. The full v55 test suite was attempted but exceeded the execution budget. The targeted epoch, generation, compact, frontier and shard suite passed (139 tests). See `VALIDATION_V56.md`.
++
++The new modules are intentionally safe-to-integrate control-plane components, not unverified replacements for the existing model training loop. Do not enable v2 quorum voting by replacing `local_export_verified` with a constant True in production.
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/VALIDATION_V56.md kagami-v56/VALIDATION_V56.md
+--- original55/kagami-v55/VALIDATION_V56.md	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v56/VALIDATION_V56.md	2026-10-27 02:59:55.846454956 +0000
+@@ -0,0 +1,22 @@
++# v56 validation — 2026-10-27
++
++Run from project root:
++
++```
++python -m pytest -q tests/test_epoch_v56_autonomy.py tests/test_epoch_v56_recovery_shards.py
++# 7 passed
++python -m pytest -q tests/test_epoch* tests/test_generation* tests/test_frontier* tests/test_live_generation* tests/test_live_epoch* tests/test_compact* tests/test_shard_runtime_v27.py --disable-warnings --maxfail=1
++# 139 passed (17.80s)
++python -m pytest -q tests/test_epoch_v56_autonomy.py tests/test_live_generation_transport_v42.py
++# 10 passed after control-plane generator compatibility correction
++```
++
++### Added tests
++- Real 4096-origin Merkle frontier (128 pages), locally verified source votes; remote committee requests pages through signed bridge messages and assembles an independently authenticated majority certificate. Another peer reconnects and retrieves the certificate. This test is not a 4096-node network stress test.
++- Reject malformed page/unknown page index, unendorsed or equivocal candidates.
++- Three+ adjacent generation recovery, missing certificate/parent-chain mismatch fail-closed, interruption and retry.
++- Durable signed-update quarantine with duplicate, conflicting event and quota tests.
++- Immutable-reader/sharded-pointer switch with live writer drain, independent re-verification, fail-closed on bad fence or altered checkpoint.
++
++### Limits
++The general 700-ish case test suite did **not** complete in the available execution period. A partial run through approximately the first 30% emitted no failures but was terminated by the tool timeout. No claim that all existing tests or real-world 300B/4096 device benchmarks passed.
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/patchlib/elasticnet.py kagami-v56/patchlib/elasticnet.py
+--- original55/kagami-v55/patchlib/elasticnet.py	2026-10-27 00:58:34.000000000 +0000
++++ kagami-v56/patchlib/elasticnet.py	2026-10-27 02:55:30.576345089 +0000
+@@ -1430,6 +1430,8 @@
+     generation_committee=None
+     generation_bridge=None
+     generation_ledger=None
++    generation_compact_ledger=None
++    generation_compact_control=None
+     generation_gc_runtime=None
+     generation_gc_next=0.0
+     generation_gc_task=None
+@@ -1447,6 +1449,7 @@
+             store_pin(committee_peer,pem,make_verifier(pub))
+     def maybe_start_generation_bridge():
+         nonlocal generation_bridge,generation_ledger,generation_gc_runtime
++        nonlocal generation_compact_ledger,generation_compact_control
+         if generation_bridge is not None or generation_committee is None:
+             return
+         if any(k not in trusted for k in generation_committee):
+@@ -1473,9 +1476,24 @@
+             if not path.is_file():return False
+             with path.open('rb') as fp:
+                 return hashlib.file_digest(fp,'sha256').hexdigest()==manifest_sha
++        from .epoch_certificate_v46 import CompactEpochLedger
++        from .epoch_autonomous_v56 import AutonomousPagedEpoch
++        generation_compact_ledger=CompactEpochLedger(
++            Path(str(args.journal)+'.generation-compact.sqlite3'),
++            room=args.room_id,peer=args.peer_id,committee=generation_committee,
++            signer=signer,trusted=trusted,genesis=root_genesis)
++        # Never pretend that downloaded shard checksums prove an atomic local
++        # model/optimizer export at the proposed frontier. External verified
++        # exporter integration must explicitly unlock committee voting.
++        generation_compact_control=AutonomousPagedEpoch(generation_compact_ledger,
++            Path(str(args.journal)+'.generation-compact-stage.sqlite3'),
++            local_checkpoint=lambda _p:None,
++            local_export_verified=lambda _p:False)
+         generation_bridge=GenerationWebRTCBridge(
+             AutomaticGenerationControl(generation_ledger,locally_verified,locally_covered),
+-            snapshot_available=has_snapshot)
++            snapshot_available=has_snapshot,
++            compact_ledger=generation_compact_ledger,
++            compact_control=generation_compact_control)
+         # Existing verified local handoffs can finish their *own* GC while
+         # the new trainer remains active. The v43 runtime checks signed
+         # certificates, verified new journal, old-owner flock and uncovered
+@@ -2163,6 +2181,7 @@
+     from .epoch_carry_v46 import CrossEpochCarryArchive
+     from .online_generation import _digest as _epoch_proposal_digest
+     auto_epoch_service=None
++    auto_epoch_catchup=None
+     auto_epoch_prepare=None
+     auto_epoch_next=0.0
+     auto_epoch_candidate={}
+@@ -2516,6 +2535,9 @@
+             inbound_pipeline.check()
+             if generation_ledger is not None and auto_epoch_service is None:
+                 auto_epoch_service=make_auto_epoch_service()
++                from .epoch_multihop_v56 import MultiEpochCatchup
++                auto_epoch_catchup=MultiEpochCatchup(auto_epoch_service,
++                    max_hops_per_poll=1,require_prewarmed=True)
+             if auto_epoch_service is not None and initial_complete:
+                 # Prewarm runs in a task without changing ANY active pointers.
+                 # Main loop alone handles short destructive publication at a
+@@ -2528,7 +2550,7 @@
+                     auto_epoch_prepare=None
+                 if (auto_epoch_prepare is None and auto_epoch_service.shadow_ready):
+                     try:
+-                        await auto_epoch_service.activate_next()
++                        await auto_epoch_catchup.poll()
+                     except BaseException:
+                         # If source receivers were fenced already, an uncertain
+                         # pointer/transport outcome must stop the trainer.
+@@ -3152,6 +3174,8 @@
+             await asyncio.gather(generation_gc_task,return_exceptions=True)
+         if generation_gc_runtime is not None:generation_gc_runtime.close()
+         if generation_ledger is not None:generation_ledger.close()
++        if generation_compact_control is not None:generation_compact_control.close()
++        if generation_compact_ledger is not None:generation_compact_ledger.close()
+         if carry_relay is not None:carry_relay.close()
+         journal.close()
+         if carry_archive is not None:
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/patchlib/epoch_autonomous_v56.py kagami-v56/patchlib/epoch_autonomous_v56.py
+--- original55/kagami-v55/patchlib/epoch_autonomous_v56.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v56/patchlib/epoch_autonomous_v56.py	2026-10-27 02:58:55.251579736 +0000
+@@ -0,0 +1,274 @@
++"""Bounded, durable, crash-fault quorum assembly for a *paged* epoch frontier.
++
++This is a v2 control-plane for a fixed pinned committee (<=31) overseeing an
++arbitrarily larger population (default 4096 origins). It cannot synthesize a
++valid live optimizer/snapshot receipt: `local_export_verified` is a LOCAL,
++trusted callback and must stay False until the real exporter proves the cut.
++
++All proposal/page envelopes must arrive over an already authenticated
++GenerationWebRTCBridge. Votes are independently signed and quorum-verified.
++No page, bare head, or unsigned proposal can activate new model weights.
++"""
++from __future__ import annotations
++
++from collections import OrderedDict
++import json
++from pathlib import Path
++import sqlite3
++
++from .core import PatchError, _canonical_json
++from .online_generation import _digest, _verify, _sign
++from .epoch_certificate_v46 import PROTOCOL, CompactEpochLedger, proposal_v2
++from .frontier_commitment_v44 import verify_frontier_page
++
++MAX_ORIGINS = 4096
++MAX_PROPOSAL_BYTES = 8192
++MAX_ACTIVE_PROPOSALS = 2
++
++
++class AutonomousPagedEpoch:
++    """Indexed pages and signed votes, bounded by one candidate per epoch.
++
++    Used through its bridge's signed generation-wire channel. All disk records
++    are transactional. A process crash requires no peer-local volatile state.
++    """
++    def __init__(self, ledger:CompactEpochLedger, path:Path, *,
++                 local_checkpoint, local_export_verified, max_origins=MAX_ORIGINS):
++        if not isinstance(ledger,CompactEpochLedger) or not 1<=max_origins<=MAX_ORIGINS:
++            raise ValueError('invalid autonomous paged certificate configuration')
++        if not callable(local_checkpoint) or not callable(local_export_verified):
++            raise ValueError('a trusted local exporter/checkpoint is required')
++        self.ledger=ledger
++        self.local_checkpoint=local_checkpoint
++        self.local_export_verified=local_export_verified
++        self.max_origins=max_origins
++        path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
++        self.db=sqlite3.connect(path,timeout=30)
++        self.db.execute('PRAGMA journal_mode=WAL')
++        self.db.execute('PRAGMA synchronous=FULL')
++        self.db.execute('CREATE TABLE IF NOT EXISTS config (k TEXT PRIMARY KEY,v TEXT NOT NULL)')
++        self.db.execute('CREATE TABLE IF NOT EXISTS proposals (digest TEXT PRIMARY KEY, epoch INTEGER NOT NULL, wire TEXT NOT NULL)')
++        self.db.execute('CREATE TABLE IF NOT EXISTS pages (digest TEXT NOT NULL, idx INTEGER NOT NULL, wire TEXT NOT NULL, PRIMARY KEY(digest,idx))')
++        self.db.execute('CREATE TABLE IF NOT EXISTS votes (digest TEXT NOT NULL, peer TEXT NOT NULL, wire TEXT NOT NULL, PRIMARY KEY(digest,peer))')
++        self.db.execute('CREATE TABLE IF NOT EXISTS endorsements (digest TEXT PRIMARY KEY, wire TEXT NOT NULL)')
++        fingerprint=_digest([ledger.room, ledger.genesis, ledger.committee,max_origins])
++        with self.db:self.db.execute('INSERT OR IGNORE INTO config VALUES(?,?)',('fingerprint',fingerprint))
++        if self.db.execute("SELECT v FROM config WHERE k='fingerprint'").fetchone()[0]!=fingerprint:
++            raise PatchError('epoch coordinator config changed')
++        self._busy=False
++
++    def close(self):self.db.close()
++
++    def _candidate(self,digest):
++        row=self.db.execute('SELECT wire FROM proposals WHERE digest=?',(digest,)).fetchone()
++        return json.loads(row[0]) if row else None
++
++    def _validate_proposal(self,p):
++        if not isinstance(p,dict) or set(p)!={'protocol','room','epoch','parent','manifest','semantic','inventory','frontier_header','frontier_digest','replicas'}:
++            raise PatchError('invalid paged candidate')
++        expected=proposal_v2(room=p['room'],epoch=p['epoch'],parent=p['parent'],
++            manifest=p['manifest'],semantic=p['semantic'],inventory=p['inventory'],
++            frontier_header=p['frontier_header'],replicas=p['replicas'])
++        if (expected!=p or p['room']!=self.ledger.room or
++                p['frontier_header']['total']>self.max_origins or
++                len(_canonical_json(p))>MAX_PROPOSAL_BYTES):
++            raise PatchError('invalid / oversized frontier candidate')
++        committed=self.ledger.certified_epoch(p['epoch'])
++        if committed is not None:
++            if committed['proposal'] != p:
++                raise PatchError('conflicting already certified compact epoch')
++            return _digest(p)
++        self.ledger._validate(p)
++        return _digest(p)
++
++    def offer(self,p,pages):
++        digest=self._validate_proposal(p)
++        if len(pages)!=p['frontier_header']['pages']:
++            raise PatchError('cannot offer incomplete candidate')
++        # Verify the whole frontier: no duplicate origin across pages.
++        from .frontier_commitment_v44 import verify_full_frontier
++        verify_full_frontier(p['frontier_header'], pages)
++        if (self.ledger.peer not in self.ledger.committee or
++                self.ledger.peer not in p['replicas'] or not self.local_export_verified(p) or
++                self.local_checkpoint(p) is None):
++            raise PatchError('only a locally verified committee exporter may offer a candidate')
++        self._remember_proposal(p)
++        endorsement=_sign({'protocol':PROTOCOL,'kind':'candidate','digest':digest,
++                           'epoch':p['epoch'],'room':self.ledger.room},
++                           self.ledger.peer,self.ledger.signer)
++        self._remember_endorsement(digest,endorsement)
++        for page in pages:self._remember_page(digest,page)
++        self._maybe_vote(digest)
++        return digest
++
++    def _remember_endorsement(self,digest,wire):
++        p=self._candidate(digest)
++        if p is None:raise PatchError('endorsement without candidate')
++        payload=_verify(wire,self.ledger.trusted)
++        if (payload!={'protocol':PROTOCOL,'kind':'candidate','digest':digest,
++                     'epoch':p['epoch'],'room':self.ledger.room} or
++                wire['peer'] not in self.ledger.committee or wire['peer'] not in p['replicas']):
++            raise PatchError('unsigned/noncommittee candidate')
++        raw=json.dumps(wire,sort_keys=True,separators=(',',':'))
++        with self.db:
++            self.db.execute('INSERT OR IGNORE INTO endorsements VALUES(?,?)',(digest,raw))
++
++    def purge_committed(self):
++        """Keep durable certificates in the ledger; discard obsolete page caches."""
++        head=self.ledger.latest()
++        if head is None:return 0
++        height=head['proposal']['epoch']
++        with self.db:
++            rows=[x[0] for x in self.db.execute('SELECT digest FROM proposals WHERE epoch<=?',(height,))]
++            for digest in rows:
++                self.db.execute('DELETE FROM pages WHERE digest=?',(digest,))
++                self.db.execute('DELETE FROM votes WHERE digest=?',(digest,))
++                self.db.execute('DELETE FROM endorsements WHERE digest=?',(digest,))
++                self.db.execute('DELETE FROM proposals WHERE digest=?',(digest,))
++        return len(rows)
++
++    def _remember_proposal(self,p):
++        digest=self._validate_proposal(p)
++        row=self.db.execute('SELECT digest FROM proposals WHERE epoch=?',(p['epoch'],)).fetchone()
++        if row is not None and row[0]!=digest:
++            raise PatchError('conflicting candidate for same epoch; manual fork resolution required')
++        with self.db:
++            self.db.execute('INSERT OR IGNORE INTO proposals VALUES(?,?,?)',
++                (digest,p['epoch'],json.dumps(p,sort_keys=True,separators=(',',':'))))
++        return digest
++
++    def _remember_page(self,digest,page):
++        p=self._candidate(digest)
++        if p is None:raise PatchError('unknown paged candidate')
++        verify_frontier_page(p['frontier_header'],page)
++        row=self.db.execute('SELECT wire FROM pages WHERE digest=? AND idx=?',
++                           (digest,page['index'])).fetchone()
++        raw=json.dumps(page,sort_keys=True,separators=(',',':'))
++        if row is not None and row[0]!=raw:
++            raise PatchError('conflicting valid frontier page')
++        with self.db:self.db.execute('INSERT OR IGNORE INTO pages VALUES(?,?,?)',(digest,page['index'],raw))
++
++    def _pages(self,digest):
++        p=self._candidate(digest)
++        if p is None:return None
++        rows=self.db.execute('SELECT idx,wire FROM pages WHERE digest=? ORDER BY idx',(digest,)).fetchall()
++        if len(rows)!=p['frontier_header']['pages'] or any(i!=k for k,(i,_) in enumerate(rows)):
++            return None
++        return [json.loads(raw) for _,raw in rows]
++
++    def _maybe_vote(self,digest):
++        p=self._candidate(digest)
++        if p is None or self.ledger.peer not in p['replicas'] or self.ledger.peer not in self.ledger.committee:
++            return
++        # A signed local vote is already durable; never rehash an entire
++        # multi-terabyte snapshot on every anti-entropy tick or neighbor.
++        if self.db.execute('SELECT 1 FROM votes WHERE digest=? AND peer=?',
++                (digest,self.ledger.peer)).fetchone():return
++        pages=self._pages(digest)
++        if pages is None:return
++        # NEVER use a network-supplied Boolean to assert that weights were
++        # exported from exactly this certified cut.
++        if not self.local_export_verified(p):return
++        sources=self.local_checkpoint(p)
++        if sources is None:return
++        manifest_path,shard_store,journal_db=sources
++        wire=self.ledger.vote(p,pages=pages,journal_db=journal_db,
++            manifest_path=manifest_path,shard_store=shard_store)
++        self._remember_vote(digest,wire)
++
++    def _remember_vote(self,digest,wire):
++        p=self._candidate(digest)
++        if p is None:raise PatchError('unknown compact vote proposal')
++        payload=_verify(wire,self.ledger.trusted)
++        expected={'protocol':PROTOCOL,'kind':'vote','room':self.ledger.room,
++                  'epoch':p['epoch'],'proposal':digest}
++        if (payload!=expected or wire['peer'] not in self.ledger.committee
++                or wire['peer'] not in p['replicas']):
++            raise PatchError('invalid compact voter')
++        raw=json.dumps(wire,sort_keys=True,separators=(',',':'))
++        row=self.db.execute('SELECT wire FROM votes WHERE digest=? AND peer=?',(digest,wire['peer'])).fetchone()
++        if row is not None and row[0]!=raw:
++            raise PatchError('equivocating compact quorum vote')
++        with self.db:self.db.execute('INSERT OR IGNORE INTO votes VALUES(?,?,?)',(digest,wire['peer'],raw))
++        votes=[json.loads(x[0]) for x in self.db.execute('SELECT wire FROM votes WHERE digest=?',(digest,))]
++        if len(votes)>=self.ledger.majority and self.ledger.certified_epoch(p['epoch']) is None:
++            cert=self.ledger.certificate(p,votes)
++            self.ledger.accept(cert)
++
++    def receive(self,sender,msg):
++        """Only call after authenticating sender through the transport."""
++        if not isinstance(msg,dict) or set(msg)!={'kind','data'}:
++            raise PatchError('invalid paged control envelope')
++        kind,data=msg['kind'],msg['data']
++        if kind=='compact-proposal':
++            if not isinstance(data,dict) or set(data)!={'proposal','endorsement'}:
++                raise PatchError('unendorsed compact candidate')
++            p=data['proposal'];digest=self._validate_proposal(p)
++            payload=_verify(data['endorsement'],self.ledger.trusted)
++            if (payload!={'protocol':PROTOCOL,'kind':'candidate','digest':digest,
++                         'epoch':p['epoch'],'room':self.ledger.room} or
++                    data['endorsement']['peer'] not in self.ledger.committee or
++                    data['endorsement']['peer'] not in p['replicas']):
++                raise PatchError('candidate not endorsed by pinned committee')
++            self._remember_proposal(p)
++            self._remember_endorsement(digest,data['endorsement'])
++            if self.ledger.certified_epoch(p['epoch']) is None:
++                self._maybe_vote(digest)
++        elif kind=='compact-page':
++            if not isinstance(data,dict) or set(data)!={'digest','page'}:
++                raise PatchError('malformed frontier page envelope')
++            self._remember_page(data['digest'],data['page'])
++            if self.ledger.certified_epoch(self._candidate(data['digest'])['epoch']) is None:
++                self._maybe_vote(data['digest'])
++        elif kind=='compact-vote':
++            if not isinstance(data,dict):raise PatchError('invalid vote envelope')
++            payload=_verify(data,self.ledger.trusted)
++            if (not isinstance(payload,dict) or payload.get('kind')!='vote'
++                    or payload.get('protocol')!=PROTOCOL):
++                raise PatchError('not a signed compact vote')
++            self._remember_vote(payload['proposal'],data)
++        elif kind=='compact-page-need':
++            if not isinstance(data,dict) or set(data)!={'digest','index'} or type(data['index']) is not int:
++                raise PatchError('invalid compact page request')
++            p=self._candidate(data['digest'])
++            if p is None or not 0<=data['index']<p['frontier_header']['pages']:
++                raise PatchError('unknown compact page request')
++            # Stateless reply is scheduled by bridge tick (no per-sender queues).
++            return {'kind':'compact-page','data':{'digest':data['digest'],
++                'page':self.page(data['digest'],data['index'])}} if self.page(data['digest'],data['index']) else None
++        else:raise PatchError('unsupported compact epoch message')
++        return None
++
++    def page(self,digest,index):
++        row=self.db.execute('SELECT wire FROM pages WHERE digest=? AND idx=?',(digest,index)).fetchone()
++        return json.loads(row[0]) if row else None
++
++    def announcements(self):
++        """Per-neighbor caller should send a few messages per tick; O(degree)."""
++        if self._busy:return []
++        self._busy=True
++        try:
++            here=self.ledger.latest()
++            current=here['proposal']['epoch'] if here else 0
++            pending=self.db.execute('SELECT digest,wire FROM proposals WHERE epoch>? ORDER BY epoch LIMIT 1',(current,)).fetchone()
++            if pending is None:return []
++            digest,wire=pending
++            p=json.loads(wire)
++            self._maybe_vote(digest)
++            endorsement=self.db.execute('SELECT wire FROM endorsements WHERE digest=?',(digest,)).fetchone()
++            if endorsement is None:raise PatchError('missing candidate endorsement')
++            result=[{'kind':'compact-proposal','data':{'proposal':p,'endorsement':json.loads(endorsement[0])}}]
++            for (vote,) in self.db.execute('SELECT wire FROM votes WHERE digest=? ORDER BY peer',(digest,)):
++                result.append({'kind':'compact-vote','data':json.loads(vote)})
++            return result
++        finally:self._busy=False
++
++    def missing_pages(self,limit=4):
++        here=self.ledger.latest()
++        current=here['proposal']['epoch'] if here else 0
++        row=self.db.execute('SELECT digest,wire FROM proposals WHERE epoch>? ORDER BY epoch LIMIT 1',(current,)).fetchone()
++        if row is None:return []
++        digest,raw=row;p=json.loads(raw)
++        existing={x[0] for x in self.db.execute('SELECT idx FROM pages WHERE digest=?',(digest,))}
++        return [{'kind':'compact-page-need','data':{'digest':digest,'index':i}}
++                for i in range(p['frontier_header']['pages']) if i not in existing][:limit]
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/patchlib/epoch_certificate_v46.py kagami-v56/patchlib/epoch_certificate_v46.py
+--- original55/kagami-v55/patchlib/epoch_certificate_v46.py	2026-10-26 12:28:32.000000000 +0000
++++ kagami-v56/patchlib/epoch_certificate_v46.py	2026-10-27 02:49:34.522192303 +0000
+@@ -87,6 +87,26 @@
+         r=self.db.execute('SELECT wire FROM commits ORDER BY epoch DESC LIMIT 1').fetchone()
+         return json.loads(r[0]) if r else None
+ 
++    def certified_epoch(self, epoch:int):
++        """Read, verify and return a durable historical commit (never a hint)."""
++        if type(epoch) is not int or epoch<1:return None
++        row=self.db.execute('SELECT digest,wire FROM commits WHERE epoch=?',(epoch,)).fetchone()
++        if row is None:return None
++        try:
++            cert=json.loads(row[1]);p=cert['proposal']
++            if (p['epoch']!=epoch or p['room']!=self.room or
++                    cert['protocol']!=PROTOCOL or row[0]!=_digest(p)):
++                raise PatchError('corrupt compact certificate')
++            self._check_votes(p,cert['votes'])
++            predecessor=(self.genesis if epoch==1 else
++                self.db.execute('SELECT digest FROM commits WHERE epoch=?',(epoch-1,)).fetchone())
++            if predecessor is None:raise PatchError('missing compact predecessor')
++            parent=predecessor if isinstance(predecessor,str) else predecessor[0]
++            if p['parent']!=parent:raise PatchError('broken compact certificate parent chain')
++            return cert
++        except (KeyError,TypeError,ValueError,IndexError) as exc:
++            raise PatchError('invalid persisted compact certificate') from exc
++
+     def head(self):
+         current=self.latest()
+         return _digest(current['proposal']) if current else self.genesis
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/patchlib/epoch_multihop_v56.py kagami-v56/patchlib/epoch_multihop_v56.py
+--- original55/kagami-v55/patchlib/epoch_multihop_v56.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v56/patchlib/epoch_multihop_v56.py	2026-10-27 02:57:32.098693295 +0000
+@@ -0,0 +1,162 @@
++"""Recover from multi-epoch offline intervals without skipping certified cuts.
++
++Certificate synchronization is distinct from *model/update* recovery. This
++module can make monotone progress through adjacent already-certified epochs,
++using v53's existing signed carry/rebase for EACH hop. It never simply jumps to
++latest weights and discards offline updates. Missing evidence leaves old state
++intact; dead archive holders cannot be compensated by a bare signature.
++"""
++from __future__ import annotations
++import asyncio
++import json
++from pathlib import Path
++
++from .core import PatchError
++from .online_generation import _digest
++
++
++class CertifiedChain:
++    """Verify every certificate edge (including the very first genesis)."""
++    def __init__(self, ledger):
++        self.ledger=ledger
++
++    def path(self, start, end, *, max_hops=16384):
++        if (type(start) is not int or type(end) is not int or start<0 or
++                end<start or end-start>max_hops):
++            raise PatchError('invalid certified recovery range')
++        previous=(self.ledger.genesis if start==0 else self._proof(start)['proposal'])
++        digest=previous if isinstance(previous,str) else _digest(previous)
++        result=[]
++        for epoch in range(start+1,end+1):
++            cert=self._proof(epoch)
++            if cert['proposal']['parent']!=digest:
++                raise PatchError('certified recovery chain has broken parent')
++            result.append(cert)
++            digest=_digest(cert['proposal'])
++        return result
++
++    def _proof(self,epoch):
++        cert=self.ledger.certified_epoch(epoch)
++        if cert is None:raise PatchError(f'missing authenticated certificate for epoch {epoch}')
++        return cert
++
++
++class MultiEpochCatchup:
++    """Drive adjacent safe trainer handoffs, never a multi-epoch unsafe leap.
++
++    Any remotely fetched certificate must first be inserted/verified by the
++    ledger. `activate_next` verifies local checkpoint, exporter, signed carry,
++    and writer fences. Failure is propagated, preserving its fail-closed state.
++    """
++    def __init__(self,service,*,max_hops_per_poll=2,require_prewarmed=False):
++        if not 1<=max_hops_per_poll<=64:raise ValueError('invalid catch-up budget')
++        self.service=service
++        self.max_hops_per_poll=max_hops_per_poll
++        self.require_prewarmed=require_prewarmed
++        self._lock=asyncio.Lock()
++        self._verified_tip_epoch=0
++        self._verified_tip_digest=self.service.ledger.genesis
++
++    async def poll(self):
++        async with self._lock:
++            done=0
++            for _ in range(self.max_hops_per_poll):
++                current=self.service.router.current.epoch
++                latest=self.service.ledger.latest()
++                target=latest['proposal']['epoch'] if latest else 0
++                if current>=target:break
++                # The full signed chain is checked before starting even one
++                # irreversible transition, not just the newest remote head.
++                # An append-only, locally pinned ledger permits a verified
++                # prefix to be cached. Re-check its tip on every poll and
++                # validate only genuinely new certificates; no O(E²) scans.
++                if self._verified_tip_epoch:
++                    old=self.service.ledger.certified_epoch(self._verified_tip_epoch)
++                    if old is None or _digest(old['proposal'])!=self._verified_tip_digest:
++                        raise PatchError('previously verified chain prefix changed')
++                start=max(current,self._verified_tip_epoch)
++                if target>start:
++                    verified=CertifiedChain(self.service.ledger).path(start,target)
++                    self._verified_tip_epoch=target
++                    self._verified_tip_digest=_digest(verified[-1]['proposal'])
++                if self.require_prewarmed and not self.service.shadow_ready:
++                    break
++                advanced=await self.service.activate_next()
++                if not advanced:
++                    break
++                if self.service.router.current.epoch!=current+1:
++                    raise PatchError('recovery attempted to skip a certified epoch')
++                done+=1
++            return done
++
++
++class DurableOfflineOutbox:
++    """Bounded disk-backed quarantine for signed old-epoch updates.
++
++    These are ORIGINAL signed wires, not replayed onto a newer base without
++    their old-genesis validator. No TTL, quorum head, or age deletes them.
++    If quota is exhausted the producer must backpressure, not drop evidence.
++    """
++    def __init__(self, root:Path, *, max_bytes=4*1024**3):
++        import sqlite3
++        if type(max_bytes) is not int or max_bytes<1024:raise ValueError('invalid retention budget')
++        root=Path(root);root.mkdir(parents=True,exist_ok=True)
++        self.db=sqlite3.connect(root/'pending.sqlite3',timeout=30)
++        self.db.execute('PRAGMA journal_mode=WAL');self.db.execute('PRAGMA synchronous=FULL')
++        self.db.execute('CREATE TABLE IF NOT EXISTS pending (epoch INTEGER, origin TEXT, seq INTEGER, wire BLOB, PRIMARY KEY(epoch,origin,seq))')
++        self.db.execute('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY,v TEXT)')
++        # One-time upgrade scan only. Every later quota check is O(1), even
++        # after millions of signed events or a restart.
++        with self.db:
++            self.db.execute('INSERT OR IGNORE INTO meta VALUES(?,?)',('used_bytes',
++                str(self.db.execute('SELECT COALESCE(SUM(length(wire)),0) FROM pending').fetchone()[0])))
++            self.db.execute('CREATE TRIGGER IF NOT EXISTS offline_insert AFTER INSERT ON pending '
++                "BEGIN UPDATE meta SET v=CAST(v AS INTEGER)+length(NEW.wire) WHERE k='used_bytes'; END")
++            self.db.execute('CREATE TRIGGER IF NOT EXISTS offline_delete AFTER DELETE ON pending '
++                "BEGIN UPDATE meta SET v=CAST(v AS INTEGER)-length(OLD.wire) WHERE k='used_bytes'; END")
++        self.max_bytes=max_bytes
++
++    def hold(self,*,epoch,origin,seq,wire:bytes):
++        if (type(epoch) is not int or epoch<0 or type(seq) is not int or seq<1 or
++                not isinstance(origin,str) or not 1<=len(origin)<=128 or
++                not isinstance(wire,bytes) or not wire or len(wire)>16*1024**2):
++            raise PatchError('invalid offline signed update')
++        import hashlib
++        digest=hashlib.sha256(wire).hexdigest()
++        with self.db:
++            existing=self.db.execute('SELECT wire FROM pending WHERE epoch=? AND origin=? AND seq=?',
++                (epoch,origin,seq)).fetchone()
++            if existing is not None:
++                if hashlib.sha256(existing[0]).hexdigest()!=digest:
++                    raise PatchError('equivocating offline update')
++                return False
++            # Sum content sizes in SQLite; no Python set of old origins.
++            used=int(self.db.execute("SELECT v FROM meta WHERE k='used_bytes'").fetchone()[0])
++            if used+len(wire)>self.max_bytes:
++                raise PatchError('offline outbox at capacity: stop publisher safely')
++            self.db.execute('INSERT INTO pending VALUES(?,?,?,?)',(epoch,origin,seq,wire))
++        return True
++
++    def iter_epoch(self,epoch):
++        return self.db.execute('SELECT origin,seq,wire FROM pending WHERE epoch=? ORDER BY origin,seq',(epoch,))
++
++    def acknowledge(self,*,epoch,origin,seq,verified_archive):
++        """Only caller's independently durable signed-carry acknowledgment permits removal."""
++        if not verified_archive:
++            raise PatchError('cannot release offline evidence without durable signed carry')
++        # Caller must have checked archive identity and durability, and supply
++        # a real local `CrossEpochCarryArchive` object with the stored key.
++        from .epoch_carry_v46 import CrossEpochCarryArchive
++        if not isinstance(verified_archive,CrossEpochCarryArchive) or verified_archive.epoch!=epoch+1:
++            raise PatchError('foreign signed carry receipt')
++        row=self.db.execute('SELECT wire FROM pending WHERE epoch=? AND origin=? AND seq=?',
++                            (epoch,origin,seq)).fetchone()
++        if row is None:return False
++        # Check ORIGINAL signed bytes, not merely origin/seq identity.
++        archived=verified_archive.journal.get(origin,seq)
++        if archived is None or archived!=row[0]:
++            raise PatchError('carry bytes are missing or differ from quarantined signed update')
++        with self.db:self.db.execute('DELETE FROM pending WHERE epoch=? AND origin=? AND seq=?',(epoch,origin,seq))
++        return True
++
++    def close(self):self.db.close()
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/patchlib/epoch_sharded_rcu_v56.py kagami-v56/patchlib/epoch_sharded_rcu_v56.py
+--- original55/kagami-v55/patchlib/epoch_sharded_rcu_v56.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v56/patchlib/epoch_sharded_rcu_v56.py	2026-10-27 02:56:07.136069093 +0000
+@@ -0,0 +1,150 @@
++"""RCU-style metadata switch for independently verified *disk-sharded* epochs.
++
++Not an in-memory `nn.Module` replacement: each step must acquire a generation
++lease and use only its immutable checkpoint + per-epoch optimizer store.
++Background prewarming and atomic pointer publication are O(1) in model size.
++Old leases finish with the old epoch; new leases receive the new one. No shard
++is deleted automatically. A real 300B train-live backend must implement the
++per-layer computation and optimizer writer fence separately.
++"""
++from __future__ import annotations
++import asyncio
++from dataclasses import dataclass
++import json
++import os
++from pathlib import Path
++from contextlib import asynccontextmanager
++from .core import PatchError,_canonical_json
++from .online_generation import _sha
++
++
++@dataclass(frozen=True)
++class ShardedGeneration:
++    epoch:int
++    proposal_hash:str
++    manifest_hash:str
++    checkpoint_dir:Path
++    optimizer_dir:Path
++
++
++class ShardedEpochRCU:
++    def __init__(self,root:Path,*, verify_generation):
++        if not callable(verify_generation):raise ValueError('required independent verifier')
++        self.root=Path(root);self.root.mkdir(parents=True,exist_ok=True)
++        self.pointer=self.root/'sharded-active.json'
++        self.verify_generation=verify_generation
++        self._active=None
++        self._lock=asyncio.Lock()
++        self._transition_lock=asyncio.Lock()
++        self._admission_open=asyncio.Event();self._admission_open.set()
++        self._writers=0
++        self._readers={}
++        self._drained=asyncio.Event();self._drained.set()
++        self._staged=None
++        if self.pointer.is_symlink():raise PatchError('unsafe sharded active pointer')
++
++    def recover(self,resolver):
++        """Reopen a committed pointer by rechecking **all** hashes and proofs."""
++        if not self.pointer.exists():return None
++        if not self.pointer.is_file() or self.pointer.stat().st_size>4096:
++            raise PatchError('invalid sharded pointer length')
++        try:data=json.loads(self.pointer.read_bytes())
++        except (ValueError,UnicodeError) as exc:raise PatchError('corrupted sharded pointer') from exc
++        if (not isinstance(data,dict) or set(data)!={'epoch','proposal','manifest'} or
++                type(data['epoch']) is not int or data['epoch']<1 or
++                not _sha(data['proposal']) or not _sha(data['manifest'])):
++            raise PatchError('invalid durable sharded epoch pointer')
++        generation=resolver(data['epoch'],data['proposal'],data['manifest'])
++        self._verify(generation)
++        self._active=generation
++        return generation
++
++    def _verify(self,generation):
++        if (not isinstance(generation,ShardedGeneration) or
++                type(generation.epoch) is not int or generation.epoch<1 or
++                not _sha(generation.proposal_hash) or not _sha(generation.manifest_hash)
++                or not isinstance(generation.checkpoint_dir,Path)
++                or not isinstance(generation.optimizer_dir,Path)
++                or generation.checkpoint_dir.is_symlink() or
++                generation.optimizer_dir.is_symlink() or
++                not generation.checkpoint_dir.is_dir() or
++                not generation.optimizer_dir.is_dir()):
++            raise PatchError('invalid sharded generation')
++        if not self.verify_generation(generation):
++            raise PatchError('sharded checkpoint/optimizer certificate verification failed')
++
++    async def stage(self,generation):
++        """Expensive verification is off the training event loop."""
++        await asyncio.to_thread(self._verify,generation)
++        async with self._transition_lock:
++            async with self._lock:
++                if self._active is not None and generation.epoch!=self._active.epoch+1:
++                    raise PatchError('sharded adoption must be adjacent')
++                self._staged=generation
++
++    @asynccontextmanager
++    async def step(self, *, writable=True):
++        """Steps use a pinned generation; writing steps prevent rekey until done."""
++        while True:
++            await self._admission_open.wait()
++            async with self._lock:
++                if not self._admission_open.is_set():continue
++                if self._active is None:raise PatchError('no sharded epoch active')
++                generation=self._active
++                self._readers[generation.epoch]=self._readers.get(generation.epoch,0)+1
++                if writable:
++                    self._writers+=1;self._drained.clear()
++                break
++        try:yield generation
++        finally:
++            async with self._lock:
++                self._readers[generation.epoch]-=1
++                if self._readers[generation.epoch]==0:del self._readers[generation.epoch]
++                if writable:
++                    self._writers-=1
++                    if not self._writers:self._drained.set()
++
++    async def publish(self, *, certified_step_boundary):
++        """Small local fence only; no global training stop or full model copy.
++
++        certified_step_boundary must be a LOCAL callback implementing final
++        carry+network drain+optimizer flush, not an untrusted remote flag.
++        """
++        if not callable(certified_step_boundary):raise PatchError('writer fence callback required')
++        async with self._transition_lock:
++            async with self._lock:
++                next_gen=self._staged
++                if next_gen is None:raise PatchError('no verified sharded generation staged')
++                if self._active is not None and next_gen.epoch!=self._active.epoch+1:
++                    raise PatchError('non-adjacent sharded generation')
++                # Close writer admission, then release the lock so old writers
++                # can finish; otherwise waiting for _drained would deadlock.
++                self._admission_open.clear()
++            await self._drained.wait()
++            result=certified_step_boundary(self._active,next_gen)
++            if asyncio.iscoroutine(result):result=await result
++            if result is not True:
++                raise PatchError('epoch writer/carry fence was not certified')
++            # Revalidate immutable contents after staging; no TOCTOU from user
++            # supplied paths. Readers keep old files pinned until externally retired.
++            await asyncio.to_thread(self._verify,next_gen)
++            data={'epoch':next_gen.epoch,'proposal':next_gen.proposal_hash,'manifest':next_gen.manifest_hash}
++            raw=_canonical_json(data)
++            stage=self.pointer.with_suffix('.next')
++            flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)
++            if stage.exists():raise PatchError('interrupted sharded pointer publication; recover first')
++            fd=os.open(stage,flags,0o600)
++            try:
++                with os.fdopen(fd,'wb') as f:f.write(raw);f.flush();os.fsync(f.fileno())
++                os.replace(stage,self.pointer)
++                dfd=os.open(self.root,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
++                try:os.fsync(dfd)
++                finally:os.close(dfd)
++            finally:stage.unlink(missing_ok=True)
++            async with self._lock:
++                self._active=next_gen;self._staged=None
++                self._admission_open.set()
++            return next_gen
++
++    def pinned_epochs(self):
++        return frozenset(self._readers) | ({self._active.epoch} if self._active else set())
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/patchlib/live_generation_transport.py kagami-v56/patchlib/live_generation_transport.py
+--- original55/kagami-v55/patchlib/live_generation_transport.py	2026-10-26 12:32:00.000000000 +0000
++++ kagami-v56/patchlib/live_generation_transport.py	2026-10-27 02:59:07.238760831 +0000
+@@ -89,6 +89,8 @@
+     sent_compact_head: str | None = None
+     last_compact_head: float = 0
+     last_compact_need: float = 0
++    last_compact_page_need: float = 0
++    compact_reply: dict | None = None
+     # Small rotating set: room degree, not total participants, determines memory.
+ 
+ 
+@@ -99,7 +101,7 @@
+     cursor, while a reconnect clears the per-link state and re-requests a chain.
+     """
+     def __init__(self, controller: AutomaticGenerationControl, *, interval=.6,
+-                 snapshot_available=None, compact_ledger=None):
++                 snapshot_available=None, compact_ledger=None, compact_control=None):
+         if not isinstance(controller, AutomaticGenerationControl):
+             raise TypeError('verified generation control required')
+         if not 0.05 <= interval <= 30:
+@@ -109,10 +111,14 @@
+         # Optional independently verified v2 quorum heads; v1 peers are still
+         # supported but cannot forge or vote for a v2 certificate.
+         self.compact_ledger = compact_ledger
++        self.compact_control = compact_control
++        if compact_control is not None and compact_control.ledger is not compact_ledger:
++            raise ValueError("compact controller ledger mismatch")
+         self.interval = interval
+         self.snapshot_available = snapshot_available or (lambda _manifest: False)
+         self.neighbors: OrderedDict[str, Neighbor] = OrderedDict()
+         self._last_certificate = self.local_epoch()
++        self._last_compact_certificate = 0
+         # Drain the producer once per TICK, never once per neighbor.  A first
+         # neighbor (or failed send) must not consume a vote intended for the
+         # entire authenticated overlay.  Bound retained advertisements; lost
+@@ -169,6 +175,15 @@
+                 raise PatchError('compact generation is not configured')
+             state.requested_compact_after=fields['after']
+             return False
++        if (kind == 'generation-wire' and
++                fields['payload'].get('kind','').startswith('compact-') and
++                fields['payload'].get('kind')!='compact-certificate'):
++            if self.compact_control is None:
++                raise PatchError('compact candidate traffic requires trusted local coordinator')
++            reply=self.compact_control.receive(sender,fields['payload'])
++            if reply is not None:
++                state.compact_reply=reply
++            return False
+         if kind == 'generation-wire' and fields['payload'].get('kind')=='compact-certificate':
+             if self.compact_ledger is None:
+                 raise PatchError('compact generation certificate without pinned committee')
+@@ -223,8 +238,15 @@
+         available = bool(manifest and self.snapshot_available(manifest))
+         compact = self.compact_ledger.latest() if self.compact_ledger else None
+         compact_epoch = compact['proposal']['epoch'] if compact else 0
++        if compact_epoch != self._last_compact_certificate:
++            self._last_compact_certificate=compact_epoch
++            for state in self.neighbors.values():state.forwarded.clear()
+         compact_digest = (_digest(compact['proposal']) if compact else
+                           self.compact_ledger.genesis if self.compact_ledger else None)
++        compact_messages=(self.compact_control.announcements()
++            if self.compact_control is not None else ())
++        compact_missing=(iter(self.compact_control.missing_pages(
++            limit=8)) if self.compact_control is not None else iter(()))
+         if epoch != self._last_certificate:
+             self._last_certificate = epoch
+             for state in self.neighbors.values():
+@@ -265,6 +287,26 @@
+                 continue
+             state = self._neighbor(peer)
+             if self.compact_ledger is not None:
++                if self.compact_control is not None:
++                    # Only one outstanding bounded page response per neighbor.
++                    if state.compact_reply is not None:
++                        if node.control('generation-wire',payload=state.compact_reply):
++                            state.compact_reply=None
++                            count+=1
++                    for msg in compact_messages:
++                        digest=_digest(msg)
++                        if digest in state.forwarded:continue
++                        if len(_canonical_json({'payload':msg}))>MAX_GENERATION_FRAME:
++                            raise PatchError('compact control message exceeds signed SCTP frame')
++                        if not node.control('generation-wire',payload=msg):break
++                        if len(state.forwarded)>=128:state.forwarded.clear()
++                        state.forwarded.add(digest)
++                        count+=1
++                    if now-state.last_compact_page_need>=max(self.interval,0.5):
++                        msg=next(compact_missing,None)
++                        if msg is not None and node.control('generation-wire',payload=msg):
++                            state.last_compact_page_need=now
++                            count+=1
+                 if (state.sent_compact_head != compact_digest or
+                         now-state.last_compact_head >= IDLE_HEAD_SECONDS):
+                     if node.control('generation-compact-head',epoch=compact_epoch,digest=compact_digest):
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/tests/test_epoch_v56_autonomy.py kagami-v56/tests/test_epoch_v56_autonomy.py
+--- original55/kagami-v55/tests/test_epoch_v56_autonomy.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v56/tests/test_epoch_v56_autonomy.py	2026-10-27 02:53:10.575296400 +0000
+@@ -0,0 +1,100 @@
++import asyncio
++import hashlib
++import sqlite3
++import pytest
++import torch
++
++from patchlib.core import PatchError,_canonical_json
++from patchlib.identity import generate_keypair,signer_from_pem,verifier_from_pem
++from patchlib.epoch_certificate_v46 import CompactEpochLedger, proposal_v2
++from patchlib.epoch_autonomous_v56 import AutonomousPagedEpoch
++from patchlib.frontier_commitment_v44 import build_frontier_pages
++from patchlib.online_generation import GenerationLedger, AutomaticGenerationControl
++from patchlib.live_generation_transport import GenerationWebRTCBridge
++from patchlib.shards import export_state_sharded, read_manifest, semantic_shard_sha256
++from tests.test_v44_low_cost_generation import DummyNode
++
++
++def make_network(tmp_path,origins=4096):
++    names=['a','b','c'];signers={};verifiers={}
++    for name in names:
++        prv=tmp_path/f'{name}.pem';pub=tmp_path/f'{name}.pub'
++        generate_keypair(prv,pub)
++        signers[name]=signer_from_pem(prv);verifiers[name]=verifier_from_pem(pub)
++    db=sqlite3.connect(':memory:')
++    db.execute('CREATE TABLE events(origin TEXT,seq INTEGER,digest TEXT)')
++    hashes=[(f'p{i:05d}',1,hashlib.sha256(f'{i}'.encode()).hexdigest()) for i in range(origins)]
++    db.executemany('INSERT INTO events VALUES(?,?,?)',hashes)
++    inv=hashlib.sha256()
++    for r in db.execute('SELECT origin,seq,digest FROM events ORDER BY origin,seq'):
++        inv.update(_canonical_json(list(r))+b'\n')
++    h,pages=build_frontier_pages({p:1 for p,_,_ in hashes})
++    path=tmp_path/'snapshot.fmanifest';store=tmp_path/'snapshot'
++    export_state_sharded(torch.nn.Linear(2,3),store,path,model_id='tiny',revision='v1',peer_id='a',seq=1,shard_bytes=65536)
++    p=proposal_v2(room='room',epoch=1,parent='0'*64,
++        manifest=hashlib.sha256(path.read_bytes()).hexdigest(),
++        semantic=semantic_shard_sha256(read_manifest(path)),inventory=inv.hexdigest(),
++        frontier_header=h,replicas=names)
++    ledgers={};new={};old={};bridges={}
++    for name in names:
++        ledgers[name]=CompactEpochLedger(tmp_path/f'{name}.v2',room='room',peer=name,
++            committee=names,signer=signers[name],trusted=verifiers,genesis='0'*64)
++        old[name]=GenerationLedger(tmp_path/f'{name}.v1',room='room',peer=name,
++            committee=names,signer=signers[name],trusted=verifiers,genesis='0'*64)
++        new[name]=AutonomousPagedEpoch(ledgers[name],tmp_path/f'{name}.stage',
++            local_checkpoint=lambda _,p=path,s=store,d=db:(p,s,d),
++            local_export_verified=lambda _:True)
++        bridges[name]=GenerationWebRTCBridge(AutomaticGenerationControl(old[name],lambda _:False,lambda _:False),
++            interval=.05,compact_ledger=ledgers[name],compact_control=new[name])
++    return p,pages,db,old,new,ledgers,bridges
++
++
++def deliver(bridges,a,b,now):
++    node=DummyNode();bridges[a].tick([(b,node)],now=now)
++    for kind,data in node.wires:
++        bridges[b].receive(a,kind,data)
++    return node.wires
++
++
++def test_4096_origin_autonomous_paged_proposal_vote_gossip(tmp_path):
++    p,pages,db,old,new,ledgers,bridges=make_network(tmp_path)
++    try:
++        assert p['frontier_header']['pages']==128
++        new['a'].offer(p,pages)
++        assert ledgers['a'].latest() is None
++        for i in range(340):
++            t=i+1.
++            deliver(bridges,'a','b',t)
++            deliver(bridges,'b','a',t)
++            if ledgers['a'].latest() is not None and ledgers['b'].latest() is not None:
++                break
++        assert ledgers['a'].latest()['proposal']==p
++        assert ledgers['b'].latest()['proposal']==p
++        # A long-disconnected third peer needs only the signed chain, not all pages.
++        deliver(bridges,'a','c',400)
++        deliver(bridges,'c','a',401)
++        deliver(bridges,'a','c',402)
++        assert ledgers['c'].certified_epoch(1)['proposal']==p
++    finally:
++        for v in new.values():v.close()
++        for v in ledgers.values():v.close()
++        for v in old.values():v.close()
++        db.close()
++
++
++def test_compact_page_spoof_and_conflicts_rejected(tmp_path):
++    p,pages,db,old,new,ledgers,bridges=make_network(tmp_path,96)
++    try:
++        d=new['a'].offer(p,pages)
++        endorsed=new['a'].announcements()[0]
++        bridges['b'].receive('a','generation-wire',{'payload':endorsed})
++        bad=dict(pages[0]);bad['entries']=[['z',1]]
++        with pytest.raises(PatchError):
++            new['b'].receive('a',{'kind':'compact-page','data':{'digest':d,'page':bad}})
++        with pytest.raises(PatchError):
++            new['b'].receive('a',{'kind':'compact-page-need','data':{'digest':d,'index':99999}})
++    finally:
++        for v in new.values():v.close()
++        for v in ledgers.values():v.close()
++        for v in old.values():v.close()
++        db.close()
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' original55/kagami-v55/tests/test_epoch_v56_recovery_shards.py kagami-v56/tests/test_epoch_v56_recovery_shards.py
+--- original55/kagami-v55/tests/test_epoch_v56_recovery_shards.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v56/tests/test_epoch_v56_recovery_shards.py	2026-10-27 02:53:52.967056635 +0000
+@@ -0,0 +1,138 @@
++import asyncio
++from dataclasses import dataclass
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++from patchlib.core import PatchError
++from patchlib.online_generation import _digest
++from patchlib.epoch_multihop_v56 import CertifiedChain,MultiEpochCatchup,DurableOfflineOutbox
++from patchlib.epoch_sharded_rcu_v56 import ShardedEpochRCU,ShardedGeneration
++
++
++class Ledger:
++    genesis='0'*64
++    def __init__(self,count=4):
++        self.commits={}
++        parent=self.genesis
++        for epoch in range(1,count+1):
++            p={'epoch':epoch,'parent':parent,'manifest':f'{epoch:064x}'}
++            self.commits[epoch]={'proposal':p}
++            parent=_digest(p)
++    def certified_epoch(self,e):return self.commits.get(e)
++    def latest(self):return self.commits[max(self.commits)] if self.commits else None
++
++
++class Router:
++    def __init__(self):self.current=SimpleNamespace(epoch=0)
++
++
++class Service:
++    def __init__(self,ledger):
++        self.ledger=ledger;self.router=Router();self.fail_at=None;self.calls=[]
++    async def activate_next(self):
++        n=self.router.current.epoch+1
++        self.calls.append(n)
++        if self.fail_at==n:raise ConnectionError('missing checkpoint shard')
++        self.router.current.epoch=n
++        return True
++
++
++@pytest.mark.asyncio
++async def test_three_epoch_offline_recovery_adjacent_only():
++    ledger=Ledger(4);service=Service(ledger)
++    recovery=MultiEpochCatchup(service,max_hops_per_poll=2)
++    assert await recovery.poll()==2
++    assert service.router.current.epoch==2
++    service.fail_at=3
++    with pytest.raises(ConnectionError):await recovery.poll()
++    assert service.router.current.epoch==2
++    service.fail_at=None
++    assert await recovery.poll()==2
++    assert service.calls==[1,2,3,3,4]
++
++
++@pytest.mark.asyncio
++async def test_missing_or_broken_certificate_blocks_recovery():
++    ledger=Ledger(3);service=Service(ledger)
++    ledger.commits[2]['proposal']['parent']='f'*64
++    with pytest.raises(PatchError,match='broken parent'):
++        await MultiEpochCatchup(service).poll()
++    assert not service.calls
++    ledger=Ledger(3);service=Service(ledger)
++    del ledger.commits[2]
++    with pytest.raises(PatchError,match='missing authenticated'):
++        await MultiEpochCatchup(service).poll()
++    assert not service.calls
++
++
++def test_quarantine_never_drops_unacknowledged_old_wire(tmp_path):
++    q=DurableOfflineOutbox(tmp_path,max_bytes=1024)
++    assert q.hold(epoch=0,origin='a',seq=1,wire=b'a'*600)
++    assert not q.hold(epoch=0,origin='a',seq=1,wire=b'a'*600)
++    with pytest.raises(PatchError,match='equivocating'):
++        q.hold(epoch=0,origin='a',seq=1,wire=b'wrong')
++    with pytest.raises(PatchError,match='capacity'):
++        q.hold(epoch=0,origin='a',seq=2,wire=b'b'*600)
++    with pytest.raises(PatchError):q.acknowledge(epoch=0,origin='a',seq=1,verified_archive=True)
++    assert list(q.iter_epoch(0))==[('a',1,b'a'*600)]
++    q.close()
++    q=DurableOfflineOutbox(tmp_path,max_bytes=1024)
++    assert list(q.iter_epoch(0))==[('a',1,b'a'*600)]
++    q.close()
++
++
++def generation(tmp_path,epoch):
++    c=tmp_path/f'c{epoch}';o=tmp_path/f'o{epoch}'
++    c.mkdir();o.mkdir()
++    (c/'shard-0000').write_bytes(b'weights')
++    (o/'moment-0000').write_bytes(b'moments')
++    return ShardedGeneration(epoch,f'{epoch:064x}',f'{epoch+1:064x}',c,o)
++
++
++@pytest.mark.asyncio
++async def test_sharded_epoch_rcu_reader_survives_switch_and_writer_fences(tmp_path):
++    generations={i:generation(tmp_path,i) for i in (1,2)}
++    rcu=ShardedEpochRCU(tmp_path/'rcu',verify_generation=lambda g:
++        (g.checkpoint_dir/'shard-0000').read_bytes()==b'weights' and
++        (g.optimizer_dir/'moment-0000').read_bytes()==b'moments')
++    await rcu.stage(generations[1])
++    await rcu.publish(certified_step_boundary=lambda old,new:True)
++    await rcu.stage(generations[2])
++    started=asyncio.Event();release=asyncio.Event()
++    async def old_writer():
++        async with rcu.step() as active:
++            assert active.epoch==1
++            started.set();await release.wait()
++    writer=asyncio.create_task(old_writer());await started.wait()
++    fenced=asyncio.Event()
++    async def fence(old,new):fenced.set();return True
++    activation=asyncio.create_task(rcu.publish(certified_step_boundary=fence))
++    await asyncio.sleep(0.02)
++    assert not fenced.is_set()
++    release.set();await writer
++    assert (await activation).epoch==2
++    async with rcu.step() as active:assert active.epoch==2
++    assert rcu.pinned_epochs()==frozenset({2})
++    recovered=ShardedEpochRCU(tmp_path/'rcu',verify_generation=rcu.verify_generation)
++    out=recovered.recover(lambda e,p,m:generations[e])
++    assert out.epoch==2
++
++
++@pytest.mark.asyncio
++async def test_sharded_bad_fence_and_shard_modification_fail_closed(tmp_path):
++    rcu=ShardedEpochRCU(tmp_path/'rcu',verify_generation=lambda g:
++        (g.checkpoint_dir/'shard-0000').read_bytes()==b'weights')
++    await rcu.stage(generation(tmp_path,1))
++    with pytest.raises(PatchError,match='fence'):
++        await rcu.publish(certified_step_boundary=lambda old,new:False)
++    # A rejected unknown local handoff cannot silently reopen writer admission.
++    with pytest.raises(asyncio.TimeoutError):
++        await asyncio.wait_for(rcu.step().__aenter__(),timeout=.05)
++    rcu2=ShardedEpochRCU(tmp_path/'other',verify_generation=rcu.verify_generation)
++    g=generation(tmp_path,2)
++    await rcu2.stage(g)
++    (g.checkpoint_dir/'shard-0000').write_bytes(b'tampered')
++    with pytest.raises(PatchError,match='verification failed'):
++        await rcu2.publish(certified_step_boundary=lambda old,new:True)
++    assert not rcu2.pointer.exists()

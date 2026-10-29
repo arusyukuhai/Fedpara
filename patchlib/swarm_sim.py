@@ -25,6 +25,7 @@ import zipfile
 
 from .room_manifest import make_manifest, validate_manifest, manifest_digest
 from .roomid import create_room_id
+from .topology import neighbors
 
 
 class SimulationError(RuntimeError):
@@ -43,6 +44,8 @@ class LocalSignaling:
         self.server = None
         self.groups: dict[str, dict[Any, str]] = defaultdict(dict)
         self.manifests: dict[str, dict] = {}
+        self.revisions: dict[str, int] = defaultdict(int)
+        self.degrees: dict[str, int] = {}
         self.pairs: dict[str, list[Any]] = defaultdict(list)
         self.lock = asyncio.Lock()
         self.stats = defaultdict(int)
@@ -84,6 +87,14 @@ class LocalSignaling:
                         if not isinstance(peer,str) or not re.fullmatch(r'p[0-9a-f]{32}',peer):
                             await ws.send(json.dumps({'type':'error','message':'invalid peer'}))
                             return
+                        if msg.get('topology_v2') is not True:
+                            await ws.send(json.dumps({'type':'error',
+                                'message':'Unsupported client: bounded-v2 topology is required; upgrade Fedpara'}))
+                            return
+                        degree=msg.get('topology_degree',8)
+                        if type(degree)!=int or degree not in (2,4,6,8):
+                            await ws.send(json.dumps({'type':'error','message':'Invalid topology degree'}))
+                            return
                         manifest = msg.get('manifest')
                         if manifest is not None:
                             try: manifest = validate_manifest(manifest)
@@ -93,27 +104,38 @@ class LocalSignaling:
                         async with self.lock:
                             existing = room in self.groups and bool(self.groups[room])
                             old_manifest = self.manifests.get(room)
+                            previous=dict(self.groups[room])
+                            old_ids=sorted(previous.values())
                             if ((old_manifest is None and manifest is None) or
                                 (old_manifest is not None and manifest is not None and manifest_digest(old_manifest) != manifest_digest(manifest)) or
-                                len(self.groups[room]) >= self.limit or peer in self.groups[room].values()):
+                                (existing and degree!=self.degrees[room]) or
+                                len(previous)>=self.limit or peer in previous.values()):
                                 err = True
                             else:
                                 err = False
                                 if old_manifest is None:
                                     self.manifests[room] = manifest
-                                peers = list(self.groups[room].values())
-                                old_connections = list(self.groups[room])
                                 self.groups[room][ws] = peer
+                                self.degrees[room]=degree
                                 affiliation = 'group'
                                 self.stats['group_joins'] += 1
+                                self.revisions[room]+=1
+                                rev=self.revisions[room]
+                                after=sorted(old_ids+[peer])
                         if err:
                             await ws.send(json.dumps({'type':'error','message':'group rejected'}))
                             return
-                        await ws.send(json.dumps({'type':'group-members','peers':peers,
-                            'existing_room': existing, 'manifest':self.manifests[room]}))
-                        for old in old_connections:
-                            try: await old.send(json.dumps({'type':'group-peer-joined','peer':peer}))
-                            except Exception: pass
+                        await ws.send(json.dumps({'type':'group-members','topology':'bounded-v2',
+                            'degree':degree,'revision':rev,'online':len(after),
+                            'peers':sorted(neighbors(peer,after,max_degree=degree)),
+                            'existing_room':existing, 'manifest':self.manifests[room]}))
+                        for old,old_peer in previous.items():
+                            if neighbors(old_peer,old_ids,max_degree=degree) != neighbors(old_peer,after,max_degree=degree):
+                                try:
+                                    await old.send(json.dumps({'type':'group-neighbors',
+                                        'topology':'bounded-v2','revision':rev,'online':len(after),
+                                        'peers':sorted(neighbors(old_peer,after,max_degree=degree))}))
+                                except Exception:pass
                         continue
                     elif kind == 'join' and msg.get('mode') == 'p2p':
                         async with self.lock:
@@ -157,12 +179,26 @@ class LocalSignaling:
         finally:
             if affiliation == 'group':
                 async with self.lock:
+                    previous=dict(self.groups[room])
                     p = self.groups[room].pop(ws,None)
-                    others=list(self.groups[room])
+                    remaining=dict(self.groups[room])
+                    degree=self.degrees.get(room,8)
+                    if p:
+                        self.revisions[room]+=1
+                        rev=self.revisions[room]
+                    else:
+                        rev=self.revisions[room]
+                    if not remaining:self.degrees.pop(room,None)
                 if p:
-                    for other in others:
-                        try:await other.send(json.dumps({'type':'group-peer-left','peer':p}))
-                        except Exception:pass
+                    before=sorted(previous.values())
+                    after=sorted(remaining.values())
+                    for old,old_peer in remaining.items():
+                        if neighbors(old_peer,before,max_degree=degree) != neighbors(old_peer,after,max_degree=degree):
+                            try:
+                                await old.send(json.dumps({'type':'group-neighbors',
+                                    'topology':'bounded-v2','revision':rev,'online':len(after),
+                                    'peers':sorted(neighbors(old_peer,after,max_degree=degree))}))
+                            except Exception:pass
             elif affiliation == 'p2p':
                 async with self.lock:
                     if ws in self.pairs[room]:self.pairs[room].remove(ws)
@@ -192,7 +228,8 @@ def prepare_fixture(root: Path, *, vocab: int = 64, length: int = 12):
     torch.manual_seed(19071)
     model = GPT2LMHeadModel(GPT2Config(vocab_size=vocab, n_positions=32, n_ctx=32,
                             n_embd=16,n_layer=1,n_head=2, bos_token_id=1,eos_token_id=2))
-    model.save_pretrained(model_dir,safe_serialization=True)
+    from .cli import save_model
+    save_model(model,model_dir)
     # Do not tokenize inside the workers (and therefore avoid Hub I/O).
     gen=torch.Generator().manual_seed(19123)
     for i in range(24):

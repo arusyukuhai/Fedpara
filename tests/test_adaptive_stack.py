@@ -57,9 +57,11 @@ def test_room_descriptor_pin_and_members():
     d=RoomDiscovery('wss://example.invalid/ws','a'*32,'p'+'1'*32,manifest=m,
                     backup_urls=['wss://backup.invalid/ws'])
     assert len(d.urls)==2
-    d.accept({'type':'group-members','peers':['p'+'2'*32],'manifest':m})
+    d.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+              'revision':1,'online':2,'peers':['p'+'2'*32],'manifest':m})
     assert 'p'+'2'*32 in d.members
-    with pytest.raises(PatchError):d.accept({'type':'group-members','peers':[],'manifest':o})
+    with pytest.raises(PatchError):d.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+              'revision':2,'online':1,'peers':[],'manifest':o})
     # Emergency: last-known roster remains available to existing channels.
     d.online=False;d.emergency=True
     assert 'p'+'2'*32 in d.members

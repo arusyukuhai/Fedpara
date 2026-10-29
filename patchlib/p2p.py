@@ -27,7 +27,12 @@ WINDOW = 256 * 1024
 
 
 async def wait_send_window(channel, *, stall_seconds: float = 45.0):
-    """Fail a half-open SCTP transport whose outgoing buffer never drains."""
+    """Event-driven SCTP flow control, with bounded fallback polling.
+
+    Older aiortc / fake channels may not emit bufferedamountlow; in that case
+    poll at 2ms instead of the former 15ms. Do not busy-spin, retain a hard
+    no-progress deadline, and unregister transient callbacks on cancellation.
+    """
     previous=None
     deadline=time.monotonic()+stall_seconds
     while channel.readyState == 'open' and channel.bufferedAmount > WINDOW:
@@ -37,7 +42,34 @@ async def wait_send_window(channel, *, stall_seconds: float = 45.0):
         if time.monotonic()>=deadline:
             raise TimeoutError('SCTP send buffer stalled; reconnect transport')
         previous=remaining
-        await asyncio.sleep(.015)
+        # aiortc's bufferedamountlow signal avoids 15ms fixed sleeps during
+        # normal high-bandwidth transfers. The fallback also works on test
+        # channels without a pyee event emitter.
+        signal=asyncio.Event()
+        callback=signal.set
+        subscribed=False
+        try:
+            if hasattr(channel,'once') and hasattr(channel,'remove_listener'):
+                try:
+                    threshold = min(WINDOW // 2, remaining - 1)
+                    channel.bufferedAmountLowThreshold=threshold
+                    channel.once('bufferedamountlow',callback)
+                    subscribed=True
+                except (AttributeError,ValueError,RuntimeError):
+                    subscribed=False
+            if subscribed:
+                if channel.readyState!='open' or channel.bufferedAmount<=WINDOW:
+                    continue
+                try:
+                    await asyncio.wait_for(signal.wait(),timeout=.25)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(.002)
+        finally:
+            if subscribed:
+                try: channel.remove_listener('bufferedamountlow',callback)
+                except (AttributeError,ValueError,RuntimeError): pass
     if channel.readyState!='open':
         raise ConnectionError('DataChannel closed during transfer')
 
@@ -49,9 +81,14 @@ class FrameReceiver:
         self.verifier = verifier
         self.head: dict | None = None
         self.data = bytearray()
+        self._digest = hashlib.sha256()
 
     def feed(self, message: str | bytes) -> bytes | None:
         if isinstance(message, str):
+            # A data frame must not smuggle an unbounded JSON allocation into
+            # aiortc's synchronous callback; legitimate START/END fit easily.
+            if len(message) > 4096:
+                raise PatchError('oversized patch transfer control frame')
             try:
                 msg = json.loads(message)
             except (ValueError, TypeError) as exc:
@@ -62,7 +99,7 @@ class FrameReceiver:
                 if self.head is not None:
                     raise PatchError('overlapping patch transmissions')
                 size, digest = msg.get('size'), msg.get('sha256')
-                if not isinstance(size, int) or not 0 < size <= self.max_bytes:
+                if type(size) is not int or not 0 < size <= self.max_bytes:
                     raise PatchError('invalid patch size')
                 if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
                     raise PatchError('invalid checksum')
@@ -70,15 +107,17 @@ class FrameReceiver:
                     self.verifier(msg)
                 self.head = msg
                 self.data = bytearray()
+                self._digest = hashlib.sha256()
             elif msg.get('type') == 'end':
                 if self.head is None or msg.get('id') != self.head.get('id'):
                     raise PatchError('invalid patch end marker')
                 if len(self.data) != self.head['size']:
                     raise PatchError('truncated patch')
-                if hashlib.sha256(self.data).hexdigest() != self.head['sha256']:
+                if self._digest.hexdigest() != self.head['sha256']:
                     raise PatchError('checksum mismatch')
                 result = bytes(self.data)
                 self.head, self.data = None, bytearray()
+                self._digest = hashlib.sha256()
                 return result
             else:
                 raise PatchError('unknown frame type')
@@ -88,6 +127,7 @@ class FrameReceiver:
             if len(self.data) + len(message) > self.head['size']:
                 raise PatchError('patch exceeds announced size')
             self.data.extend(message)
+            self._digest.update(message)
         else:
             raise PatchError('invalid message data type')
         return None
@@ -97,7 +137,12 @@ async def transmit(channel, data: bytes, max_bytes: int = MAX_PATCH, signer=None
     if not 0 < len(data) <= max_bytes:
         raise PatchError('patch too large')
     patch_id = secrets.token_hex(12)
-    digest = hashlib.sha256(data).hexdigest()
+    # Large signed updates must not hash dozens of MiB synchronously on the
+    # WebRTC event loop. Small controls can avoid a thread-hop.
+    if len(data) >= 1024 * 1024:
+        digest = await asyncio.to_thread(lambda: hashlib.sha256(data).hexdigest())
+    else:
+        digest = hashlib.sha256(data).hexdigest()
     head = {'v':1, 'type':'start', 'id':patch_id, 'size':len(data), 'sha256':digest}
     if signer is not None: head['sig'] = signer(len(data), digest)
     channel.send(json.dumps(head))
@@ -227,6 +272,7 @@ class PatchNode:
         self.protocol_failure = asyncio.Event()
         self.last_error: Exception | None = None
         self._channel = None
+        self._framer = None
         self._send_task = None
         self.sent = asyncio.Event()
         # Observable finite-state negotiation. A slow ICE gather is not a dead link.
@@ -268,13 +314,21 @@ class PatchNode:
         while True:
             data = await self.outgoing.get()
             self.sent.clear()
-            if isinstance(data, Path):
-                await transmit_file(self._channel, data, max_bytes=self.max_bytes, signer=self.signer)
-                log.info('P2P state archive sent: %s', data)
-            else:
-                await transmit(self._channel, data, max_bytes=self.max_bytes, signer=self.signer)
-                log.info('P2P patch sent (%s bytes)', len(data))
-            self.sent.set()
+            try:
+                if isinstance(data, Path):
+                    await transmit_file(self._channel, data, max_bytes=self.max_bytes, signer=self.signer)
+                    log.info('P2P state archive sent: %s', data)
+                else:
+                    await transmit(self._channel, data, max_bytes=self.max_bytes, signer=self.signer)
+                    log.info('P2P patch sent (%s bytes)', len(data))
+                self.sent.set()
+            except (asyncio.CancelledError, ConnectionError, TimeoutError):
+                # A transport may disappear while a signed update is in the
+                # SCTP buffer. Put it back for the next attachment if space is
+                # available; journal frontier repair is the durable fallback.
+                if not self.outgoing.full():
+                    self.outgoing.put_nowait(data)
+                raise
 
     def _attach_channel(self, ch):
         if self._channel is not ch:
@@ -282,12 +336,17 @@ class PatchNode:
             if self._send_task is not None:
                 self._send_task.cancel()
                 self._send_task=None
+            # The retired DataChannel may never emit its close callback once
+            # replaced. Do not leak an unfinished .incoming-*.part snapshot.
+            if isinstance(self._framer, DiskFrameReceiver):
+                self._framer.close()
         self._channel = ch
         self.link_closed.clear()
         opened_once = False
         framer = (DiskFrameReceiver(self.state_dir,self.max_bytes,self.verifier)
                   if self.state_dir is not None
                   else FrameReceiver(self.max_bytes,self.verifier))
+        self._framer = framer
 
         @ch.on('open')
         def on_open():
@@ -313,6 +372,10 @@ class PatchNode:
 
         @ch.on('message')
         def on_message(message):
+            # A callback queued by an obsolete channel can run after the new
+            # one opened. It must not deliver stale frames into a fresh link.
+            if self._channel is not ch or ch.readyState != 'open':
+                return
             try:
                 result = framer.feed(message)
                 if result is not None:
@@ -355,8 +418,9 @@ class PatchNode:
                     servers.append(RTCIceServer(urls=urls, username=raw.get('username'),
                                                 credential=raw.get('credential')))
                 pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=servers))
-                pending = []
+                from .negotiation_guard import NegotiationGuard
                 role = first['role']
+                negotiation=NegotiationGuard(role)
                 self.role = role
                 self.set_phase('waiting-offer' if role == 'answerer' else 'waiting-peer')
 
@@ -433,18 +497,22 @@ class PatchNode:
                         if kind == 'peer-joined' and role == 'initiator':
                             await offer()
                         elif kind == 'offer' and role == 'answerer':
+                            if not negotiation.accept_offer(pc.signalingState):
+                                log.debug('ignored duplicate or stale SDP offer room=%s state=%s',self.room,pc.signalingState)
+                                continue
                             self.set_phase('answering-offer')
                             await pc.setRemoteDescription(RTCSessionDescription(sdp=msg['sdp'], type='offer'))
-                            for cand in pending: await pc.addIceCandidate(cand)
-                            pending.clear()
+                            for cand in negotiation.release(): await pc.addIceCandidate(cand)
                             await pc.setLocalDescription(await pc.createAnswer())
                             self.set_phase('answer-sent')
                             await signal({'type':'answer', 'sdp':pc.localDescription.sdp})
                         elif kind == 'answer' and role == 'initiator':
+                            if not negotiation.accept_answer(pc.signalingState):
+                                log.debug('ignored duplicate or stale SDP answer room=%s state=%s',self.room,pc.signalingState)
+                                continue
                             self.set_phase('processing-answer')
                             await pc.setRemoteDescription(RTCSessionDescription(sdp=msg['sdp'], type='answer'))
-                            for cand in pending: await pc.addIceCandidate(cand)
-                            pending.clear()
+                            for cand in negotiation.release(): await pc.addIceCandidate(cand)
                         elif kind == 'candidate':
                             if msg.get('candidate') is None:
                                 candidate = None
@@ -455,9 +523,9 @@ class PatchNode:
                                 candidate = candidate_from_sdp(line.removeprefix('candidate:'))
                                 candidate.sdpMid = info.get('sdpMid')
                                 candidate.sdpMLineIndex = info.get('sdpMLineIndex')
-                            if pc.remoteDescription is None:
-                                pending.append(candidate)
-                            else:
+                            key=json.dumps(msg.get('candidate'),sort_keys=True,separators=(',',':'))
+                            decision=negotiation.push_candidate(key,candidate,pc.remoteDescription is not None)
+                            if decision is True:
                                 await pc.addIceCandidate(candidate)
                         elif kind == 'peer-left':
                             # Losing signaling does not necessarily terminate an
@@ -480,7 +548,12 @@ class PatchNode:
                             raise ConnectionError('signed peer handshake failed: '+str(self.last_error))
                         if self.link_closed.is_set():
                             raise ConnectionError('P2P DataChannel closed after signaling outage')
-                        await asyncio.sleep(0.5)
+                        # Wake immediately on DataChannel closure instead of
+                        # polling every 500ms (critical in stop/resume races).
+                        try:
+                            await asyncio.wait_for(self.link_closed.wait(),timeout=1.0)
+                        except asyncio.TimeoutError:
+                            pass
         except asyncio.CancelledError:
             raise
         except Exception as exc:

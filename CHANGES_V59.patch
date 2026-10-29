@@ -1,0 +1,892 @@
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -292,7 +292,10 @@
+             min_weight_mib=(getattr(args,'disk_linear_min_mib',0.) or (1. if streaming else 0.)),
+             cache_fraction=getattr(args,'disk_cache_fraction',.6),
+             cache_mib=getattr(args,'disk_cache_mib',0),
+-            tile_mib=getattr(args,'disk_tile_mib',16),include_embeddings=streaming)
++            tile_mib=getattr(args,'disk_tile_mib',16),include_embeddings=streaming,
++            max_dir_bytes=(getattr(args,'live_disk_linear_max_gb',32)*1024**3
++                           if getattr(args,'cmd','') in ('train-live','train-elastic')
++                           and getattr(args,'disk_linear_dir',None) else None))
+         print('DISK LINEAR OFFLOAD:',json.dumps(info),flush=True)
+         if streaming and device.type!='cpu':
+             from .layer_offload import place_streaming_compute_device
+@@ -309,6 +312,24 @@
+ 
+ 
+ def load(args):
++    # In live FedSum the frozen genesis base becomes a mutable effective base.
++    # Every prepared generation therefore needs its OWN mmap files. Sharing
++    # --disk-linear-dir across active and shadow workers would silently corrupt
++    # the active worker when the shadow truncates its file-backed weights.
++    if (getattr(args,'cmd','') in ('train-live','train-elastic') and
++            getattr(args,'disk_linear_dir',None)):
++        import copy
++        from .live_linear_workspace_v59 import allocate, attach, _release
++        scratch,lease=allocate(args.disk_linear_dir)
++        isolated=copy.copy(args)
++        isolated.disk_linear_dir=scratch
++        try:
++            model,adapter=load_model(isolated,use_adapter=True)
++            attach(model,scratch,lease)
++            return model,adapter
++        except BaseException:
++            _release(lease,scratch)
++            raise
+     return load_model(args,use_adapter=True)
+ 
+ 
+@@ -788,6 +809,8 @@
+         help='Write device resource/rank/expert recommendations to JSON')
+     p.add_argument('--disk-linear-dir',type=Path,
+         help='Opt-in frozen nn.Linear disk-mapped weights; per-layer forward/backward I/O')
++    p.add_argument('--live-disk-linear-max-gb',type=int,default=32,
++        help='Per live model mutable base on-disk limit in GiB (not a RAM guarantee)')
+     p.add_argument('--disk-linear-min-mib',type=float,default=0.,
+         help='Only offload Linear weights >= this size in MiB')
+     p.add_argument('--wide-lora-rank',type=int,default=4,
+@@ -835,7 +858,9 @@
+     p.add_argument('--weight-decay', type=float, default=0.0)
+     p.add_argument('--grad-accum', type=int, default=1)
+     p.add_argument('--disk-optimizer-dir',type=Path,
+-        help='Opt-in disk-mapped AdamW moments (train/train-p2p only; not train-live)')
++        help='Opt-in disk-mapped AdamW moments; elastic live uses journal-tip-bound working snapshots')
++    p.add_argument('--disk-optimizer-max-gb',type=int,default=32,
++        help='Per-instance disk AdamW moment budget in GiB (elastic mode)')
+     p.add_argument('--resume-disk-optimizer',action='store_true',
+         help='Resume external AdamW moments; requires matching factor layout')
+     p.add_argument('--log-steps', type=int, default=10)
+@@ -1120,10 +1145,16 @@
+     args = parser.parse_args()
+     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(message)s')
+     if args.cmd in ('train-live','train-elastic'):
+-        if getattr(args,'disk_optimizer_dir',None):
+-            parser.error('disk optimizer state is not yet integrated with the durable live journal')
+-        if getattr(args,'disk_linear_dir',None):
+-            parser.error('live FedSum merge still materializes dense updates; disk Linear is not yet safe in train-live')
++        if getattr(args,'disk_optimizer_dir',None) and (args.mode!='elastic' or args.optimizer!='adamw'):
++            parser.error('live disk AdamW requires --mode elastic --optimizer adamw')
++        if getattr(args,'disk_optimizer_max_gb',32)<=0:
++            parser.error('--disk-optimizer-max-gb must be positive')
++        if getattr(args,'resume_disk_optimizer',False):
++            parser.error('live disk optimizer restores ONLY its journal-matched working snapshot; omit --resume-disk-optimizer')
++        if getattr(args,'disk_linear_dir',None) and getattr(args,'streaming_base',False):
++            parser.error('mutable live disk Linear cannot use the immutable safetensors streaming-base mapping')
++        if getattr(args,'live_disk_linear_max_gb',32)<=0:
++            parser.error('--live-disk-linear-max-gb must be positive')
+         if getattr(args,'auto_rank',False):
+             parser.error('P2P adapter rank must match shared genesis: do not use --auto-rank')
+         # httpx INFO dumps enormous *signed* CDN redirect URLs for normal 206
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -1573,9 +1573,21 @@
+                          publish=getattr(args,'room_public',False),
+                          max_degree=getattr(args,'max_neighbors',8)) if room_only else None
+     lobby_task=asyncio.create_task(lobby.run(room_stop)) if room_only else None
+-    def new_optimizer():
++    def new_optimizer(target_adapter=None, target_genesis=None):
++        selected=target_adapter if target_adapter is not None else adapter
++        if getattr(args,'disk_optimizer_dir',None):
++            if getattr(args,'optimizer','adamw')!='adamw':
++                raise PatchError('live disk optimizer supports AdamW only')
++            from .live_disk_optimizer_v59 import create_live_disk_optimizer
++            # Distinct scratch allocations for every ReLoRA reset and epoch.
++            # No crash can accidentally reuse partially modified mmap moments.
++            scope=(target_genesis or genesis)[:32]
++            return create_live_disk_optimizer(selected,
++                Path(args.disk_optimizer_dir)/scope,lr=args.lr,
++                weight_decay=args.weight_decay,
++                max_gb=getattr(args,'disk_optimizer_max_gb',32))
+         from .lora_muon import make_adapter_optimizer
+-        return make_adapter_optimizer(adapter,optimizer=getattr(args,'optimizer','adamw'),
++        return make_adapter_optimizer(selected,optimizer=getattr(args,'optimizer','adamw'),
+             lr=args.lr,weight_decay=(getattr(args,'muon_weight_decay',0.)
+               if getattr(args,'optimizer','adamw')=='lora-muon' else args.weight_decay),
+             muon_momentum=getattr(args,'muon_momentum',.9))
+@@ -1779,8 +1791,11 @@
+             # _apply_checked committed delta and deterministically refreshed
+             # local factors+anchors as part of this durable signed event.
+             # AdamW moments refer to the OLD factor coordinates: drop them.
++            old_optimizer=optimizer
+             optimizer=new_optimizer()
+             optimizer.zero_grad(set_to_none=True)
++            # Snapshot writer reads only immutable reflinks after capture.
++            if hasattr(old_optimizer,'close'):old_optimizer.close()
+             print(f'RELORA REFRESH event={emitted} factors=reset optimizer=reset '
+                   f'base=preserved',flush=True)
+         nonlocal_optimizer[0]=optimizer
+@@ -2294,12 +2309,7 @@
+                 cutoffs=proposal['cutoffs'])
+             archive.replay(next_engine) # always on the NEW independently loaded base
+             rebaser=StreamingCertifiedRebase(journal,archive,next_engine,proposal)
+-            from .lora_muon import make_adapter_optimizer
+-            next_optimizer=make_adapter_optimizer(fresh_adapter,
+-                optimizer=getattr(args,'optimizer','adamw'),lr=args.lr,
+-                weight_decay=(getattr(args,'muon_weight_decay',0.)
+-                  if getattr(args,'optimizer','adamw')=='lora-muon' else args.weight_decay),
+-                muon_momentum=getattr(args,'muon_momentum',.9))
++            next_optimizer=new_optimizer(fresh_adapter,next_genesis)
+             next_optimizer.zero_grad(set_to_none=True)
+             result=PreparedEpoch(proposal['epoch'],_epoch_proposal_digest(proposal),
+                 proposal['manifest'],TrainerGeneration(proposal['epoch'],next_genesis,
+@@ -2380,6 +2390,7 @@
+         old_archive=carry_archive
+         old_relay=carry_relay
+         model,adapter,optimizer,journal=(new.model,new.adapter,new.optimizer,new.journal)
++        if hasattr(old.optimizer,'close'):old.optimizer.close()
+         engine=new_engine;genesis=new.genesis;carry_archive=archive
+         local_steps=0;pending[0]=0;emitted=journal.next_seq(args.peer_id)-1
+         nonlocal_optimizer[0]=optimizer
+@@ -2513,7 +2524,9 @@
+                 for g in adapter.groups:
+                     for j,part in enumerate(g.overlay.local.parts):
+                         getattr(g.overlay.anchor,f'part{j}').copy_(part.detach())
++            old_optimizer=optimizer
+             optimizer=new_optimizer();optimizer.zero_grad(set_to_none=True)
++            if hasattr(old_optimizer,'close'):old_optimizer.close()
+             nonlocal_optimizer[0]=optimizer
+             from .localprogress import _tip
+             await working_saver.drain()
+@@ -3391,5 +3404,11 @@
+         if generation_compact_ledger is not None:generation_compact_ledger.close()
+         if carry_relay is not None:carry_relay.close()
+         journal.close()
++        if hasattr(optimizer,'close'):optimizer.close()
++        # An abandoned shadow should not hold an SSD optimizer allocation.
++        for prepared in auto_epoch_prepared.values():
++            shadow_optimizer=prepared.generation.optimizer
++            if shadow_optimizer is not optimizer and hasattr(shadow_optimizer,'close'):
++                shadow_optimizer.close()
+         if carry_archive is not None:
+             carry_archive.close()
+--- a/patchlib/layer_offload.py
++++ b/patchlib/layer_offload.py
+@@ -256,7 +256,7 @@
+ 
+ def install_disk_linear_offload(model: nn.Module, adapter, directory, *, min_weight_mib=0.,
+                                 allowed_paths=None,cache_fraction=.6,cache_mib=0,tile_mib=16,
+-                                include_embeddings=False):
++                                include_embeddings=False,max_dir_bytes=None):
+     """Map eligible *frozen* Linear weights from disk, replacing their forward.
+ 
+     Call AFTER moving the model and adapter factors to the target device.
+@@ -302,6 +302,8 @@
+         # immutable model generation. Refuse reinstallation on the same module.
+         if hasattr(module,'_fedpara_disk_path'):
+             raise RuntimeError(f'disk offload already installed for {path}')
++        if max_dir_bytes is not None and bytes_total+size>max_dir_bytes:
++            raise RuntimeError('disk Linear base exceeds configured per-model capacity')
+         inherited=getattr(base,'_fedpara_raw_path',None)
+         if inherited:
+             file=Path(inherited)
+--- a/patchlib/localprogress.py
++++ b/patchlib/localprogress.py
+@@ -54,24 +54,43 @@
+                 'tip':(journal_tip if journal_tip is not None else _tip(journal)),
+                 'steps':steps,'layout':adapter.layout,'kind':adapter.kind,
+                 'rank':adapter.rank,'alpha':adapter.alpha,'factor_count':len(params)}
+-    return snapshot_path(journal), tensors, meta
++        if getattr(optimizer,'live_disk_optimizer_v59',False):
++            meta['disk_optimizer'] = optimizer.snapshot_moments(snapshot_path(journal))
++    return snapshot_path(journal), tensors, meta, (optimizer if getattr(optimizer,'live_disk_optimizer_v59',False) else None)
+ 
+ 
+ def write_working_capture(captured):
+     """Slow safetensors serialization/fsync; safe to run in a worker thread."""
+-    target, tensors, meta = captured
++    target, tensors, meta, disk_optimizer = captured
+     target.parent.mkdir(parents=True, exist_ok=True)
+     name = target.with_name(target.name + '.' + os.urandom(8).hex() + '.tmp')
++    published=False
+     try:
++        if disk_optimizer is not None:
++            # Immutable reflinks are checksummed off the trainer/optimizer lock.
++            disk_optimizer.finalize_moments(meta['disk_optimizer'],target.parent)
+         save_file(tensors,str(name),metadata={'fedpara':json.dumps(meta,sort_keys=True)})
+         with name.open('rb') as fh: os.fsync(fh.fileno())
+         os.replace(name,target)
++        published=True
+         # Atomic rename alone is not a power-loss durable publication.
+         dfd=os.open(target.parent,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
+         try: os.fsync(dfd)
+         finally: os.close(dfd)
++        if disk_optimizer is not None:
++            # Old immutable reflink snapshots are no longer authoritative.
++            import shutil
++            keep = meta['disk_optimizer']['folder']
++            for folder in target.parent.glob(target.name+'.moments-*'):
++                if folder.is_dir() and not folder.is_symlink() and folder.name!=keep:
++                    shutil.rmtree(folder)
+     finally:
+         name.unlink(missing_ok=True)
++        if disk_optimizer is not None and not published:
++            # Only the unpublished COW directory may be destroyed. The older
++            # journal-bound working snapshot remains valid and untouched.
++            import shutil
++            shutil.rmtree(target.parent/meta['disk_optimizer']['folder'],ignore_errors=True)
+ 
+ 
+ def save_working(journal, adapter, optimizer, steps: int, *, journal_tip=None):
+@@ -139,6 +158,9 @@
+         keys = set(reader.keys())
+         if not expected <= keys or any(k not in expected and not (k.startswith('o.') and k.rsplit('.',1)[-1] in ('step','exp_avg','exp_avg_sq','max_exp_avg_sq')) for k in keys):
+             raise PatchError('unexpected local working snapshot keys')
++        disk_mode = getattr(optimizer,'live_disk_optimizer_v59',False)
++        if disk_mode != ('disk_optimizer' in meta):
++            raise PatchError('optimizer checkpoint format differs from selected live optimizer')
+         restored = []
+         for i, p in enumerate(params):
+             t = reader.get_tensor(f'f.{i}')
+@@ -158,9 +180,12 @@
+                     record[name] = item.to(p.device)
+             restored.append((p,t,record))
+         with adapter.lock, torch.no_grad():
++            if disk_mode:
++                optimizer.restore_moments(meta['disk_optimizer'],target.parent)
+             for p,t,record in restored:
+                 p.copy_(t.to(p.device))
+                 p.grad = None
+-                optimizer.state[p].clear()
+-                optimizer.state[p].update(record)
++                if not disk_mode:
++                    optimizer.state[p].clear()
++                    optimizer.state[p].update(record)
+         return meta['steps']
+--- a/patchlib/live_disk_optimizer_v59.py
++++ b/patchlib/live_disk_optimizer_v59.py
+@@ -0,0 +1,195 @@
++"""Opt-in disk-paged AdamW for the live elastic trainer.
++
++Working snapshots use *independent* copy-on-write reflinks where supported;
++fall back to streamed copies (slower and longer writer fence). Never hardlink
++mutable mmap moment files. An optimizer scratch directory is expendable:
++recovery trusts ONLY the journal-tip-bound, hash-checked working snapshot.
++"""
++from __future__ import annotations
++
++import errno
++import fcntl
++import hashlib
++import os
++import shutil
++import uuid
++from pathlib import Path
++
++from .core import PatchError
++from .disk_adamw import DiskAdamW, adapter_named_parameters
++
++FICLONE = 0x40049409
++CHUNK = 4 * 1024 * 1024
++
++
++def _sync_dir(path):
++    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
++    try: os.fsync(fd)
++    finally: os.close(fd)
++
++
++def _copy_immutable(src: Path, dst: Path):
++    """Reflink, NOT hardlink; destination keeps original bytes after next step."""
++    with src.open('rb') as inp, dst.open('xb') as out:
++        try:
++            fcntl.ioctl(out.fileno(), FICLONE, inp.fileno())
++        except OSError as exc:
++            if exc.errno not in (errno.EOPNOTSUPP, errno.ENOTTY, errno.EXDEV,
++                                 errno.EINVAL, errno.ENOSYS):
++                raise
++            inp.seek(0)
++            while True:
++                b = inp.read(CHUNK)
++                if not b: break
++                out.write(b)
++        out.flush(); os.fsync(out.fileno())
++
++
++def _hash(path):
++    h = hashlib.sha256()
++    with path.open('rb') as stream:
++        while block := stream.read(CHUNK): h.update(block)
++    return h.hexdigest()
++
++
++class LiveDiskAdamW(DiskAdamW):
++    """One-parameter-at-a-time optimizer, crash-safe via separate snapshots.
++
++    The active mmap files are intentionally NOT trusted after an unclean exit.
++    Each run gets its own scratch path. Only matching, hashed working snapshots
++    can restore moments and factors together.
++    """
++    live_disk_optimizer_v59 = True
++
++    def __init__(self, adapter, root, *, lr, weight_decay, max_bytes=32*1024**3):
++        self.root = Path(root)
++        self.root.mkdir(parents=True, exist_ok=True)
++        # Recover space left by crashed processes, but never touch a live run.
++        for old in self.root.glob('scratch-*'):
++            if old.is_symlink() or not old.is_dir() or not (old/'lease').is_file():
++                continue
++            try:
++                with (old/'lease').open('rb') as lease:
++                    fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++                    shutil.rmtree(old)
++            except (OSError, BlockingIOError):
++                pass
++        self.max_bytes = int(max_bytes)
++        params = adapter_named_parameters(adapter)
++        required = sum(p.numel()*8 for _, p in params)
++        if required > self.max_bytes or required > shutil.disk_usage(self.root).free:
++            raise PatchError('disk AdamW moment storage exceeds configured limit or free disk')
++        # A new run MUST NOT resume partially modified mmap files.
++        scratch = self.root / ('scratch-' + uuid.uuid4().hex)
++        scratch.mkdir(mode=0o700)
++        self._lease = (scratch / 'lease').open('wb')
++        fcntl.flock(self._lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++        self._closed = False
++        self._poisoned = False
++        try:
++            super().__init__(params, scratch, lr=lr, weight_decay=weight_decay)
++        except BaseException:
++            self._lease.close()
++            shutil.rmtree(scratch)
++            raise
++
++    def step(self, closure=None):
++        if self._closed or self._poisoned:
++            raise PatchError('disk optimizer is closed or a prior step failed')
++        try:
++            return super().step(closure)
++        except BaseException:
++            # The original in-place optimizer may have updated a strict prefix
++            # of parameters; the trainer must terminate and restart from the
++            # last journal-bound working snapshot, not attempt a second step.
++            self._poisoned=True
++            raise
++
++    def snapshot_moments(self, target):
++        """Must be invoked between optimizer steps under adapter.lock.
++
++        Reflink/copy happens here, before the writer resumes. The expensive
++        checksum of immutable cloned files happens off-lock in finalize.
++        """
++        if self._closed or self._poisoned:
++            raise PatchError('cannot checkpoint closed or partially failed disk optimizer')
++        target = Path(target)
++        destination = target.parent / (target.name + '.moments-' + uuid.uuid4().hex)
++        destination.mkdir(mode=0o700)
++        try:
++            self.flush()
++            desc = []
++            for _, p, key in self.entries:
++                for suffix in ('m', 'v'):
++                    name = f'{key}.{suffix}.f32'
++                    _copy_immutable(self.directory / name, destination / name)
++                    desc.append({'file':name, 'bytes':p.numel()*4})
++            _sync_dir(destination)
++            _sync_dir(destination.parent)
++            return {'format':'live-disk-adamw-v59', 'folder':destination.name,
++                    'layout':self._description, 'steps':{
++                        key:int(self.state[p].get('step', 0)) for _,p,key in self.entries},
++                    'files':desc}
++        except BaseException:
++            shutil.rmtree(destination, ignore_errors=True)
++            raise
++
++    def finalize_moments(self, meta, parent):
++        dest = Path(parent) / meta['folder']
++        for item in meta['files']:
++            file = dest / item['file']
++            if file.stat().st_size != item['bytes']:
++                raise PatchError('disk optimizer snapshot truncated')
++            item['sha256'] = _hash(file)
++
++    def restore_moments(self, meta, parent):
++        if (meta.get('format') != 'live-disk-adamw-v59' or
++                meta.get('layout') != self._description or
++                set(meta.get('steps', {})) != {key for _,_,key in self.entries}):
++            raise PatchError('disk optimizer working snapshot layout mismatch')
++        folder = meta.get('folder')
++        # Directory must be directly adjacent to its owning working snapshot.
++        if (not isinstance(folder, str) or
++                '.working.safetensors.moments-' not in folder or
++                Path(folder).name != folder):
++            raise PatchError('unsafe optimizer snapshot path')
++        source = Path(parent) / folder
++        if source.is_symlink() or not source.is_dir():
++            raise PatchError('missing or unsafe optimizer snapshot directory')
++        expected = {f'{key}.{kind}.f32' for _,_,key in self.entries for kind in ('m','v')}
++        entries = meta.get('files')
++        if not isinstance(entries, list) or {x.get('file') for x in entries if isinstance(x,dict)} != expected or len(entries) != len(expected):
++            raise PatchError('incomplete optimizer snapshot')
++        # Validate every shard before changing ANY live mmap moment file.
++        for key, step in meta['steps'].items():
++            if type(step) is not int or step < 0 or step > 2**63-1:
++                raise PatchError('invalid optimizer step counter')
++        for item in entries:
++            f = source / item['file']
++            if f.is_symlink() or not f.is_file() or f.stat().st_size != item['bytes'] or _hash(f) != item.get('sha256'):
++                raise PatchError('damaged optimizer snapshot; refusing partial restore')
++        for item in entries:
++            dst = self.directory / item['file']
++            tmp = self.directory / (item['file'] + '.' + uuid.uuid4().hex + '.tmp')
++            try:
++                _copy_immutable(source / item['file'],tmp)
++                os.replace(tmp,dst)
++            finally:tmp.unlink(missing_ok=True)
++        for _,p,key in self.entries:
++            step = meta['steps'][key]
++            if type(step) is not int or step < 0:
++                raise PatchError('invalid optimizer step counter')
++            self.state[p]['step'] = step
++        self.iteration = max(meta['steps'].values(),default=0)
++        self.flush()
++
++    def close(self):
++        if not self._closed:
++            self._closed = True
++            self._lease.close()
++            shutil.rmtree(self.directory, ignore_errors=True)
++
++
++def create_live_disk_optimizer(adapter, root, *, lr, weight_decay, max_gb=32):
++    return LiveDiskAdamW(adapter,root,lr=lr,weight_decay=weight_decay,
++                         max_bytes=max_gb*1024**3)
+--- a/patchlib/live_linear_workspace_v59.py
++++ b/patchlib/live_linear_workspace_v59.py
+@@ -0,0 +1,44 @@
++"""Separate mutable disk Linear scratch per live model/epoch.
++
++A shadow model must NEVER truncate/overwrite the current worker's mmap base.
++Crash leftovers are reclaimed under non-blocking file locks. Only locations
++created by this allocator (scratch-*) are eligible for automatic deletion.
++"""
++from __future__ import annotations
++import fcntl
++import os
++import shutil
++import uuid
++import weakref
++from pathlib import Path
++
++
++def _release(lease, scratch):
++    try:
++        lease.close()
++    finally:
++        shutil.rmtree(scratch, ignore_errors=True)
++
++
++def allocate(root):
++    root=Path(root)
++    root.mkdir(parents=True,exist_ok=True)
++    for scratch in root.glob('scratch-*'):
++        if not scratch.is_dir() or scratch.is_symlink() or not (scratch/'lease').is_file():
++            continue
++        try:
++            with (scratch/'lease').open('rb') as lock:
++                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++                shutil.rmtree(scratch)
++        except (OSError,BlockingIOError):
++            pass
++    scratch=root/('scratch-'+uuid.uuid4().hex)
++    scratch.mkdir(mode=0o700)
++    lease=(scratch/'lease').open('wb')
++    fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
++    return scratch,lease
++
++
++def attach(model,scratch,lease):
++    weakref.finalize(model,_release,lease,scratch)
++    return model
+--- a/tests/test_live_disk_optimizer_v59.py
++++ b/tests/test_live_disk_optimizer_v59.py
+@@ -0,0 +1,247 @@
++"""Live SSD moments: validation, WAL-bound crash restart, COW and replay guards."""
++from __future__ import annotations
++import asyncio
++from copy import deepcopy
++from pathlib import Path
++import torch
++import pytest
++
++from patchlib.core import PatchError, UniversalAdapter
++from patchlib.elastic import EventJournal
++from patchlib.localprogress import save_working, restore_working, AsyncWorkingSaver, snapshot_path, _tip
++from patchlib.live_disk_optimizer_v59 import create_live_disk_optimizer
++from test_livefed import Tiny
++
++
++def make_adapter(seed):
++    torch.manual_seed(seed)
++    return UniversalAdapter(Tiny(),'model','revision',kind='loha',rank=3)
++
++
++def run_gradient(adapter, optimizer):
++    optimizer.zero_grad(set_to_none=True)
++    torch.manual_seed(1977)
++    loss=adapter.model.forward()
++    loss.backward()
++    with adapter.lock:
++        optimizer.step()
++        optimizer.zero_grad(set_to_none=True)
++
++
++def test_live_disk_moments_match_reference_and_safe_restart(tmp_path):
++    adapter=make_adapter(119)
++    other=make_adapter(119)
++    path=tmp_path/'events.sqlite3'
++    journal=EventJournal(path,'a'*64)
++    disk=create_live_disk_optimizer(adapter,tmp_path/'moments',lr=.002,weight_decay=.01)
++    reference=torch.optim.AdamW(other.trainable_parameters(),lr=.002,weight_decay=.01)
++    for _ in range(3):
++        run_gradient(adapter,disk)
++        run_gradient(other,reference)
++    for left,right in zip(adapter.trainable_parameters(),other.trainable_parameters()):
++        assert torch.allclose(left,right,atol=1e-6,rtol=1e-5)
++    save_working(journal,adapter,disk,3)
++    original=[p.detach().clone() for p in adapter.trainable_parameters()]
++    old_moments=[(disk.directory/f'{key}.m.f32').read_bytes() for _,_,key in disk.entries]
++    # The *active* optimizer continues after a consistent COW capture.
++    for _ in range(2):run_gradient(adapter,disk)
++    # The previously published snapshot must still be the 3-step version.
++    restored=make_adapter(119)
++    recovered=create_live_disk_optimizer(restored,tmp_path/'moments',lr=.002,weight_decay=.01)
++    assert restore_working(journal,restored,recovered)==3
++    for left,right in zip(original,restored.trainable_parameters()):
++        assert torch.equal(left,right)
++    for i,(_,_,key) in enumerate(recovered.entries):
++        assert (recovered.directory/f'{key}.m.f32').read_bytes()==old_moments[i]
++    # The next AdamW step exactly matches reference state at saved boundary.
++    ref2=make_adapter(119)
++    refopt=torch.optim.AdamW(ref2.trainable_parameters(),lr=.002,weight_decay=.01)
++    for _ in range(3):run_gradient(ref2,refopt)
++    run_gradient(restored,recovered)
++    run_gradient(ref2,refopt)
++    for a,b in zip(restored.trainable_parameters(),ref2.trainable_parameters()):
++        assert torch.allclose(a,b,atol=1e-6,rtol=1e-5)
++    disk.close();recovered.close();journal.close()
++
++
++def test_disk_moments_detect_corruption_without_mutating_parameters(tmp_path):
++    adapter=make_adapter(131)
++    journal=EventJournal(tmp_path/'j.sqlite3','b'*64)
++    disk=create_live_disk_optimizer(adapter,tmp_path/'disk',lr=.001,weight_decay=0)
++    run_gradient(adapter,disk)
++    save_working(journal,adapter,disk,1)
++    folder=next(tmp_path.glob('j.sqlite3.working.safetensors.moments-*'))
++    one=next(folder.glob('*.m.f32'))
++    with one.open('r+b') as f:
++        f.seek(0);v=f.read(1);f.seek(0);f.write(bytes([v[0]^1]))
++    dest=make_adapter(131)
++    new=create_live_disk_optimizer(dest,tmp_path/'disk',lr=.001,weight_decay=0)
++    before=[p.detach().clone() for p in dest.trainable_parameters()]
++    with pytest.raises(PatchError,match='damaged optimizer snapshot'):
++        restore_working(journal,dest,new)
++    assert all(torch.equal(b,p) for b,p in zip(before,dest.trainable_parameters()))
++    disk.close();new.close();journal.close()
++
++
++def test_old_journal_tip_skips_moment_restore(tmp_path):
++    adapter=make_adapter(132)
++    journal=EventJournal(tmp_path/'j.sqlite3','c'*64)
++    disk=create_live_disk_optimizer(adapter,tmp_path/'disk',lr=.001,weight_decay=0)
++    run_gradient(adapter,disk)
++    save_working(journal,adapter,disk,1)
++    assert journal.append('alice',1,b'newer authenticated commit')
++    dest=make_adapter(132)
++    next_disk=create_live_disk_optimizer(dest,tmp_path/'disk',lr=.001,weight_decay=0)
++    assert restore_working(journal,dest,next_disk)==0
++    disk.close();next_disk.close();journal.close()
++
++
++def test_async_disk_checkpoint_keeps_immutable_snapshot(tmp_path):
++    async def worker():
++        adapter=make_adapter(140)
++        journal=EventJournal(tmp_path/'j.sqlite3','d'*64)
++        disk=create_live_disk_optimizer(adapter,tmp_path/'disk',lr=.001,weight_decay=0)
++        saver=AsyncWorkingSaver()
++        run_gradient(adapter,disk)
++        assert await saver.checkpoint(journal,adapter,disk,1,journal_tip=_tip(journal))
++        run_gradient(adapter,disk)
++        await saver.drain()
++        dest=make_adapter(140)
++        new=create_live_disk_optimizer(dest,tmp_path/'disk',lr=.001,weight_decay=0)
++        assert restore_working(journal,dest,new)==1
++        disk.close();new.close();journal.close()
++    asyncio.run(worker())
++
++
++def test_disk_layout_or_optimizer_transition_rejected(tmp_path):
++    adapter=make_adapter(151)
++    journal=EventJournal(tmp_path/'j.sqlite3','e'*64)
++    disk=create_live_disk_optimizer(adapter,tmp_path/'disk',lr=.001,weight_decay=0)
++    run_gradient(adapter,disk)
++    save_working(journal,adapter,disk,1)
++    dest=make_adapter(151)
++    torch_optim=torch.optim.AdamW(dest.trainable_parameters())
++    with pytest.raises(PatchError,match='checkpoint format'):
++        restore_working(journal,dest,torch_optim)
++    disk.close();journal.close()
++
++
++def test_live_fedsum_mutates_only_its_private_disk_base(tmp_path):
++    from patchlib.continual import ContinualElasticEngine
++    from patchlib.layer_offload import install_disk_linear_offload
++    from patchlib.live_linear_workspace_v59 import allocate, attach
++    from copy import deepcopy
++    torch.manual_seed(421)
++    template=torch.nn.Sequential(torch.nn.Linear(7,5),torch.nn.Tanh(),torch.nn.Linear(5,3))
++    def install(peer):
++        m=deepcopy(template)
++        ad=UniversalAdapter(m,'toy','one',kind='loha',rank=3)
++        work,lease=allocate(tmp_path/'disk_bases')
++        info=install_disk_linear_offload(m,ad,work)
++        assert info['layers']==2
++        attach(m,work,lease)
++        j=EventJournal(tmp_path/(peer+'.sqlite3'),'7'*64)
++        e=ContinualElasticEngine(ad,peer,'7'*64,j,unsafe=True)
++        return e
++    first=install('alice')
++    second=install('bob')
++    assert first.adapter.model[0]._fedpara_disk_path != second.adapter.model[0]._fedpara_disk_path
++    original=second.adapter.model[0].parametrizations.weight.original.clone()
++    opt=torch.optim.AdamW(first.adapter.trainable_parameters(),lr=.002)
++    data=torch.randn(3,7)
++    with first.adapter.lock:
++        first.adapter.model(data).square().mean().backward()
++        opt.step();opt.zero_grad(set_to_none=True)
++    wire=first.seal_local(1)
++    assert second.ingest(wire)
++    assert not torch.equal(second.adapter.model[0].parametrizations.weight.original,original)
++    for group1,group2 in zip(first.adapter.groups,second.adapter.groups):
++        original1=first.adapter.model.get_submodule(group1.aliases[0].rpartition('.')[0]).parametrizations.weight.original
++        original2=second.adapter.model.get_submodule(group2.aliases[0].rpartition('.')[0]).parametrizations.weight.original
++        assert torch.allclose(original1,original2,atol=1e-6,rtol=1e-5)
++    first.journal.close();second.journal.close()
++
++
++def test_disk_base_live_sessions_do_not_overwrite_one_another(tmp_path):
++    from patchlib.live_linear_workspace_v59 import allocate, _release
++    root=tmp_path/'base'
++    one,lease_one=allocate(root)
++    path=one/'weights.bin'
++    path.write_bytes(b'original')
++    two,lease_two=allocate(root)
++    assert one.exists() and path.read_bytes()==b'original'
++    assert two!=one
++    _release(lease_one,one)
++    _release(lease_two,two)
++    assert not one.exists() and not two.exists()
++
++
++def test_real_elastic_train_live_with_disk_moments(tmp_path,monkeypatch):
++    """Exercise the production optimizer factory, seal and working checkpoint."""
++    import hashlib
++    from types import SimpleNamespace
++    from patchlib import elasticnet
++    async def disconnected(self):
++        raise ConnectionError('test remote stays offline')
++    monkeypatch.setattr(elasticnet.ElasticNode,'run',disconnected)
++    torch.manual_seed(1331)
++    model=Tiny()
++    def load(_):
++        return model, UniversalAdapter(model,'one-base','fstate-sha256:seed',rank=3)
++    def batches(_):
++        while True: yield None
++    def step(m,adapter,opt,unused,args):
++        with adapter.lock:
++            torch.manual_seed(132)
++            loss=m.forward()
++            loss.backward()
++            return float(loss.detach())
++    args=__import__('types').SimpleNamespace(
++        trust_remote_code=False,factory_file=None,allow_legacy_bin=False,resume=None,
++        state_base='initial.fstate',grad_accum=1,local_steps=2,rounds=2,
++        reinit_every=20,signing_key=None,unsafe_unsigned=True,
++        ws='ws://127.0.0.1:8080/ws',link=['bob=pair_room_123456789'],
++        peer_id='alice',trusted_peer_key=[],roster_file=None,model_id='one-base',
++        journal=tmp_path/'online.db',self_public_key=None,max_journal_gb=1,
++        max_delta_rms=1000.,lr=.0001,weight_decay=0.,device='cpu',
++        wire_dtype='float16',token='',max_patch_mb=5,peer_timeout=.2,
++        heartbeat_interval=.05,boot_grace=0.,sync_timeout=.1,
++        inventory_interval=.05,inventory_cycle=.1,shard_state_manifest=None,
++        shard_store=None,full_state_output=None,log_steps=100,peers=None,
++        checkpoint_every=0,checkpoint_dir=tmp_path/'ck',shard_mb=4,max_state_gb=1,
++        disk_optimizer_dir=tmp_path/'live-ssd',disk_optimizer_max_gb=1,
++        durable_every=1,working_save_every=1)
++    asyncio.run(elasticnet.train_elastic(args,load_model=load,
++                                         training_batches=batches,run_step=step))
++    assert snapshot_path(SimpleNamespace(path=args.journal)).is_file()
++    # Active scratch removed on clean shutdown; durable working snapshot remains.
++    assert not list((tmp_path/'live-ssd').rglob('optimizer.json'))
++    assert len(list(tmp_path.glob('online.db.working.safetensors.moments-*')))==1
++
++
++def test_live_cli_model_loader_isolates_shadow_weights(tmp_path,monkeypatch):
++    from patchlib import cli
++    from patchlib.layer_offload import install_disk_linear_offload
++    from types import SimpleNamespace
++    torch.manual_seed(327)
++    template=torch.nn.Sequential(torch.nn.Linear(4,5),torch.nn.Linear(5,2))
++    used=[]
++    def fake_loader(opts,use_adapter=True):
++        mdl=deepcopy(template)
++        adapter=UniversalAdapter(mdl,'m','v',kind='loha',rank=2)
++        info=install_disk_linear_offload(mdl,adapter,opts.disk_linear_dir)
++        used.append(opts.disk_linear_dir)
++        return mdl,adapter
++    monkeypatch.setattr(cli,'load_model',fake_loader)
++    args=SimpleNamespace(cmd='train-live',disk_linear_dir=tmp_path/'model-base')
++    model_a,a=cli.load(args)
++    model_b,b=cli.load(args)
++    assert len(set(used))==2
++    assert all(str(p).startswith(str(args.disk_linear_dir)) for p in used)
++    backing_a=model_a[0]._fedpara_disk_source
++    backing_b=model_b[0]._fedpara_disk_source
++    data_a=Path(backing_a).read_bytes()
++    assert Path(backing_b).is_file()
++    with torch.no_grad():
++        model_b[0].parametrizations.weight.original.add_(1)
++    assert Path(backing_a).read_bytes()==data_a
+--- a/benchmarks/bench_live_disk_v59.py
++++ b/benchmarks/bench_live_disk_v59.py
+@@ -0,0 +1,58 @@
++"""Reproducible local CPU AdamW microbenchmark; NOT 300B or WebRTC.
++
++PYTHONPATH=. python benchmarks/bench_live_disk_v59.py --output BENCHMARK_V59.json
++"""
++from __future__ import annotations
++import argparse, json, tempfile, time, statistics
++from pathlib import Path
++import torch
++from patchlib.disk_adamw import DiskAdamW
++
++
++def run(d, n, steps):
++    torch.manual_seed(9)
++    p0=[torch.nn.Parameter(torch.randn(d,d)) for _ in range(n)]
++    p1=[torch.nn.Parameter(x.detach().clone()) for x in p0]
++    with tempfile.TemporaryDirectory() as root:
++        a=torch.optim.AdamW(p0,lr=1e-3,weight_decay=.001)
++        b=DiskAdamW([(f'w{i}',p) for i,p in enumerate(p1)],root,lr=1e-3,weight_decay=.001)
++        grads=[torch.randn(d,d) for _ in range(n)]
++        def bench(opt,params):
++            timings=[]
++            for _ in range(steps):
++                for p,g in zip(params,grads):p.grad=g
++                start=time.perf_counter()
++                opt.step()
++                timings.append((time.perf_counter()-start)*1000)
++            return timings
++        # Baseline first, disk second, both have identical values and gradients.
++        timings_a=bench(a,p0)
++        timings_b=bench(b,p1)
++        b.flush()
++        err=max((x-y).abs().max().item() for x,y in zip(p0,p1))
++        resident_adam=sum(v.numel()*v.element_size() for state in a.state.values() for v in state.values() if isinstance(v,torch.Tensor))
++        resident_disk=sum(v.numel()*v.element_size() for state in b.state.values() for v in state.values() if isinstance(v,torch.Tensor))
++        disk_bytes=sum((Path(root)/f).stat().st_size for f in __import__('os').listdir(root) if f.endswith('.f32'))
++    return {
++        'task':'synthetic dense CPU adapter-like tensors; no model/P2P/checkpoint',
++        'parameter_count':n*d*d,'optimizer_steps':steps,
++        'adamw_step_median_ms':statistics.median(timings_a),
++        'disk_adamw_step_median_ms':statistics.median(timings_b),
++        'max_abs_parameter_difference':err,
++        'pytorch_adamw_moment_ram_bytes':resident_adam,
++        'disk_adamw_moment_ram_bytes':resident_disk,
++        'disk_adamw_moment_file_bytes':disk_bytes,
++        'note':'disk RAM excludes OS mmap page cache; disk uses staged whole-parameter moments; no SSD performance guarantee',
++    }
++
++if __name__=='__main__':
++    parser=argparse.ArgumentParser()
++    parser.add_argument('--output',type=Path,default=Path('BENCHMARK_V59.json'))
++    parser.add_argument('--dim',type=int,default=256)
++    parser.add_argument('--matrices',type=int,default=4)
++    parser.add_argument('--steps',type=int,default=12)
++    args=parser.parse_args()
++    torch.set_num_threads(2)
++    result=run(args.dim,args.matrices,args.steps)
++    args.output.write_text(json.dumps(result,indent=2)+'\n')
++    print(json.dumps(result,indent=2))
+--- a/README_V59_STATUS.md
++++ b/README_V59_STATUS.md
+@@ -0,0 +1,38 @@
++# Kagami v59 — opt-in live disk AdamW + isolated mutable disk Linear
++
++2026-10-27. **Experimental integration, not a 300B or zero-pause certification.**
++
++## What is now connected to the actual elastic `train-live` route
++
++- `--disk-optimizer-dir PATH` opts into `LiveDiskAdamW` in `train-live --mode elastic --optimizer adamw`. No separate full optimizer moment tensors are held in PyTorch `optimizer.state`; first and second FP32 moments reside in per-factor files via `torch.from_file(shared=True)`. For each step, only that factor's moments are staged on the compute device. CPU OS page cache may still consume RAM, and factor *parameters/gradients* continue to reside on their compute device. Does **not** work with LoRA-Muon or synchronous mode.
++- At durable working snapshots the optimizer flushes its mmap files and creates independent filesystem copy-on-write clones (`FICLONE` when supported, otherwise a streamed copy). **Never hardlinks live-writable optimizer mmaps.** CPU copies of low-rank factors and cloned moments correspond to the same optimizer/journal fence. The expensive SHA-256 of immutable snapshot moment files runs in the asynchronous snapshot writer, outside the optimizer lock. The safetensors working snapshot only publishes after the moment clones are checksummed. Publication is atomic and fsynced; it references the moment snapshot's unique local folder. Missing, truncated, modified, layout-incompatible or schema-incompatible moment files cause startup to refuse recovery. An obsolete journal tip causes both the old factors and moments to be ignored. The previous snapshot stays intact if the new writer fails before publication.
++- Every optimizer reset (including ReLoRA and new-generation shadow preparation) creates **new scratch files**; a restart never interprets dirty/uncommitted files from a previous run as authoritative. Scratch allocations are limited by `--disk-optimizer-max-gb` (default 32 GiB) and available disk; active scratch is deleted on clean shutdown; orphan scratch directories from crashed processes are reclaimed only if their OS file lease is no longer held.
++- `--disk-linear-dir PATH` now opts into **live elastic mutable base Linear mmap**, using the existing per-layer/row-tiled frozen-weight autograd and the already bounded FedSum event application. The live model and its generation shadow use different, lock-protected scratch subdirectories, so preparing a shadow cannot truncate a current worker's base files. A per-model cap `--live-disk-linear-max-gb` (default 32 GiB) refuses excess scratch storage. Only supported `nn.Linear` modules are offloaded; other layers/buffers may remain fully resident. GPU cache is invalidated on signed base mutations. Because live FedSum **changes** the effective base, the `--streaming-base` read-only safetensors mapping is intentionally **not** accepted with live `--disk-linear-dir`.
++- The standard signed-journal, prior certified generation checks, source event verification and cut/carry/recovery logic remain in force. No unsigned update or uncertified epoch is admitted for the sake of offloading.
++
++## How to opt in
++
++Pass these extra flags to an existing, otherwise valid `train-live` / `train-elastic` command:
++
++```
++--mode elastic --optimizer adamw \
++--disk-optimizer-dir /fast-nvme/kagami/optimizer \
++--disk-optimizer-max-gb 32 \
++--disk-linear-dir /fast-nvme/kagami/model-base \
++--live-disk-linear-max-gb 32
++```
++
++Each command still needs its normal pinned genesis, dataset source, trusted peer identity and journal arguments. Avoid sharing a journal or mutable weight scratch between independent active trainers. `--resume-disk-optimizer` is prohibited in live mode: **only a matching, verified `.working.safetensors` snapshot may restore optimizer moments**.
++
++### Performance and storage tradeoffs
++
++- Disk moment files require ~`8 × adapter parameter count` bytes (two FP32 arrays), in addition to the factors, gradients, model, journal and temporary working snapshots. While a working snapshot is captured, CoW clones can preserve historical pages, and asynchronous fsync/hash consumes I/O. Filesystem reflink unsupported → streamed copy under the writer fence, which can **significantly pause the local worker**; v59 is not strict zero-pause.
++- Mutable base Linear offload needs up to one full offloaded copy *per active/shadow generation*. At initialization, the ordinary PyTorch loader may still materialize **the full base once** before moving eligible Linear weights to disk. Thus this is *not* a 300B model loader. For read-only safetensors streaming in existing modes, see v30, but do not mix it with this live mutable base path.
++- DiskAdamW accesses at least one whole factor's moment arrays per step, then writes updated moments back. There is no sparse optimizer paging within an individual factor; very wide factors can still exceed available RAM/VRAM. The CPU filesystem cache is intentionally not counted as `optimizer.state` residency. Neither bounded I/O latency nor NVMe bandwidth is guaranteed.
++- A failed optimizer step poisons the optimizer; the caller must restart from a journal-matched working checkpoint. Optional intermediate working snapshots may be skipped under backpressure; signed events remain durable. The system is **not** a transactional exactly-once model+optimizer commit at each individual SGD step.
++
++## Remaining work
++
++**Not implemented or proven:** 300B model loader/execution without peak full-model allocation; tensor/expert parallel training over multiple physical peers; strict bounded-memory/latency per *arbitrarily large single tensor*; true zero-pause model/Optimizer checkpoint+switch; end-to-end 4,096 real-device WAN benchmarking; malicious/Byzantine committee resilience; hard finite disk bound combined with indefinite offline recovery. Existing v2 epoch consensus still requires its pinned committee safety assumptions.
++
++See `VALIDATION_V59.md` for reproducible test scope and `BENCHMARK_V59.json` for a local synthetic CPU comparison. Neither constitutes a 300B production validation.
+--- a/VALIDATION_V59.md
++++ b/VALIDATION_V59.md
+@@ -0,0 +1,22 @@
++# v59 test and performance validation — 2026-10-27
++
++## Verification
++
++- A full pytest run after implementing the live offload integration finished with **721 PASSED, 3 SKIPPED, 0 FAILED** in **84.90 s**, after the new integration tests and cleanup/fail-closed guards were included.
++- Post-addition, a focused set including live disk optimizer, disk Linear, continual FedSum, v57/v58 epoch export, v52 carry, hot switch and durable journal state completed with **70 PASSED**.
++- Nine v59-specific tests passed, including: numeric AdamW parity; immutable moment snapshots under continued training; missing or corrupted optimizer snapshot rejection; journal-tip mismatch; async snapshot/recovery; optimizer format switching; signed FedSum application into separate disk Linear mappings; leased scratch isolation; and a real (offline-neighbor) elastic `train-live` integration with disk AdamW.
++- **Do not mistake any simulated or disconnected-neighbor test for 4,096 physical peers or a 300B model.**
++
++## Small local CPU microbenchmark
++
++Run `PYTHONPATH=. python benchmarks/bench_live_disk_v59.py --output BENCHMARK_V59.json` from the project root.
++
++- 4 dense 256×256 FP32 adapter-like matrices = 262,144 trainable parameters, 12 identical-gradient steps; no model forward/backward, epoch switch, signed networking, WebRTC, or disk working checkpoint included.
++- Conventional torch AdamW step median: **0.332 ms**.
++- Disk AdamW step median: **1.028 ms** (~3.1× slower on this filesystem/CPU workload).
++- Maximum absolute parameter difference: **2.38e-7**.
++- Conventional AdamW moment tensors: **2,097,168 bytes** counted within PyTorch optimizer state; disk AdamW optimizer state moment tensors: **0 bytes** counted within `optimizer.state`, with **2,097,152 bytes** of moment files. This **excludes OS page cache, file mappings, I/O buffers and factor tensors**.
++
++## Regression caveats
++
++The codebase contains long-running WAN/swarm/integration tests. Report only completed invocations and keep these results distinct from a genuine multi-host endurance test. In particular, no crash fault injection at every filesystem syscall, zero-pause SLA or 300B end-to-end training throughput has been established.
+--- a/BENCHMARK_V59.json
++++ b/BENCHMARK_V59.json
+@@ -0,0 +1,12 @@
++{
++  "task": "synthetic dense CPU adapter-like tensors; no model/P2P/checkpoint",
++  "parameter_count": 262144,
++  "optimizer_steps": 12,
++  "adamw_step_median_ms": 0.33169249991260585,
++  "disk_adamw_step_median_ms": 1.0278760000801412,
++  "max_abs_parameter_difference": 2.384185791015625e-07,
++  "pytorch_adamw_moment_ram_bytes": 2097168,
++  "disk_adamw_moment_ram_bytes": 0,
++  "disk_adamw_moment_file_bytes": 2097152,
++  "note": "disk RAM excludes OS mmap page cache; disk uses staged whole-parameter moments; no SSD performance guarantee"
++}

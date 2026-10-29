@@ -166,7 +166,7 @@ def test_real_train_loop_with_permanently_absent_peer(tmp_path,monkeypatch,reini
         'model_id':'one-base','revision':'fstate-sha256:seed',
         'layout':UniversalAdapter(initial,'one-base','fstate-sha256:seed',rank=3).layout,
         'kind':'loha','rank':3,'alpha':3.0,
-        'optimizer_protocol':'continual-elastic-fedsum-relora-v4',
+        'optimizer_protocol':'continual-elastic-fedsum-relora-mixed-async-v6',
         'reinit_every':reinit_every})).hexdigest())
     assert j.count()==3
     assert len(list((tmp_path/"ck").glob("*.fmanifest")))>=1

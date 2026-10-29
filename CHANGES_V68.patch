@@ -1,0 +1,411 @@
+--- v67/patchlib/cli.py
++++ v68/patchlib/cli.py
+@@ -411,9 +411,9 @@
+ def training_batches(args):
+     # A specialized SFT/PPO peer is permitted to omit a pretraining corpus.
+     # Never fetch HF data for an objective with an explicit zero coefficient.
+     if (getattr(args,'pt_weight',1.) == 0 and
+-            (getattr(args,'sft_jsonl',None) or getattr(args,'ppo_jsonl',None))):
++            (getattr(args,'sft_jsonl',None) or getattr(args,'ppo_jsonl',None) or getattr(args,'sft_hf_repo','') or getattr(args,'ppo_hf_repo',''))):
+         while True:
+             yield {}  # run_step checks pt_weight=0 before invoking the model
+     from .data_sampling import peer_sampling_seed, shuffled_cycle
+     from .room_manifest import load_manifest
+@@ -1008,10 +1008,22 @@
+                    help='JSON mapping, e.g. {"input_ids":"tokens","attention_mask":null}; pin consistently across peers')
+     # v65: one model, simultaneous gradient contributions from PT, SFT and PPO.
+     p.add_argument('--mix-policy',type=Path,
+                    help='Optional shared immutable JSON objective protocol: permits PT-only, SFT, or PPO specialized peers in one signed room')
+-    p.add_argument('--sft-jsonl',type=Path,help='Optional JSONL {prompt,response} supervised chat examples')
+-    p.add_argument('--ppo-jsonl',type=Path,help='Optional JSONL {prompt,reference} verifiable-reward rollout prompts')
++    p.add_argument('--sft-jsonl',type=Path,help='Local JSONL {prompt,response}; alternatively use --sft-hf-repo and related flags')
++    p.add_argument('--ppo-jsonl',type=Path,help='Local JSONL {prompt,reference}; alternatively use --ppo-hf-repo and related flags')
++    p.add_argument('--sft-hf-repo',default='',help='Pinned Hub SFT repo')
++    p.add_argument('--sft-hf-revision',default='',help='Pinned Hub SFT revision')
++    p.add_argument('--sft-hf-config',default='',help='Pinned Hub SFT config')
++    p.add_argument('--sft-hf-split',default='train',help='Pinned Hub SFT split')
++    p.add_argument('--sft-hf-prompt-column',default='prompt',help='Pinned Hub SFT prompt_column')
++    p.add_argument('--sft-hf-response-column',default='response',help='Pinned Hub SFT response_column')
++    p.add_argument('--ppo-hf-repo',default='',help='Pinned Hub PPO repo')
++    p.add_argument('--ppo-hf-revision',default='',help='Pinned Hub PPO revision')
++    p.add_argument('--ppo-hf-config',default='',help='Pinned Hub PPO config')
++    p.add_argument('--ppo-hf-split',default='train',help='Pinned Hub PPO split')
++    p.add_argument('--ppo-hf-prompt-column',default='prompt',help='Pinned Hub PPO prompt_column')
++    p.add_argument('--ppo-hf-reference-column',default='reference',help='Pinned Hub PPO reference_column')
+     p.add_argument('--pt-weight',type=float,default=1.,help='Pretraining objective gradient coefficient')
+     p.add_argument('--sft-weight',type=float,default=1.,help='Response-only SFT objective coefficient')
+     p.add_argument('--ppo-weight',type=float,default=.2,help='Clipped PPO objective coefficient')
+     p.add_argument('--ppo-clip',type=float,default=.2,help='PPO actor and value clipping epsilon')
+@@ -1375,9 +1387,9 @@
+     if (args.cmd in ('train','train-p2p','train-live','train-elastic') and
+             not any((args.batches_dir,args.text_file,args.jsonl,args.room_manifest)) and
+             not (args.cmd in ('train-live','train-elastic') and args.room_id) and
+             not (getattr(args,'pt_weight',1.)==0 and
+-                 (getattr(args,'sft_jsonl',None) or getattr(args,'ppo_jsonl',None)))):
++                 (getattr(args,'sft_jsonl',None) or getattr(args,'ppo_jsonl',None) or getattr(args,'sft_hf_repo','') or getattr(args,'ppo_hf_repo','')))):
+         parser.error('provide a pretraining source, or set --pt-weight 0 with an SFT/PPO corpus')
+     if args.cmd in ('train','train-p2p','train-live','train-elastic') and args.room_manifest and any((args.batches_dir,args.text_file,args.jsonl)):
+         from .room_manifest import load_manifest
+         if load_manifest(args.room_manifest)['version'] == 2:
+--- v67/patchlib/mixed_learning_v65.py
++++ v68/patchlib/mixed_learning_v65.py
+@@ -17,25 +17,26 @@
+ from torch import nn
+ from torch.nn import functional as F
+ 
+ from .model_contract_v64 import invoke_model, training_loss, _loss_or_logits
++from .hf_mixed_datasets_v68 import source_selected, source_spec, HFRowCycle
+ 
+ 
+ class MixedLearningError(ValueError):
+     pass
+ 
+ 
+ def enabled(args):
+-    return bool(getattr(args, 'sft_jsonl', None) or getattr(args, 'ppo_jsonl', None))
++    return source_selected(args,'sft') or source_selected(args,'ppo')
+ 
+ 
+ def spec(args):
+     """No local dataset paths in genesis: peers can use distinct data shards."""
+     if not enabled(args) and not getattr(args,'mix_policy',None):
+         return None
+     generated={'version':'pt-sft-clipped-ppo-v65',
+-            'objectives':[bool(getattr(args,'sft_jsonl',None)),
+-                          bool(getattr(args,'ppo_jsonl',None))],
++            'objectives':[source_selected(args,'sft'),
++                          source_selected(args,'ppo')],
+             'weights':[float(getattr(args,'pt_weight',1.)),
+                        float(getattr(args,'sft_weight',1.)),
+                        float(getattr(args,'ppo_weight',.2))],
+             'ppo_clip':float(getattr(args,'ppo_clip',.2)),
+@@ -125,18 +126,19 @@
+     if not 1<=int(args.ppo_max_tokens)<=128 or not 1<=int(args.ppo_reuse)<=8:
+         raise MixedLearningError('PPO token cap must be 1..128, reuse 1..8')
+     if not 8<=int(getattr(args,'max_length',128))<=131072:
+         raise MixedLearningError('max_length must be >= 8 for mixed causal-LM')
+-    if not getattr(args,'mix_policy',None) and not getattr(args,'sft_jsonl',None) and getattr(args,'sft_weight',1.) not in (0.,1.):
++    if not getattr(args,'mix_policy',None) and not source_selected(args,'sft') and getattr(args,'sft_weight',1.) not in (0.,1.):
+         raise MixedLearningError('SFT weight supplied without --sft-jsonl')
+-    if not getattr(args,'mix_policy',None) and not getattr(args,'ppo_jsonl',None) and getattr(args,'ppo_weight',.2) not in (0.,.2):
++    if not getattr(args,'mix_policy',None) and not source_selected(args,'ppo') and getattr(args,'ppo_weight',.2) not in (0.,.2):
+         raise MixedLearningError('PPO weight supplied without --ppo-jsonl')
+-    if float(args.pt_weight)+ (float(args.sft_weight) if args.sft_jsonl else 0) + (float(args.ppo_weight) if args.ppo_jsonl else 0) == 0:
++    if float(args.pt_weight)+ (float(args.sft_weight) if source_selected(args,'sft') else 0) + (float(args.ppo_weight) if source_selected(args,'ppo') else 0) == 0:
+         raise MixedLearningError('at least one mixed objective must have positive weight')
+     for name in ('sft_jsonl','ppo_jsonl'):
+         path=getattr(args,name,None)
+         if path and (not Path(path).is_file() or Path(path).stat().st_size>4*1024**3):
+             raise MixedLearningError(f'{name} must be a readable local JSONL <= 4GiB')
++    source_spec(args,'sft');source_spec(args,'ppo')
+     spec(args)  # validate optional shared room policy before any network join
+ 
+ 
+ class JsonlCycle:
+@@ -224,10 +226,12 @@
+     def __init__(self,args,tokenizer):
+         validate_args(args)
+         self.args=args
+         self.tok=tokenizer
+-        self.sft=JsonlCycle(args.sft_jsonl) if getattr(args,'sft_jsonl',None) else None
+-        self.ppo=JsonlCycle(args.ppo_jsonl) if getattr(args,'ppo_jsonl',None) else None
++        self.sft=(HFRowCycle(source_spec(args,'sft'),'sft') if getattr(args,'sft_hf_repo','') else
++                  JsonlCycle(args.sft_jsonl) if getattr(args,'sft_jsonl',None) else None)
++        self.ppo=(HFRowCycle(source_spec(args,'ppo'),'ppo') if getattr(args,'ppo_hf_repo','') else
++                  JsonlCycle(args.ppo_jsonl) if getattr(args,'ppo_jsonl',None) else None)
+         self.reward_scorer=None
+         if self.ppo and getattr(args,'ppo_reward','token_match')=='hf_model':
+             from .reward_model_v67 import HFRewardScorer
+             self.reward_scorer=HFRewardScorer(args)
+--- v67/patchlib/mix_gui_v66.py
++++ v68/patchlib/mix_gui_v66.py
+@@ -10,23 +10,10 @@
+ from pathlib import Path
+ from types import SimpleNamespace
+ import secrets
+ 
+-FIELDS=('enabled','sft_jsonl','ppo_jsonl','pt_weight','sft_weight','ppo_weight',
+-        'ppo_clip','ppo_kl_coef','ppo_value_coef','ppo_gamma','ppo_gae_lambda',
+-        'ppo_max_tokens','ppo_reuse','ppo_reward','critic_kind','critic_hidden',
+-        'critic_lr','critic_init','reward_model_id','reward_model_revision',
+-        'reward_model_device','reward_model_loader','reward_model_output','reward_model_format','reward_model_index',
+-        'reward_model_scale','reward_model_max_length')
+-DEFAULT={'enabled':False,'sft_jsonl':'','ppo_jsonl':'','pt_weight':1.,
+-         'sft_weight':1.,'ppo_weight':.2,'ppo_clip':.2,'ppo_kl_coef':.02,
+-         'ppo_value_coef':.5,'ppo_gamma':.99,'ppo_gae_lambda':.95,
+-         'ppo_max_tokens':8,'ppo_reuse':2,'ppo_reward':'token_match',
+-         'critic_kind':'mlp','critic_hidden':32,'critic_lr':.001,'critic_init':'',
+-         'reward_model_id':'','reward_model_revision':'','reward_model_device':'cpu',
+-         'reward_model_loader':'sequence_classification',
+-         'reward_model_output':'logits','reward_model_format':'plain','reward_model_index':0,
+-         'reward_model_scale':1.0,'reward_model_max_length':512}
++FIELDS=('sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
++DEFAULT={'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
+ 
+ 
+ def _path(value, *, ext, role=None, hf_reward=False):
+     if not isinstance(value,str) or len(value)>4096 or '\x00' in value:
+@@ -66,8 +53,10 @@
+     if task!='causal-lm':raise ValueError('Simultaneous PT/SFT/PPO currently needs a causal LM')
+     for key in ('sft_jsonl','ppo_jsonl'):
+         values[key]=_path(values[key],ext='.jsonl',role=key.removesuffix('_jsonl'),
+                           hf_reward=(key=='ppo_jsonl' and values['ppo_reward']=='hf_model'))
++    from .hf_mixed_datasets_v68 import source_spec, source_selected
++    source_spec(SimpleNamespace(**values),'sft');source_spec(SimpleNamespace(**values),'ppo')
+     values['critic_init']=_path(values['critic_init'],ext='.safetensors')
+     for key in ('pt_weight','sft_weight','ppo_weight','ppo_clip','ppo_kl_coef',
+                 'ppo_value_coef','ppo_gamma','ppo_gae_lambda','critic_lr','reward_model_scale'):
+         raw=values[key]
+@@ -82,14 +71,14 @@
+         from .reward_model_v67 import reward_spec
+         reward_spec(SimpleNamespace(**values))
+         if values['reward_model_device'] not in ('cpu','cuda','mps'):
+             raise ValueError('Invalid Reward Model inference device')
+-    if not (values['sft_jsonl'] or values['ppo_jsonl']):
++    if not (source_selected(SimpleNamespace(**values),'sft') or source_selected(SimpleNamespace(**values),'ppo')):
+         if not allow_pt_only or values['pt_weight']<=0:
+             raise ValueError('Choose an SFT/PPO JSONL, or join an existing pinned mixed room as a PT-only peer')
+-    if values['ppo_weight']>0 and not values['ppo_jsonl'] and not allow_pt_only:
++    if values['ppo_weight']>0 and not source_selected(SimpleNamespace(**values),'ppo') and not allow_pt_only:
+         raise ValueError('PPO weight is nonzero: choose a PPO dataset')
+-    if values['sft_weight']>0 and not values['sft_jsonl'] and not allow_pt_only:
++    if values['sft_weight']>0 and not source_selected(SimpleNamespace(**values),'sft') and not allow_pt_only:
+         raise ValueError('SFT weight is nonzero: choose an SFT dataset')
+     from .mixed_learning_v65 import validate_args
+     args=SimpleNamespace(**{k:values[k] for k in values},
+                          hf_task=task,loss_policy='auto',max_length=128,
+@@ -125,8 +114,13 @@
+                 ('reward_model_index','--reward-model-index'),
+                 ('reward_model_scale','--reward-model-scale'),
+                 ('reward_model_max_length','--reward-model-max-length')):
+             result.extend([flag,str(values[key])])
++    for role in ('sft','ppo'):
++        if values.get(role+'_hf_repo'):
++            for suffix in ('repo','revision','config','split','prompt_column',('response' if role=='sft' else 'reference')+'_column'):
++                if values[role+'_hf_'+suffix]:
++                    result.extend(['--'+role+'-hf-'+suffix.replace('_','-'),values[role+'_hf_'+suffix]])
+     for key,flag in (('sft_jsonl','--sft-jsonl'),('ppo_jsonl','--ppo-jsonl'),
+                      ('critic_init','--critic-init')):
+         if values[key]:result.extend([flag,values[key]])
+     return result
+--- v67/patchlib/webview_controller.py
++++ v68/patchlib/webview_controller.py
+@@ -443,11 +443,11 @@
+         if not config.is_file():
+             result=dict(DEFAULT)
+         else:
+             data=json.loads(config.read_text(encoding='utf8'))
+-            if not isinstance(data,dict) or data.get('room')!=room or set(data)-{'room'}!=set(DEFAULT):
++            if not isinstance(data,dict) or data.get('room')!=room or not (set(data)-{'room'}).issubset(DEFAULT):
+                 raise ValueError('Local mixed training configuration is malformed')
+-            result={k:data[k] for k in DEFAULT}
++            result={**DEFAULT,**{k:data[k] for k in data if k!='room'}}
+         # This contains only room-wide, nonsecret hyperparameters, never local
+         # dataset paths or imported critic checkpoint paths.
+         pinned=folder/'mixed-objectives-v66.json'
+         if pinned.exists():
+@@ -638,9 +638,9 @@
+             self._checkpoint_path=checkpoint
+             self._model_storage_path=model_storage
+             self._remember_room(room)
+             return {'pid':pid,'journal':str(journal),'mixed_enabled':mixed['enabled'],
+-                    'critic_dir':str(critic_dir) if mixed['ppo_jsonl'] else None,'profile':profile.name,
++                    'critic_dir':str(critic_dir) if (mixed['ppo_jsonl'] or mixed.get('ppo_hf_repo')) else None,'profile':profile.name,
+                     'checkpoint_file':str(checkpoint),'model_storage_dir':str(model_storage),
+                     'auto_state':automatic,'initialization':initialization,
+                     'base':str(base) if base is not None else '(safetensors streaming genesis)'}
+ 
+@@ -910,8 +910,43 @@
+                 variants.append({'config':config,'split':split})
+                 seen.add((config,split))
+             if len(variants)>=64:break
+         return {'repo':repo,'revision':revision,'variants':variants,'available':bool(variants)}
++
++    def pin_mixed_dataset(self, payload):
++        """Resolve a Hub dataset ID to a commit and optional config/split metadata.
++
++        Does not download training rows or run repository code.
++        """
++        if not isinstance(payload,dict):raise ValueError('Invalid Hugging Face dataset selection')
++        from .hf_mixed_datasets_v68 import _REPO, _SHA
++        repo=payload.get('repo','')
++        if not isinstance(repo,str) or not _REPO.fullmatch(repo):
++            raise ValueError('Expected organization/dataset repository ID')
++        try:
++            from huggingface_hub import HfApi
++        except ImportError as exc:
++            raise RuntimeError('Install huggingface_hub for dataset browsing') from exc
++        api=HfApi()
++        info=api.dataset_info(repo)
++        sha=str(getattr(info,'sha','') or '')
++        if not _SHA.fullmatch(sha):
++            raise ValueError('Hub did not return a valid immutable dataset SHA')
++        variants=[];seen=set()
++        try:
++            for entry in api.list_dataset_parquet_files(repo,revision=sha):
++                config=str(getattr(entry,'config','') or '')
++                split=str(getattr(entry,'split','') or '')
++                if config and split and (config,split) not in seen:
++                    variants.append({'config':config,'split':split})
++                    seen.add((config,split))
++                if len(variants)>=64:break
++        except Exception:
++            # Not every Hub dataset exposes Parquet metadata; the pinned SHA
++            # remains valid and the user can supply split/config manually.
++            pass
++        return {'repo':repo,'revision':sha.lower(),'variants':variants,
++                'gated':bool(getattr(info,'gated',False))}
+ 
+     def search_reward_models(self, payload):
+         """Metadata-only Hub discovery; never download or execute model code."""
+         if not isinstance(payload,dict):raise ValueError('Expected search object')
+--- v67/patchlib/webview_gui.py
++++ v68/patchlib/webview_gui.py
+@@ -124,8 +124,11 @@
+         return self._controller.inspect_dataset(payload)
+ 
+     def recommend_training(self, payload):
+         return self._controller.recommend_training(payload)
++
++    def pin_mixed_dataset(self, payload):
++        return self._controller.pin_mixed_dataset(payload)
+ 
+     def search_reward_models(self, payload):
+         return self._controller.search_reward_models(payload)
+ 
+--- v67/web/desktop_webview.js
++++ v68/web/desktop_webview.js
+@@ -135,16 +135,16 @@
+ function get(id){return String($(id).value||'').trim();}
+ const routes=Object.freeze({defaults:'defaults',newRoom:'new_room',save:'save_room',join:'join_room',register:'register_room',
+   publicModels:'list_rooms',localModels:'local_models',select:'select_model',compat:'model_compatibility',
+   mixedSettings:'mixed_settings',pickMixFile:'pick_training_file',
+-  rewardSearch:'search_reward_models',rewardInspect:'inspect_reward_model',device:'device_capabilities',datasets:'search_datasets',inspect:'inspect_dataset',plan:'recommend_training',code:'register_code',start:'start_training',
++  mixPinDataset:'pin_mixed_dataset',rewardSearch:'search_reward_models',rewardInspect:'inspect_reward_model',device:'device_capabilities',datasets:'search_datasets',inspect:'inspect_dataset',plan:'recommend_training',code:'register_code',start:'start_training',
+   status:'training_status',history:'training_history',pause:'stop_training',resume:'resume_training',disconnect:'disconnect_training',
+   open:'open_storage',paths:'storage_paths',copy:'copy_logs',saveLog:'save_logs',eval:'evaluate',evalStatus:'eval_status',cancelEval:'cancel_eval',evalCheckpoints:'available_checkpoints',captureSnapshot:'request_eval_snapshot',snapshotStatus:'eval_snapshot_status'});
+ let bridgeWait;
+ function ready(){return !!window.pywebview?.api&&typeof window.pywebview.api.defaults==='function';}
+ async function waitBridge(){if(ready())return window.pywebview.api;if(bridgeWait)return bridgeWait;bridgeWait=new Promise((resolve,reject)=>{const started=Date.now();let timer=null;function check(){if(ready()){clearTimeout(timer);resolve(window.pywebview.api);return;}if(Date.now()-started>9000){reject(new Error(t('noBrowser')));return;}timer=setTimeout(check,110);}check();}).finally(()=>{bridgeWait=null;});return bridgeWait;}
+ async function api(action,payload={}){const name=routes[action];if(!name)throw Error('Unknown RPC route');const bridge=await waitBridge();if(typeof bridge[name]!=='function')throw Error('Missing Python RPC: '+name);
+-  const ms=(action==='datasets'||action==='inspect'||action==='plan'||action==='publicModels'||action==='join'||action==='select'||action==='rewardSearch'||action==='rewardInspect')?16500:(action==='eval'||action==='captureSnapshot')?45000:action==='status'?4500:10000;
++  const ms=(action==='datasets'||action==='inspect'||action==='plan'||action==='publicModels'||action==='join'||action==='select'||action==='rewardSearch'||action==='rewardInspect'||action==='mixPinDataset')?16500:(action==='eval'||action==='captureSnapshot')?45000:action==='status'?4500:10000;
+   let timer;try{return await Promise.race([Promise.resolve().then(()=>bridge[name](payload)),new Promise((_,reject)=>timer=setTimeout(()=>reject(Error('RPC timeout: '+action)),ms))]);}finally{clearTimeout(timer);}}
+ const safe=(title,call)=>async (...args)=>{try{return await call(...args);}catch(e){notify(title+': '+String(e.message||e),true);return null;}};
+ function create(tag,cls,text){const el=document.createElement(tag);if(cls)el.className=cls;if(text!==undefined)el.textContent=String(text);return el;}
+ function setText(id,text){$(id).textContent=String(text);}
+@@ -269,9 +269,9 @@
+ async function searchDatasets(){setText('datasetCount','Searching...');const result=await api('datasets',{query:get('datasetQuery')});hubResults=result.datasets||[];datasetsPage=0;drawHub();}
+ $('searchDatasets').addEventListener('click',safe('Datasets',searchDatasets));$('datasetQuery').addEventListener('keydown',e=>{if(e.key==='Enter')void safe('Datasets',searchDatasets)();});$('datasetPrev').addEventListener('click',()=>{datasetsPage=Math.max(0,datasetsPage-1);drawHub();});$('datasetNext').addEventListener('click',()=>{datasetsPage++;drawHub();});
+ // Local paths are per-peer and must never appear in a public room manifest.
+ let mixedPinnedPolicy=null;
+-const mixedIds={sft_jsonl:'mixSftPath',ppo_jsonl:'mixPpoPath',critic_init:'mixCriticInit',
++const mixedIds={sft_hf_repo:'mixSftHfRepo',sft_hf_revision:'mixSftHfRevision',sft_hf_config:'mixSftHfConfig',sft_hf_split:'mixSftHfSplit',sft_hf_prompt_column:'mixSftHfPrompt',sft_hf_response_column:'mixSftHfOther',ppo_hf_repo:'mixPpoHfRepo',ppo_hf_revision:'mixPpoHfRevision',ppo_hf_config:'mixPpoHfConfig',ppo_hf_split:'mixPpoHfSplit',ppo_hf_prompt_column:'mixPpoHfPrompt',ppo_hf_reference_column:'mixPpoHfOther',sft_jsonl:'mixSftPath',ppo_jsonl:'mixPpoPath',critic_init:'mixCriticInit',
+   pt_weight:'mixPtWeight',sft_weight:'mixSftWeight',ppo_weight:'mixPpoWeight',
+   ppo_clip:'mixPpoClip',ppo_kl_coef:'mixPpoKl',ppo_value_coef:'mixValueCoef',
+   ppo_gamma:'mixGamma',ppo_gae_lambda:'mixGaeLambda',ppo_max_tokens:'mixPpoTokens',
+   ppo_reuse:'mixPpoReuse',ppo_reward:'mixPpoReward',
+@@ -283,21 +283,22 @@
+ const mixedNumeric=new Set(['pt_weight','sft_weight','ppo_weight','ppo_clip','ppo_kl_coef',
+   'ppo_value_coef','ppo_gamma','ppo_gae_lambda','ppo_max_tokens','ppo_reuse',
+   'critic_hidden','critic_lr','reward_model_index','reward_model_scale','reward_model_max_length']);
+ const mixedInt=new Set(['ppo_max_tokens','ppo_reuse','critic_hidden','reward_model_index','reward_model_max_length']);
+-function syncMixed(){const on=get('mixEnabled')==='on';$('mixFields').hidden=!on;const k=get('mixCriticKind');$('mixCriticHidden').disabled=k==='linear';
++function syncMixed(){for(const x of ['Sft','Ppo']){const hf=get('mix'+x+'Source')==='hf';$('mix'+x+'Hub').hidden=!hf;$('mix'+x+'Local').hidden=hf;}const on=get('mixEnabled')==='on';$('mixFields').hidden=!on;const k=get('mixCriticKind');$('mixCriticHidden').disabled=k==='linear';
+   $('mixRewardFields').hidden=get('mixPpoReward')!=='hf_model';setText('mixPtDataset',sources.map(x=>x.repo+' ['+x.split+']').join(', ')||'No PT dataset');}
+ function mixedPayload(){
+  const enabled=get('mixEnabled')==='on';if(!enabled)return {enabled:false};
+  const data={enabled:true};
+  for(const [field,id] of Object.entries(mixedIds)){
+    const raw=get(id);data[field]=mixedNumeric.has(field)?Number(raw):raw;
+    if(mixedNumeric.has(field)&&(!raw||!Number.isFinite(data[field])||(mixedInt.has(field)&&!Number.isInteger(data[field]))))throw Error('Invalid '+field);
+  }
+- if(!data.sft_jsonl&&!data.ppo_jsonl&&data.pt_weight<=0)throw Error('Select an SFT/PPO dataset or assign a positive PT weight');
++ for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){if(get('mix'+tag+'Source')==='hf')data[role+'_jsonl']='';else{for(const key of Object.keys(data))if(key.startsWith(role+'_hf_'))data[key]='';}}
++ if(!data.sft_jsonl&&!data.ppo_jsonl&&!data.sft_hf_repo&&!data.ppo_hf_repo&&data.pt_weight<=0)throw Error('Select an SFT/PPO dataset or assign a positive PT weight');
+  if(!mixedPinnedPolicy){
+-   if(!data.sft_jsonl)data.sft_weight=0;
+-   if(!data.ppo_jsonl)data.ppo_weight=0;
++   if(!data.sft_jsonl&&!data.sft_hf_repo)data.sft_weight=0;
++   if(!data.ppo_jsonl&&!data.ppo_hf_repo)data.ppo_weight=0;
+  }
+  if(get('task')!=='causal-lm')throw Error('Mixed PT/SFT/PPO currently requires causal-lm');
+  return data;
+ }
+@@ -306,10 +307,11 @@
+     ppo_kl_coef:.02,ppo_value_coef:.5,ppo_gamma:.99,ppo_gae_lambda:.95,
+     ppo_max_tokens:8,ppo_reuse:2,ppo_reward:'token_match',
+     reward_model_id:'',reward_model_revision:'',reward_model_device:'cpu',reward_model_loader:'sequence_classification',
+     reward_model_output:'logits',reward_model_format:'plain',reward_model_index:0,reward_model_scale:1,reward_model_max_length:512,critic_kind:'mlp',critic_hidden:32,critic_lr:.001};
+-  $(id).value=value??defaults[field]??'';
+- }syncMixed();}
++  const hfDefaults={sft_hf_split:'train',sft_hf_prompt_column:'prompt',sft_hf_response_column:'response',ppo_hf_split:'train',ppo_hf_prompt_column:'prompt',ppo_hf_reference_column:'reference'};
++  $(id).value=value??defaults[field]??hfDefaults[field]??'';
++ }for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){$('mix'+tag+'Source').value=data?.[role+'_hf_repo']?'hf':'local';}syncMixed();}
+ async function reloadMixed(room){
+  const data=await api('mixedSettings',{room});mixedPinnedPolicy=data.pinned_policy||null;
+  if(mixedPinnedPolicy&&!data.enabled){
+    data.enabled=true;
+@@ -327,8 +329,29 @@
+      data.reward_model_device='cpu';}
+    if(p.critic){data.critic_kind=p.critic.kind;data.critic_hidden=p.critic.hidden;data.critic_lr=p.critic.lr;}
+  }
+  applyMixed(data);
++}
++for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){
++ $('mix'+tag+'Source').addEventListener('change',syncMixed);
++ $('mix'+tag+'HfSearch').addEventListener('click',safe(role.toUpperCase()+' Hugging Face datasets',async()=>{
++   const results=await api('datasets',{query:get('mix'+tag+'HfRepo')||role});
++   const select=$('mix'+tag+'HfResults');select.replaceChildren(create('option',null,'Select a dataset…'));select.options[0].value='';
++   for(const item of (results.datasets||[])){const opt=create('option',null,item.id+(item.gated?' [gated]':''));opt.value=item.id;opt.dataset.sha=item.revision||'';select.append(opt);}
++   if(select.options.length===1)throw Error('No matching Hub datasets found');
++ }));
++ $('mix'+tag+'HfResults').addEventListener('change',()=>{
++   const select=$('mix'+tag+'HfResults'),opt=select.selectedOptions[0];if(!select.value)return;
++   $('mix'+tag+'HfRepo').value=select.value;
++   if(/^[a-fA-F0-9]{40}$/.test(opt.dataset.sha||''))$('mix'+tag+'HfRevision').value=opt.dataset.sha;
++ });
++ $('mix'+tag+'HfInspect').addEventListener('click',safe('Inspect '+role.toUpperCase()+' dataset',async()=>{
++   const repo=get('mix'+tag+'HfRepo');const revision=get('mix'+tag+'HfRevision');
++   const info=await api('mixPinDataset',{repo});
++   $('mix'+tag+'HfRevision').value=info.revision;const variants=info.variants||[];
++   if(variants.length===1){$('mix'+tag+'HfConfig').value=variants[0].config;$('mix'+tag+'HfSplit').value=variants[0].split;}
++   setText('mix'+tag+'HfStatus',variants.length?('Available: '+variants.slice(0,12).map(x=>x.config+'/'+x.split).join(', ')):'Config/split unavailable from metadata. Check the dataset card and fill in manually.');
++ }));
+ }
+ $('mixEnabled').addEventListener('change',syncMixed);
+ $('mixCriticKind').addEventListener('change',syncMixed);
+ $('mixPpoReward').addEventListener('change',syncMixed);
+--- v67/web/desktop_webview.html
++++ v68/web/desktop_webview.html
+@@ -38,10 +38,28 @@
+   <div class="mixed-inner">
+     <label><span>Training objectives</span><select id="mixEnabled"><option value="off">PT only (legacy)</option><option value="on">Concurrent PT / SFT / PPO</option></select></label>
+     <div id="mixFields" hidden>
+       <div class="mixed-segment"><strong>01 · PRETRAINING</strong><p class="footnote">PT uses the immutable room's attached HF datasets. Create a new room to change them.</p><div class="mixed-info" id="mixPtDataset">—</div><label><span>PT loss weight</span><input id="mixPtWeight" type="number" min="0" max="100" step="0.1" value="1"></label></div>
+-      <div class="mixed-segment"><strong>02 · SUPERVISED FINE-TUNING</strong><p class="footnote">Local JSONL: {"prompt":"...","response":"..."}. Paths are never broadcast to peers.</p><label><span>SFT dataset (.jsonl)</span><div class="mixed-path"><input id="mixSftPath" placeholder="/path/to/sft.jsonl" spellcheck="false"><button type="button" id="pickMixSft">Browse</button></div></label><label><span>SFT loss weight</span><input id="mixSftWeight" type="number" min="0" max="100" step="0.1" value="1"></label></div>
+-      <div class="mixed-segment"><strong>03 · PPO</strong><p class="footnote">Local JSONL: {"prompt":"...","reference":"..."}. Ground-truth scoring; no Self-Critic.</p><label><span>PPO dataset (.jsonl)</span><div class="mixed-path"><input id="mixPpoPath" placeholder="/path/to/ppo.jsonl" spellcheck="false"><button type="button" id="pickMixPpo">Browse</button></div></label><div class="fieldgrid"><label><span>PPO loss weight</span><input id="mixPpoWeight" type="number" min="0" max="100" step="0.1" value="0.2"></label><label><span>Reward</span><select id="mixPpoReward"><option value="token_match">Token match</option><option value="exact">Exact text tokens</option><option value="hf_model">Hugging Face Reward Model</option></select></label><label><span>Clip epsilon</span><input id="mixPpoClip" type="number" value="0.2" step="0.05" min="0.01" max="0.5"></label><label><span>KL coefficient</span><input id="mixPpoKl" type="number" value="0.02" step="0.01" min="0" max="10"></label><label><span>Max rollout tokens</span><input id="mixPpoTokens" type="number" value="8" min="1" max="128"></label><label><span>Rollout reuse</span><input id="mixPpoReuse" type="number" value="2" min="1" max="8"></label></div></div>
++      <div class="mixed-segment"><strong>02 · SUPERVISED FINE-TUNING</strong><p class="footnote">Choose local JSONL or a pinned Hugging Face Hub dataset. Map prompt/response columns; selections stay local.</p><label><span>SFT data source</span><select id="mixSftSource"><option value="local">Local JSONL</option><option value="hf">Hugging Face Hub</option></select></label>
++ <div id="mixSftHub" class="fieldgrid" hidden>
++ <label class="wide"><span>Hub dataset repository</span><div class="mixed-path"><input id="mixSftHfRepo" placeholder="organization/dataset" spellcheck="false"><button type="button" id="mixSftHfSearch">Search Hub</button></div><select id="mixSftHfResults"><option value="">Search to see datasets…</option></select></label>
++ <label class="wide"><span>Pinned commit SHA</span><div class="mixed-path"><input id="mixSftHfRevision" placeholder="40 hex commit SHA" spellcheck="false"><button type="button" id="mixSftHfInspect">Pin + inspect</button></div></label>
++ <label><span>Config (optional)</span><input id="mixSftHfConfig" placeholder="default"></label>
++ <label><span>Split</span><input id="mixSftHfSplit" value="train"></label>
++ <label><span>Prompt column (dotted path)</span><input id="mixSftHfPrompt" value="prompt"></label>
++ <label><span>Response column</span><input id="mixSftHfOther" value="response"></label>
++ <small class="wide muted" id="mixSftHfStatus">Immutable revision required. Stream only the selected split; no full dataset staging.</small>
++ </div><label id="mixSftLocal"><span>SFT dataset (.jsonl)</span><div class="mixed-path"><input id="mixSftPath" placeholder="/path/to/sft.jsonl" spellcheck="false"><button type="button" id="pickMixSft">Browse</button></div></label><label><span>SFT loss weight</span><input id="mixSftWeight" type="number" min="0" max="100" step="0.1" value="1"></label></div>
++      <div class="mixed-segment"><strong>03 · PPO</strong><p class="footnote">Choose local JSONL or a pinned Hub dataset. Map prompt/reference columns; reference is optional with an HF Reward Model.</p><label><span>PPO data source</span><select id="mixPpoSource"><option value="local">Local JSONL</option><option value="hf">Hugging Face Hub</option></select></label>
++ <div id="mixPpoHub" class="fieldgrid" hidden>
++ <label class="wide"><span>Hub dataset repository</span><div class="mixed-path"><input id="mixPpoHfRepo" placeholder="organization/dataset" spellcheck="false"><button type="button" id="mixPpoHfSearch">Search Hub</button></div><select id="mixPpoHfResults"><option value="">Search to see datasets…</option></select></label>
++ <label class="wide"><span>Pinned commit SHA</span><div class="mixed-path"><input id="mixPpoHfRevision" placeholder="40 hex commit SHA" spellcheck="false"><button type="button" id="mixPpoHfInspect">Pin + inspect</button></div></label>
++ <label><span>Config (optional)</span><input id="mixPpoHfConfig" placeholder="default"></label>
++ <label><span>Split</span><input id="mixPpoHfSplit" value="train"></label>
++ <label><span>Prompt column (dotted path)</span><input id="mixPpoHfPrompt" value="prompt"></label>
++ <label><span>Reference (optional with HF reward) column</span><input id="mixPpoHfOther" value="reference"></label>
++ <small class="wide muted" id="mixPpoHfStatus">Immutable revision required. Stream only the selected split; no full dataset staging.</small>
++ </div><label id="mixPpoLocal"><span>PPO dataset (.jsonl)</span><div class="mixed-path"><input id="mixPpoPath" placeholder="/path/to/ppo.jsonl" spellcheck="false"><button type="button" id="pickMixPpo">Browse</button></div></label><div class="fieldgrid"><label><span>PPO loss weight</span><input id="mixPpoWeight" type="number" min="0" max="100" step="0.1" value="0.2"></label><label><span>Reward</span><select id="mixPpoReward"><option value="token_match">Token match</option><option value="exact">Exact text tokens</option><option value="hf_model">Hugging Face Reward Model</option></select></label><label><span>Clip epsilon</span><input id="mixPpoClip" type="number" value="0.2" step="0.05" min="0.01" max="0.5"></label><label><span>KL coefficient</span><input id="mixPpoKl" type="number" value="0.02" step="0.01" min="0" max="10"></label><label><span>Max rollout tokens</span><input id="mixPpoTokens" type="number" value="8" min="1" max="128"></label><label><span>Rollout reuse</span><input id="mixPpoReuse" type="number" value="2" min="1" max="8"></label></div></div>
+       <div class="mixed-segment" id="mixRewardFields" hidden><strong>HUGGING FACE · REWARD MODEL</strong>
+       <p class="footnote">External frozen scorer, not the PPO value Critic. Standard scalar sequence-classification heads; custom remote Python code is never executed. Use a fixed 40-character commit SHA so peers cannot silently load different checkpoints. PPO JSONL needs only {"prompt":"..."} in this mode.</p>
+       <div class="fieldgrid"><label class="wide"><span>HF model ID</span><div class="mixed-path"><input id="mixRewardModelId" placeholder="organization/reward-model" spellcheck="false"><button type="button" id="mixRewardSearch">Search Hub</button></div><select id="mixRewardSearchResults" aria-label="Hugging Face Reward Model search results"><option value="">Search to see models…</option></select></label>
+       <label class="wide"><span>Immutable revision (40-digit SHA)</span><div class="mixed-path"><input id="mixRewardRevision" placeholder="commit SHA (40 hex characters)" spellcheck="false"><button type="button" id="mixRewardPin">Pin current commit</button></div></label>

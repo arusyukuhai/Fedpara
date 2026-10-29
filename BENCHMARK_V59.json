@@ -1,0 +1,12 @@
+{
+  "task": "synthetic dense CPU adapter-like tensors; no model/P2P/checkpoint",
+  "parameter_count": 262144,
+  "optimizer_steps": 12,
+  "adamw_step_median_ms": 0.33169249991260585,
+  "disk_adamw_step_median_ms": 1.0278760000801412,
+  "max_abs_parameter_difference": 2.384185791015625e-07,
+  "pytorch_adamw_moment_ram_bytes": 2097168,
+  "disk_adamw_moment_ram_bytes": 0,
+  "disk_adamw_moment_file_bytes": 2097152,
+  "note": "disk RAM excludes OS mmap page cache; disk uses staged whole-parameter moments; no SSD performance guarantee"
+}

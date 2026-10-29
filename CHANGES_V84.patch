@@ -1,0 +1,492 @@
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -263,8 +263,9 @@
+               'source':recommendation['budget']['source']}),flush=True)
+     if hasattr(mdl,'config') and hasattr(mdl.config,'use_cache'):
+         mdl.config.use_cache = False
+-    if getattr(args,'gradient_checkpointing',False) and hasattr(mdl,'gradient_checkpointing_enable'):
+-        mdl.gradient_checkpointing_enable()
++    if getattr(args,'gradient_checkpointing',False):
++        from .training_compat_v84 import enable_adapter_safe_checkpointing
++        enable_adapter_safe_checkpointing(mdl)
+     model_id = args.model_id or args.model
+     if getattr(args,'state_base',None) and getattr(args,'sharded_base_manifest',None):
+         raise ValueError('--state-base and --sharded-base-manifest are mutually exclusive')
+@@ -462,7 +463,8 @@
+             for step in itertools.count():
+                 selected = list(itertools.islice(local_rows, args.batch_size))
+                 encoded = tokenizer(selected, truncation=True, max_length=args.max_length,
+-                                    padding='max_length', return_tensors='pt')
++                                    padding='max_length', return_tensors='pt',
++                                    **({'return_token_type_ids':False} if not mlm else {}))
+                 # Collator masks -100 on pad tokens for CLM, random masks for MLM.
+                 if mlm:
+                     yield collator([{k:v[j] for k,v in encoded.items()} for j in range(args.batch_size)])
+@@ -479,7 +481,8 @@
+             for step in itertools.count():
+                 items = list(itertools.islice(local_rows, args.batch_size))
+                 enc = tokenizer([x['input'] if args.hf_task=='seq2seq-lm' else x['text'] for x in items],
+-                                return_tensors='pt',padding=True,truncation=True,max_length=args.max_length)
++                                return_tensors='pt',padding=True,truncation=True,max_length=args.max_length,
++                                **({'return_token_type_ids':False} if args.hf_task=='seq2seq-lm' else {}))
+                 if args.hf_task == 'seq2seq-lm':
+                     lab = tokenizer(text_target=[x['target'] for x in items],
+                                     return_tensors='pt',padding=True,truncation=True,max_length=args.max_length)
+@@ -1177,6 +1180,8 @@
+     insp.add_argument('patch')
+     archprobe=sub.add_parser('architecture-probe',help='Run a real forward+backward on an arbitrary model; no weight update or P2P')
+     add_train_args(archprobe)
++    trainprobe=sub.add_parser('training-preflight',help='Load one actual dataset batch and verify finite LoHA/LoRA gradients without any optimizer update or P2P')
++    add_train_args(trainprobe)
+     archprobe.add_argument('--probe-batch',type=Path,required=True,help='Local safetensors mapping containing a representative training batch')
+     hfcheck=sub.add_parser('hf-diagnose',help='Inspect existing HF model config and local checkpoint compatibility')
+     hfcheck.add_argument('--model',required=True)
+@@ -1494,6 +1499,22 @@
+         parser.error('--peer-id is required for train and train-p2p')
+     if args.cmd in ('train-live','train-elastic') and args.mode=='elastic' and not args.room_id and not args.peer_id:
+         parser.error('provide --room-id (recommended), or legacy --peer-id and --link')
++    if args.cmd=='training-preflight':
++        if getattr(args,'pt_weight',1.) == 0:
++            parser.error('training-preflight needs a nonzero pretraining objective; use architecture-probe --probe-batch for PPO/SFT-only rooms')
++        from .model_contract_v64 import probe_model
++        model,adapter=load(args)
++        batch=next(training_batches(args))
++        target=input_device(model,args.device)
++        batch={key:value.to(target) if isinstance(value,torch.Tensor) else value
++               for key,value in batch.items()}
++        result=probe_model(model,adapter,batch,task=args.hf_task,
++                           policy=args.loss_policy,input_map=args.input_map)
++        result['target_scope']=args.target_scope
++        result['model_type']=str(getattr(getattr(model,'config',None),'model_type',None))
++        result['device']=str(target)
++        print(json.dumps(result,indent=2,sort_keys=True))
++        return
+     if args.cmd=='architecture-probe':
+         from .model_contract_v64 import probe_model
+         model,adapter=load(args)
+--- a/patchlib/core.py
++++ b/patchlib/core.py
+@@ -197,7 +197,13 @@
+                 if id(param) not in trainable_ids:
+                     param.requires_grad_(False)
+         if not self.groups:
+-            raise ValueError('No trainable floating-point PyTorch Parameters found')
++            raise ValueError(
++                'No compatible trainable LoRA/LoHA targets for this architecture '
++                f'(scope={self.target_scope!r}, rank={self.rank}, wide_lora_rank={self.wide_lora_rank}). '
++                'For narrow matrices use a smaller SHARED --rank/--wide-lora-rank '
++                'in a NEW P2P room. For custom convolution/N-D tensors, '
++                'explicitly select --target-scope universal after a successful '
++                'training-preflight; never change a running room adapter layout.')
+         self.layout = self._layout_digest()
+ 
+     def _attach(self):
+--- a/patchlib/hf_datasets.py
++++ b/patchlib/hf_datasets.py
+@@ -105,19 +105,29 @@
+         rows=rows_from_room(manifest,peer_id=getattr(args,'peer_id',None) or '',
+                             shuffle_buffer=getattr(args,'hf_shuffle_buffer',512))
+     mlm=task=='masked-lm'
+-    collator=(DataCollatorForLanguageModeling(tokenizer,mlm=mlm,mlm_probability=0.15)
+-              if task in ('causal-lm','masked-lm') else None)
++    # Only masked LM needs HF's masking collator. Its CLM path masks by token
++    # VALUE, which destroys real EOS targets if pad_token_id == eos_token_id.
++    collator=(DataCollatorForLanguageModeling(tokenizer,mlm=True,mlm_probability=0.15)
++              if mlm else None)
+     while True:
+         samples=list(itertools.islice(rows,args.batch_size))
+         if not samples:
+             raise PatchError('dataset iterator exhausted unexpectedly')
+         if task in ('causal-lm','masked-lm'):
+             encoded=tokenizer([x['text'] for x in samples],padding=True,truncation=True,
+-                              max_length=args.max_length,return_tensors='pt')
+-            batch=collator([{k:v[j] for k,v in encoded.items()} for j in range(len(samples))])
++                              max_length=args.max_length,return_tensors='pt',
++                              **({'return_token_type_ids':False} if not mlm else {}))
++            if mlm:
++                batch=collator([{k:v[j] for k,v in encoded.items()} for j in range(len(samples))])
++            else:
++                from .training_compat_v84 import causal_labels_from_attention
++                batch=dict(encoded)
++                batch['labels']=causal_labels_from_attention(batch['input_ids'],
++                                                             batch['attention_mask'])
+         elif task=='seq2seq-lm':
+             batch=tokenizer([x['input'] for x in samples],padding=True,truncation=True,
+-                            max_length=args.max_length,return_tensors='pt')
++                            max_length=args.max_length,return_tensors='pt',
++                            return_token_type_ids=False)
+             labels=tokenizer(text_target=[x['target'] for x in samples],padding=True,
+                              truncation=True,max_length=args.max_length,return_tensors='pt')['input_ids']
+             labels[labels==tokenizer.pad_token_id]=-100
+--- a/patchlib/hf_config_v83.py
++++ b/patchlib/hf_config_v83.py
+@@ -10,6 +10,7 @@
+ import json
+ import os
+ import secrets
++from collections.abc import Mapping
+ from pathlib import Path
+ 
+ # Deliberately small, audited list, not arbitrary attribute lookup/imports.
+@@ -39,6 +40,38 @@
+     """A repository config has no verifiable architecture identity."""
+ 
+ 
++def _builtin_architecture_candidates():
++    """Inspect ONLY installed Transformers built-in auto-model metadata.
++
++    The short v83 allowlist could reject valid Qwen3, recent Gemma, ViT, etc.
++    ``*_MAPPING_NAMES`` are built-in class-name strings, never imported model
++    implementations and never arbitrary config.auto_map remote executable code.
++    A class mapped to multiple model types is deliberately ambiguous.
++    """
++    candidates={name:{kind} for name,kind in _BUILTIN_ARCHITECTURES.items()}
++    try:
++        from transformers.models.auto import modeling_auto
++    except (ImportError,AttributeError):
++        return candidates
++    for field in dir(modeling_auto):
++        if not (field.startswith('MODEL_') and field.endswith('_MAPPING_NAMES')):
++            continue
++        records=getattr(modeling_auto,field,None)
++        if not isinstance(records,Mapping):
++            continue
++        for kind,names in records.items():
++            if not isinstance(kind,str):
++                continue
++            if isinstance(names,str):
++                names=(names,)
++            if not isinstance(names,(tuple,list)):
++                continue
++            for name in names:
++                if isinstance(name,str) and name.isidentifier():
++                    candidates.setdefault(name,set()).add(kind)
++    return candidates
++
++
+ def checked_model_type(data: dict, *, source: str = 'config.json') -> str:
+     """Return declared model_type, or infer it only from unambiguous HF classes.
+ 
+@@ -54,9 +87,16 @@
+         raise MissingModelTypeError(f'{source}: model_type must be a nonempty string')
+     names = data.get('architectures', [])
+     if isinstance(names, list) and names and all(isinstance(x, str) for x in names):
+-        inferred = {_BUILTIN_ARCHITECTURES.get(x) for x in names}
+-        if None not in inferred and len(inferred) == 1:
+-            return inferred.pop()
++        candidates=_builtin_architecture_candidates()
++        inferred=set()
++        for class_name in names:
++            found=candidates.get(class_name)
++            if not found:
++                break
++            inferred.update(found)
++        else:
++            if len(inferred)==1:
++                return next(iter(inferred))
+     raise MissingModelTypeError(
+         f'{source}: missing model_type in config.json and no unambiguous recognized '
+         'built-in architectures. Set model_type to the actual Hugging Face '
+--- a/patchlib/model_contract_v64.py
++++ b/patchlib/model_contract_v64.py
+@@ -172,9 +172,11 @@
+     report = {'adapter_layout':adapter.layout, 'groups':len(adapter.groups),
+               'adapter_tensors':len(parts), 'gradients_present':reached,
+               'nonzero_gradients':useful,'nonfinite_gradients':nonfinite,
+-              'loss':float(loss.detach().cpu()),'forward_backward':'pass' if reached and not nonfinite else 'fail'}
++              'loss':float(loss.detach().cpu()),'forward_backward':'pass' if reached and useful and not nonfinite else 'fail'}
+     for p in parts:
+         p.grad = None
+-    if not reached or nonfinite:
+-        raise ModelContractError('forward/backward did not reach trainable adapters with finite gradients')
++    if not reached or not useful or nonfinite:
++        raise ModelContractError('forward/backward did not reach trainable adapters with nonzero finite LoRA/LoHA gradients; '
++                                 'check task/head alignment, token labels, frozen-base '
++                                 'checkpointing and selected adapter targets')
+     return report
+--- a/patchlib/training_compat_v84.py
++++ b/patchlib/training_compat_v84.py
+@@ -0,0 +1,74 @@
++"""Kagami v84: conservative training compatibility fixes.
++
++No architecture is assumed to work merely because it can be constructed:
++forward/backward must still be checked on a real representative training batch.
++"""
++from __future__ import annotations
++
++import torch
++from torch import nn
++
++
++def causal_labels_from_attention(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
++    """Mask actual padding, NEVER every occurrence of an EOS-as-PAD token ID."""
++    if not isinstance(input_ids,torch.Tensor) or not isinstance(attention_mask,torch.Tensor):
++        raise TypeError('input_ids and attention_mask must be tensors')
++    if input_ids.ndim != 2 or input_ids.shape != attention_mask.shape:
++        raise ValueError('input IDs and attention masks must have identical [batch,sequence] shape')
++    labels = input_ids.clone()
++    labels.masked_fill_(attention_mask == 0, -100)
++    return labels
++
++
++def _force_input_embedding_output_grad(model: nn.Module) -> str:
++    """Legacy reentrant checkpointing needs an activation with requires_grad.
++
++    The embedding's frozen weight is not made trainable. We only mark its
++    FLOATING OUTPUT as an autograd leaf to allow gradients to reach later LoHA.
++    """
++    existing = getattr(model,'enable_input_require_grads',None)
++    if callable(existing):
++        existing()
++        return 'input_require_grads'
++    getter = getattr(model,'get_input_embeddings',None)
++    embedding = getter() if callable(getter) else None
++    if not isinstance(embedding,nn.Module):
++        raise RuntimeError(
++            'Legacy gradient checkpointing requires a usable input embedding ' 
++            'or enable_input_require_grads(); disable --gradient-checkpointing '
++            'or upgrade the model/Transformers implementation.')
++    if getattr(model,'_kagami_v84_input_grad_hook',None) is None:
++        def make_require_grad(_module, _inputs, output):
++            if not isinstance(output,torch.Tensor) or not output.is_floating_point():
++                raise RuntimeError('embedding output must be a floating tensor for legacy checkpointing')
++            output.requires_grad_(True)
++        handle = embedding.register_forward_hook(make_require_grad)
++        object.__setattr__(model,'_kagami_v84_input_grad_hook',handle)
++    return 'embedding_output_hook'
++
++
++def enable_adapter_safe_checkpointing(model: nn.Module) -> str:
++    """Prefer non-reentrant checkpointing with frozen bases + trainable adapters.
++
++    Old HF implementations may not accept gradient_checkpointing_kwargs;
++    their reentrant mode needs a gradient-bearing embedding output. No base
++    Parameter's requires_grad flag is changed, and no optimizer is touched.
++    """
++    enable=getattr(model,'gradient_checkpointing_enable',None)
++    if not callable(enable):
++        raise RuntimeError('Model does not implement gradient_checkpointing_enable; '
++                           'disable --gradient-checkpointing for this architecture')
++    try:
++        enable(gradient_checkpointing_kwargs={'use_reentrant':False})
++        return 'non_reentrant'
++    except TypeError as exc:
++        # Do not hide TypeErrors thrown INSIDE the model; only an actual
++        # signature incompatibility permits switching to legacy behavior.
++        import inspect
++        try: sig=inspect.signature(enable)
++        except (TypeError,ValueError): raise exc
++        if 'gradient_checkpointing_kwargs' in sig.parameters or any(
++             p.kind==p.VAR_KEYWORD for p in sig.parameters.values()):
++            raise
++    enable()
++    return _force_input_embedding_output_grad(model)
+--- a/tests/test_training_compat_v84.py
++++ b/tests/test_training_compat_v84.py
+@@ -0,0 +1,159 @@
++"""Regression fixtures for architectures that load but previously could not train."""
++from __future__ import annotations
++
++import sys
++import types
++from types import SimpleNamespace
++
++import pytest
++import torch
++from torch import nn
++from torch.nn import functional as F
++from torch.utils.checkpoint import checkpoint
++
++from patchlib.core import UniversalAdapter
++from patchlib.training_compat_v84 import (enable_adapter_safe_checkpointing,
++    causal_labels_from_attention)
++
++
++class LegacyCheckpointLM(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.emb=nn.Embedding(17,8)
++        self.ff=nn.Linear(8,8)
++        self.head=nn.Linear(8,17)
++        self.reentrant=True
++    def get_input_embeddings(self):return self.emb
++    def gradient_checkpointing_enable(self):
++        self.reentrant=True
++    def forward(self,input_ids,labels):
++        x=self.emb(input_ids)
++        x=checkpoint(self.ff,x,use_reentrant=self.reentrant)
++        logits=self.head(x)
++        return SimpleNamespace(loss=F.cross_entropy(logits.reshape(-1,17),labels.flatten()),
++                               logits=logits)
++
++
++class ModernCheckpointLM(LegacyCheckpointLM):
++    def gradient_checkpointing_enable(self,gradient_checkpointing_kwargs=None):
++        assert gradient_checkpointing_kwargs == {'use_reentrant':False}
++        self.reentrant=False
++
++
++def sample():
++    ids=torch.tensor([[1,2,3,4]],dtype=torch.long)
++    return {'input_ids':ids, 'labels':ids.clone()}
++
++
++@pytest.mark.parametrize('model_class,mode',[
++    (LegacyCheckpointLM,'embedding_output_hook'),
++    (ModernCheckpointLM,'non_reentrant'),
++])
++def test_frozen_embeddings_checkpointed_loha_still_trains(model_class,mode):
++    model=model_class()
++    assert enable_adapter_safe_checkpointing(model)==mode
++    adapter=UniversalAdapter(model,'arch','version',kind='loha',rank=2,target_scope='auto')
++    params=list(adapter.trainable_parameters())
++    base=[p for p in model.parameters() if not p.requires_grad]
++    assert base, 'frozen base weight required'
++    out=model(**sample())
++    out.loss.backward()
++    assert any(p.grad is not None and p.grad.isfinite().all() and p.grad.abs().sum()>0 for p in params)
++    assert all(p.grad is None for p in base)
++
++
++def test_checkpointing_unsupported_architecture_explained():
++    with pytest.raises(RuntimeError,match='does not implement'):
++        enable_adapter_safe_checkpointing(nn.Linear(3,4))
++
++
++def test_eos_survives_pad_ids_without_token_type():
++    ids=torch.tensor([[1,2,2,2],[3,2,4,2]])
++    attention=torch.tensor([[1,1,0,0],[1,1,1,0]])
++    assert causal_labels_from_attention(ids,attention).tolist()==[[1,2,-100,-100],[3,2,4,-100]]
++
++
++def test_room_hf_causal_batches_keep_eos_and_drop_token_type_ids(monkeypatch):
++    class FakeTokenizer:
++        pad_token='<eos>'
++        eos_token='<eos>'
++        pad_token_id=2
++        def __call__(self, texts,*, return_token_type_ids=True,**kwargs):
++            assert not return_token_type_ids, 'decoder LM must not get synthetic token_type_ids'
++            return {'input_ids':torch.tensor([[1,2,2,2],[3,2,4,2]]),
++                    'attention_mask':torch.tensor([[1,1,0,0],[1,1,1,0]])}
++    class FakeAutoTokenizer:
++        @classmethod
++        def from_pretrained(cls,*a,**kw):return FakeTokenizer()
++    class ShouldNotConstructCollator:
++        def __init__(self,*a,**kw):
++            raise AssertionError('CLM must not mask target tokens based on ID')
++    monkeypatch.setitem(sys.modules,'transformers',types.SimpleNamespace(
++        AutoTokenizer=FakeAutoTokenizer,DataCollatorForLanguageModeling=ShouldNotConstructCollator))
++    from patchlib.hf_datasets import batches_from_room
++    from patchlib.room_manifest import make_hf_manifest
++    manifest=make_hf_manifest('org/model','main',[
++        {'repo':'org/data','revision':'main','config':None,'split':'train',
++         'columns':{'text':'text'},'weight':1}])
++    args=SimpleNamespace(hf_task='causal-lm',batch_size=2,max_length=16,peer_id='p')
++    rows=iter([{'text':'abc'}, {'text':'def'}])
++    batch=next(batches_from_room(args,manifest,rows=rows))
++    assert 'token_type_ids' not in batch
++    assert batch['labels'].tolist()==[[1,2,-100,-100],[3,2,4,-100]]
++
++
++def test_no_targets_fails_with_rank_and_room_advice():
++    model=nn.Sequential(nn.Linear(3,2),nn.ReLU())
++    with pytest.raises(ValueError,match=r'--rank.*NEW P2P room'):
++        UniversalAdapter(model,'small','rev',kind='loha',rank=16,target_scope='auto')
++
++
++def test_preflight_command_probes_real_batch_without_updates(monkeypatch,capsys):
++    from patchlib import cli
++    model=ModernCheckpointLM()
++    adapter=UniversalAdapter(model,'arch','version',kind='loha',rank=2,target_scope='auto')
++    original=[p.detach().clone() for p in adapter.trainable_parameters()]
++    monkeypatch.setattr(cli,'load',lambda args:(model,adapter))
++    monkeypatch.setattr(cli,'training_batches',lambda args:iter([sample()]))
++    monkeypatch.setattr(sys,'argv',['cli','training-preflight','--model','example/model',
++                                   '--rank','2','--target-scope','auto'])
++    cli.main()
++    import json
++    report=json.loads(capsys.readouterr().out)
++    assert report['gradients_present']>0
++    assert report['forward_backward']=='pass'
++    assert all(torch.equal(before,after) for before,after in zip(original,adapter.trainable_parameters()))
++
++
++def test_installed_builtin_transformers_model_mapping_recovers_newer_family(monkeypatch):
++    # No network/remote code: metadata only; the implementation class is not imported.
++    import patchlib.hf_config_v83 as hf
++    modeling_auto=types.SimpleNamespace(
++        MODEL_FOR_CAUSAL_LM_MAPPING_NAMES={'qwen3':'Qwen3ForCausalLM'},
++        MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES={'vit':'ViTForImageClassification'})
++    auto=types.SimpleNamespace(modeling_auto=modeling_auto)
++    models=types.SimpleNamespace(auto=auto)
++    monkeypatch.setitem(sys.modules,'transformers',types.SimpleNamespace(models=models))
++    monkeypatch.setitem(sys.modules,'transformers.models',models)
++    monkeypatch.setitem(sys.modules,'transformers.models.auto',auto)
++    assert hf.checked_model_type({'architectures':['Qwen3ForCausalLM']})=='qwen3'
++    assert hf.checked_model_type({'architectures':['ViTForImageClassification']})=='vit'
++    # Metadata conflicts are not silently resolved to one type.
++    modeling_auto.MODEL_MAPPING_NAMES={'different':'Qwen3ForCausalLM'}
++    with pytest.raises(hf.MissingModelTypeError):
++        hf.checked_model_type({'architectures':['Qwen3ForCausalLM']})
++
++
++def test_preflight_rejects_zero_gradient_adapter_even_if_backward_succeeds():
++    from patchlib.model_contract_v64 import probe_model,ModelContractError
++    class NoUsefulGradient(nn.Module):
++        def __init__(self):
++            super().__init__(); self.lin=nn.Linear(8,8)
++        def forward(self,input_ids,labels):
++            z=self.lin(torch.ones(1,8))
++            return {'loss':(z*0).sum()}
++    model=NoUsefulGradient()
++    adapter=UniversalAdapter(model,'zero','rev',kind='loha',rank=2,target_scope='auto')
++    with pytest.raises(ModelContractError,match='nonzero finite'):
++        probe_model(model,adapter,{'input_ids':torch.ones(1,2,dtype=torch.long),
++                                   'labels':torch.ones(1,2,dtype=torch.long)})
+--- a/README_V84_MODEL_TRAINABILITY.md
++++ b/README_V84_MODEL_TRAINABILITY.md
+@@ -0,0 +1,44 @@
++# Kagami v84 — trainability fixes across Hugging Face model families
++
++v83 only repaired some `config.json` missing-`model_type` scenarios. It **did not** certify that a model could perform a valid training step. V84 improves several observable compatibility problems and adds a one-batch real-gradient preflight. It does *not* promise all models, quantization formats, tokenizers, or distributed setups will train.
++
++## Changes
++
++1. **Frozen-base activation checkpointing and LoHA/LoRA gradients.** Prefer `gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})`. Legacy HF implementations that do not support that argument get input embedding activation-grad enablement without unfreezing the base embedding weights. Models lacking both paths fail with a clear error instead of silently losing gradients.
++2. **Causal LM data labels.** HF dataset collection v2's CLM path used `DataCollatorForLanguageModeling(mlm=False)` even for tokenizers with `pad_token_id == eos_token_id`; it masks *genuine* EOS training targets. Now mask using `attention_mask`, preserving genuine EOS. The MLM path still uses the HF MLM collator. Local text training already used this principle.
++3. **Tokenizer-produced segment IDs.** Causal LM and seq2seq text tokenizer calls use `return_token_type_ids=False` to avoid unwanted `token_type_ids` crashing decoder-only/encoder-decoder forward methods. MLM/classification still retain supported segment IDs; explicit `--batches-dir` remains untouched.
++4. **Newer built-in model families.** When `config.json` truly lacks `model_type` but declares built-in `architectures`, allow inference from the installed Transformers library's `MODEL_*_MAPPING_NAMES` registries. Conflicting or unknown mappings still fail. No model implementation classes or `auto_map` custom code are imported/used for identity recovery.
++5. **Trainability probe.** `training-preflight` runs *one real dataset minibatch* forward+backward, and refuses missing, nonfinite **or identically zero** adapter gradients. No optimizer update, no peer connection and no journal mutation. It does not establish that all future batches, long sequences, or other devices will work.
++6. **Helpful zero-target error.** When the selected rank and target scope produce no compatible LoHA/LoRA groups, the exception reports the chosen rank/scope and suggests the proper new-room options. No automatic per-peer rank alteration or changing signed adapter layouts.
++
++## To diagnose a particular model
++
++From inside the unpacked `kagami-v84` folder:
++
++```bash
++python -m patchlib.cli hf-diagnose --model org/model
++```
++
++Run the same architecture/task, LoHA scope, dataset, and device as your intended room, without creating a running room:
++
++```bash
++python -m patchlib.cli training-preflight \
++  --model org/model --revision main --hf-task causal-lm \
++  --kind loha --rank 16 --target-scope auto \
++  --text-file ./sample.txt --batch-size 1 --max-length 128 --device cpu
++```
++
++For an HF dataset v2 room, replace `--text-file` with `--room-manifest /path/to/room.json`. Models requiring a different task must set `--hf-task` to a matching head. Existing `architecture-probe --probe-batch /path/to/batch.safetensors` remains available for custom input mappings. Quantized native FP8/4bit paths may still require a separately audited differentiable backend; unsafe custom remote code remains blocked on networked peers.
++
++If a probe fails, record the *model repository + pinned revision*, `config.json`'s `model_type` and `architectures`, selected `--hf-task` and adapter scope, device/backend, and the **full traceback**. A model may load yet fail for entirely different reasons: nontrainable quantization, unsupported multimodal inputs, incompatible task head, missing tokenizer resources, sharded offload, OOM, or external operator kernels.
++
++## Distributed compatibility
++
++- KCP82 / KTR82 / signatures / LoHA checkpoint format / epoch consensus were not modified by v84.
++- Training data supervision changes for HF-dataset causal LM. Upgrade all peers in a room *consistently*; mixing v83 and v84 training workers can yield different objectives even if cryptographic signatures remain valid.
++- Never auto-reduce rank or silently broaden adapter scope in an existing room. That changes its signed layout. Start a **new room/genesis** with the desired rank/scope if required.
++- Local model configuration repair still invalidates any config-bound genesis hash or signed model identity: publish an authenticated revision.
++
++## Tests & limitations
++
++Relevant offline regression suite: **111 passed** (including v80–v82 trajectory/behavior checkpoint, GUI, LoHA, CLI and new v84 regression tests). The environment does not have `transformers` installed or the user's actual failing model checkpoints. Real hub/model-specific end-to-end training, GPU compatibility, memory sufficiency, and full-suite regression remain **unverified**. The new built-in architecture registry is unit-tested with a stub mapping, not with every live Transformers version.

@@ -1,0 +1,990 @@
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -529,6 +529,9 @@
+                 (ppo_actor*args.ppo_weight/args.grad_accum).backward()
+                 (ppo_critic*args.ppo_weight).backward()
+                 mixer.critic_optim.step()  # critic is local; never part of signed P2P adapter
++                mixer.critic_steps+=1
++                if mixer.critic_steps%10==0:
++                    mixer.save_critic()
+                 total+=float(ppo_actor.detach())*args.ppo_weight
+                 args._v65_ppo_metrics=metrics
+             # Preserve the existing GUI top-1 telemetry even in mixed mode.
+@@ -1018,6 +1021,11 @@
+     p.add_argument('--ppo-gae-lambda',type=float,default=.95)
+     p.add_argument('--ppo-max-tokens',type=int,default=8,help='Max autoregressive PPO rollout tokens per mixed step')
+     p.add_argument('--ppo-reuse',type=int,default=2,help='Max clipped PPO updates per sampled trajectory')
++    p.add_argument('--critic-kind',choices=('mlp','linear'),default='mlp',help='Local PPO value critic structure')
++    p.add_argument('--critic-hidden',type=int,default=32,help='Local value critic hidden width (8..512)')
++    p.add_argument('--critic-lr',type=float,default=1e-3,help='Local PPO value critic learning rate')
++    p.add_argument('--critic-init',type=Path,help='Optional Kagami safetensors value-critic initial weights')
++    p.add_argument('--critic-state-dir',type=Path,help='Private local value-critic optimizer+weights directory')
+     p.add_argument('--ppo-reward',choices=('token_match','exact'),default='token_match',
+                    help='Verifiable ground-truth reward; never model-judged')
+     p.add_argument('--steps', type=int, default=50)
+--- /dev/null
++++ b/patchlib/critic_state_v66.py
+@@ -0,0 +1,132 @@
++"""Local PPO value-critic snapshot, data-only and atomically replaceable.
++
++No torch.load/pickle, no model code execution. Critic optimizer and weights are
++kept entirely outside signed peer adapter patches. This is a *local* checkpoint.
++"""
++from __future__ import annotations
++
++import json
++import math
++import os
++from pathlib import Path
++import secrets
++
++import torch
++from safetensors import safe_open
++from safetensors.torch import load_file, save_file
++
++
++class CriticStateError(ValueError):
++    pass
++
++
++def _valid_dir(root: Path):
++    original=Path(root).expanduser()
++    if original.is_symlink():
++        raise CriticStateError('Critic state directory must not be a symlink')
++    root=original.resolve()
++    if not root.is_dir():
++        root.mkdir(parents=True, mode=0o700, exist_ok=True)
++    if root.is_symlink():
++        raise CriticStateError('Critic state directory must not be a symlink')
++    return root
++
++
++def snapshot_file(root):
++    return Path(root)/'critic-v66.safetensors'
++
++
++def _metadata(kind, hidden, identity, steps):
++    return {'format':'kagami-local-critic-v66', 'kind':str(kind),
++            'hidden':str(hidden),'identity':str(identity),'steps':str(steps)}
++
++
++def _tensors(critic, optimizer):
++    tensors={'c.'+name:weight.detach().cpu().contiguous().clone()
++             for name,weight in critic.state_dict().items()}
++    for i,p in enumerate(critic.parameters()):
++        state=optimizer.state.get(p,{})
++        for key in ('step','exp_avg','exp_avg_sq'):
++            value=state.get(key)
++            if isinstance(value,torch.Tensor):
++                tensors[f'o.{i}.{key}']=value.detach().cpu().contiguous().clone()
++    if not tensors or any(not torch.isfinite(t).all() for t in tensors.values()):
++        raise CriticStateError('Nonfinite or missing critic tensors')
++    return tensors
++
++
++def save(root,critic,optimizer,*,kind,hidden,identity,steps):
++    destdir=_valid_dir(root)
++    tmp=destdir/('.critic-'+secrets.token_hex(8)+'.tmp')
++    dest=snapshot_file(destdir)
++    tensors=_tensors(critic,optimizer)
++    try:
++        save_file(tensors,str(tmp),metadata=_metadata(kind,hidden,identity,steps))
++        with tmp.open('rb') as f:os.fsync(f.fileno())
++        os.replace(tmp,dest)
++        fd=os.open(destdir,os.O_RDONLY)
++        try:os.fsync(fd)
++        finally:os.close(fd)
++    finally:
++        tmp.unlink(missing_ok=True)
++    return dest
++
++
++def load(path,critic,optimizer,*,kind,hidden,identity,allow_initial=False):
++    path=Path(path).expanduser().resolve()
++    if not path.is_file() or path.stat().st_size>16*1024*1024:
++        raise CriticStateError('Critic safetensors is missing or over 16MiB')
++    try:
++        with safe_open(str(path),framework='pt',device='cpu') as f:
++            metadata=f.metadata() or {}
++        weights=load_file(str(path),device='cpu')
++        if metadata.get('format')!='kagami-local-critic-v66':
++            raise CriticStateError('Not a Kagami v66 critic checkpoint')
++        if metadata.get('kind')!=str(kind) or metadata.get('hidden')!=str(hidden):
++            raise CriticStateError('Critic kind/hidden size differs from saved state')
++        if not allow_initial and metadata.get('identity')!=str(identity):
++            raise CriticStateError('Critic checkpoint belongs to another room/profile')
++        # An explicitly chosen initial checkpoint may be copied between rooms,
++        # but it can never replace an already existing local progress file.
++        expected={'c.'+name:p for name,p in critic.state_dict().items()}
++        if any(k not in weights or weights[k].shape!=p.shape or weights[k].dtype!=p.dtype
++               for k,p in expected.items()):
++            raise CriticStateError('Critic checkpoint tensor layout mismatch')
++        if any(not torch.isfinite(x).all() for x in weights.values()):
++            raise CriticStateError('Nonfinite critic checkpoint')
++        parameters=list(critic.parameters())
++        allowed=set(expected)
++        for i,p in enumerate(parameters):
++            for key in ('step','exp_avg','exp_avg_sq'):
++                name=f'o.{i}.{key}'
++                if name not in weights:continue
++                allowed.add(name)
++                item=weights[name]
++                if key=='step':
++                    if item.numel()!=1 or float(item.item())<0:
++                        raise CriticStateError('Invalid optimizer step counter')
++                elif item.shape!=p.shape or item.dtype!=p.dtype:
++                    raise CriticStateError('Invalid optimizer tensor layout')
++        if set(weights)!=allowed:
++            raise CriticStateError('Unexpected critic checkpoint tensors')
++        for i,p in enumerate(parameters):
++            keys={key for key in ('step','exp_avg','exp_avg_sq') if f'o.{i}.{key}' in weights}
++            if keys and keys!={'step','exp_avg','exp_avg_sq'}:
++                raise CriticStateError('Incomplete AdamW critic state')
++        # Finish all structural validation before mutating live state.
++        critic.load_state_dict({name:weights['c.'+name] for name in critic.state_dict()},strict=True)
++        optimizer.state.clear()
++        for i,p in enumerate(parameters):
++            state={}
++            for key in ('step','exp_avg','exp_avg_sq'):
++                name=f'o.{i}.{key}'
++                if name in weights:
++                    state[key]=weights[name].clone().to(p.device)
++            if state:
++                if set(state)!={'step','exp_avg','exp_avg_sq'}:
++                    raise CriticStateError('Incomplete AdamW critic state')
++                optimizer.state[p]=state
++        return int(metadata.get('steps','0'))
++    except (OSError,ValueError,KeyError,RuntimeError,OverflowError) as exc:
++        if isinstance(exc,CriticStateError):raise
++        raise CriticStateError('Invalid or damaged critic safetensors') from exc
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -3367,6 +3367,12 @@
+             await asyncio.gather(auto_epoch_prepare,return_exceptions=True)
+         if auto_epoch_service is not None:
+             await auto_epoch_service.close()
++        local_critic=getattr(args,'_v65_mixer',None)
++        if local_critic is not None:
++            try:
++                await asyncio.to_thread(local_critic.close)
++            except Exception as exc:
++                log.error('PPO critic state could not be saved on shutdown: %s',exc)
+         # Keep any in-flight filesystem commit alive even if the enclosing
+         # coroutine is cancelled (thread cancellation cannot undo fsync).
+         await working_saver.drain()
+--- a/patchlib/gui.py
++++ b/patchlib/gui.py
+@@ -48,7 +48,8 @@
+                       shard_state_manifest=None,shard_store=None,max_state_gb=32,
+                       max_journal_gb=0,streaming_base=False,stream_chunk_mib=8,
+                       disk_cache_fraction=.6,pause_file=None,snapshot_request_file=None,
+-                      sharded_base_manifest=None,sharded_base_store=None):
++                      sharded_base_manifest=None,sharded_base_store=None,
++                      mixed_options=None,mixed_policy=None,critic_state_dir=None):
+         from .room_manifest import load_manifest
+         validate_room(room)
+         desc=load_manifest(Path(manifest))
+@@ -135,7 +136,7 @@
+             raise ValueError('reinit_every must be 0..100000')
+         if not str(journal).endswith('.sqlite3'):
+             raise ValueError('journal must be a .sqlite3 path')
+-        return [sys.executable,'-m','patchlib.cli','train-live',
++        command = [sys.executable,'-m','patchlib.cli','train-live',
+                 '--room-id',room,'--model',model,'--revision',revision,
+                 '--hf-task',task,
+                 '--initialization',room_init,'--initial-seed',str(room_seed),
+@@ -161,6 +162,11 @@
+                   '--stream-chunk-mib',str(stream_chunk_mib),
+                   '--disk-cache-fraction',str(disk_cache_fraction),
+                   '--streaming-scratch-dir',str((Path(shard_store) if shard_store is not None else Path(journal).parent / (Path(journal).stem + '-streaming')) / '.temporary-streaming-pages')])) + (['--auto-state'] if auto_state else []) + (['--swarm-pause-file',str(pause_file)] if pause_file is not None else []) + (['--eval-snapshot-request-file',str(snapshot_request_file)] if snapshot_request_file is not None else []) + (['--room-public'] if room_public else []) + (['--hf-shuffle-buffer',str(int(os.environ['FEDPARA_HF_SHUFFLE_BUFFER']))] if os.environ.get('FEDPARA_HF_SHUFFLE_BUFFER','').isdigit() else [])
++        if mixed_options and mixed_options.get('enabled'):
++            from .mix_gui_v66 import command_options
++            command.extend(command_options(mixed_options,state_dir=critic_state_dir))
++            if mixed_policy: command.extend(['--mix-policy',str(mixed_policy)])
++        return command
+ 
+     def start(self, command, logfile):
+         if self.proc is not None and self.proc.poll() is None:
+--- /dev/null
++++ b/patchlib/mix_gui_v66.py
+@@ -0,0 +1,131 @@
++"""Validate local PT/SFT/PPO and value critic settings before launching any peer.
++
++Data paths stay local; the immutable objective protocol intentionally excludes
++private training paths, while the pinned policy prevents unsafe silent joins.
++"""
++from __future__ import annotations
++import json
++import math
++import os
++from pathlib import Path
++from types import SimpleNamespace
++import secrets
++
++FIELDS=('enabled','sft_jsonl','ppo_jsonl','pt_weight','sft_weight','ppo_weight',
++        'ppo_clip','ppo_kl_coef','ppo_value_coef','ppo_gamma','ppo_gae_lambda',
++        'ppo_max_tokens','ppo_reuse','ppo_reward','critic_kind','critic_hidden',
++        'critic_lr','critic_init')
++DEFAULT={'enabled':False,'sft_jsonl':'','ppo_jsonl':'','pt_weight':1.,
++         'sft_weight':1.,'ppo_weight':.2,'ppo_clip':.2,'ppo_kl_coef':.02,
++         'ppo_value_coef':.5,'ppo_gamma':.99,'ppo_gae_lambda':.95,
++         'ppo_max_tokens':8,'ppo_reuse':2,'ppo_reward':'token_match',
++         'critic_kind':'mlp','critic_hidden':32,'critic_lr':.001,'critic_init':''}
++
++
++def _path(value, *, ext, role=None):
++    if not isinstance(value,str) or len(value)>4096 or '\x00' in value:
++        raise ValueError('Expected a local dataset/critic file path')
++    if not value.strip():return ''
++    path=Path(value).expanduser().resolve()
++    if path.suffix.lower()!=ext or not path.is_file():
++        raise ValueError(f'Expected an existing local {ext} file: {path}')
++    size=path.stat().st_size
++    if not (0<size<=4*1024**3 if ext=='.jsonl' else 0<size<=16*1024**2):
++        raise ValueError('Training file is empty or exceeds allowed size')
++    if ext=='.jsonl':
++        with path.open('r',encoding='utf8') as f:
++            for line in f:
++                if line.strip():
++                    if len(line)>65536:raise ValueError('Dataset JSONL line exceeds 64KiB')
++                    obj=json.loads(line)
++                    if not isinstance(obj,dict):raise ValueError('Dataset row must be a JSON object')
++                    required=('prompt','response') if role=='sft' else ('prompt','reference') if role=='ppo' else ()
++                    for name in required:
++                        if not isinstance(obj.get(name),str) or not obj[name] or len(obj[name])>16384:
++                            raise ValueError(f'{role} dataset must contain nonempty {name} text <=16Ki chars')
++                    break
++            else:raise ValueError('Dataset has no JSONL records')
++    return str(path)
++
++
++def normalize(payload, *, task, allow_pt_only=False):
++    if not isinstance(payload,dict):raise ValueError('Training configuration must be an object')
++    unknown=set(payload)-set(FIELDS)
++    if unknown:raise ValueError('Unknown mixed-training options: '+str(sorted(unknown)))
++    values={**DEFAULT,**payload}
++    if type(values['enabled']) is not bool:raise ValueError('Mixed training enabled must be boolean')
++    if not values['enabled']:
++        # Never preserve stale dataset settings in a PT-only launch.
++        return dict(DEFAULT)
++    if task!='causal-lm':raise ValueError('Simultaneous PT/SFT/PPO currently needs a causal LM')
++    for key in ('sft_jsonl','ppo_jsonl'):
++        values[key]=_path(values[key],ext='.jsonl',role=key.removesuffix('_jsonl'))
++    values['critic_init']=_path(values['critic_init'],ext='.safetensors')
++    for key in ('pt_weight','sft_weight','ppo_weight','ppo_clip','ppo_kl_coef',
++                'ppo_value_coef','ppo_gamma','ppo_gae_lambda','critic_lr'):
++        raw=values[key]
++        if type(raw) not in (int,float) or not math.isfinite(float(raw)):
++            raise ValueError(key+' must be a finite number')
++        values[key]=float(raw)
++    for key in ('critic_hidden','ppo_max_tokens','ppo_reuse'):
++        if type(values[key]) is not int:raise ValueError(key+' must be an integer')
++    if values['critic_kind'] not in ('mlp','linear') or values['ppo_reward'] not in ('token_match','exact'):
++        raise ValueError('Unsupported critic or PPO reward type')
++    if not (values['sft_jsonl'] or values['ppo_jsonl']):
++        if not allow_pt_only or values['pt_weight']<=0:
++            raise ValueError('Choose an SFT/PPO JSONL, or join an existing pinned mixed room as a PT-only peer')
++    if values['ppo_weight']>0 and not values['ppo_jsonl'] and not allow_pt_only:
++        raise ValueError('PPO weight is nonzero: choose a PPO dataset')
++    if values['sft_weight']>0 and not values['sft_jsonl'] and not allow_pt_only:
++        raise ValueError('SFT weight is nonzero: choose an SFT dataset')
++    from .mixed_learning_v65 import validate_args
++    args=SimpleNamespace(**{k:values[k] for k in values},
++                         hf_task=task,loss_policy='auto',max_length=128,
++                         input_map='',mix_policy=None)
++    validate_args(args)
++    return values
++
++
++def command_options(values, *, state_dir):
++    if not values['enabled']:return []
++    result=['--pt-weight',str(values['pt_weight']),
++            '--sft-weight',str(values['sft_weight']),
++            '--ppo-weight',str(values['ppo_weight']),
++            '--ppo-clip',str(values['ppo_clip']),
++            '--ppo-kl-coef',str(values['ppo_kl_coef']),
++            '--ppo-value-coef',str(values['ppo_value_coef']),
++            '--ppo-gamma',str(values['ppo_gamma']),
++            '--ppo-gae-lambda',str(values['ppo_gae_lambda']),
++            '--ppo-max-tokens',str(values['ppo_max_tokens']),
++            '--ppo-reuse',str(values['ppo_reuse']),
++            '--ppo-reward',values['ppo_reward'],
++            '--critic-kind',values['critic_kind'],
++            '--critic-hidden',str(values['critic_hidden']),
++            '--critic-lr',str(values['critic_lr']),
++            '--critic-state-dir',str(state_dir)]
++    for key,flag in (('sft_jsonl','--sft-jsonl'),('ppo_jsonl','--ppo-jsonl'),
++                     ('critic_init','--critic-init')):
++        if values[key]:result.extend([flag,values[key]])
++    return result
++
++
++def objective_policy(values, *, pinned=None):
++    if not values['enabled']:return None
++    from .mixed_learning_v65 import spec
++    args=SimpleNamespace(**values,input_map='',mix_policy=pinned)
++    return spec(args)
++
++
++def atomic_json(path,document):
++    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
++    tmp=path.parent/('.mix-'+secrets.token_hex(10))
++    try:
++        fd=os.open(tmp,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
++        with os.fdopen(fd,'w',encoding='utf8') as f:
++            json.dump(document,f,sort_keys=True,separators=(',',':'))
++            f.write('\n');f.flush();os.fsync(f.fileno())
++        os.replace(tmp,path)
++        d=os.open(path.parent,os.O_RDONLY)
++        try:os.fsync(d)
++        finally:os.close(d)
++    finally:tmp.unlink(missing_ok=True)
+--- a/patchlib/mixed_learning_v65.py
++++ b/patchlib/mixed_learning_v65.py
+@@ -49,6 +49,13 @@
+             'input_map':str(getattr(args,'input_map','')),
+             'reward_source':'ground-truth-reference-v1',
+             'task':'causal-lm'}
++    if (getattr(args,'critic_kind','mlp')!='mlp' or
++            int(getattr(args,'critic_hidden',32))!=32 or
++            float(getattr(args,'critic_lr',1e-3))!=.001):
++        generated['version']='pt-sft-clipped-ppo-v66'
++        generated['critic']={'kind':getattr(args,'critic_kind','mlp'),
++                             'hidden':int(getattr(args,'critic_hidden',32)),
++                             'lr':float(getattr(args,'critic_lr',1e-3))}
+     if not getattr(args,'mix_policy',None):
+         return generated
+     path=Path(args.mix_policy)
+@@ -87,6 +94,13 @@
+             raise MixedLearningError(f'{field} must be finite and in [0,100]')
+     if getattr(args,'ppo_reward','token_match') not in ('token_match','exact'):
+         raise MixedLearningError('PPO reward must be token_match or exact')
++    if getattr(args,'critic_kind','mlp') not in ('mlp','linear'):
++        raise MixedLearningError('critic_kind must be mlp or linear')
++    if type(getattr(args,'critic_hidden',32)) is not int or not 8<=getattr(args,'critic_hidden',32)<=512:
++        raise MixedLearningError('critic_hidden must be 8..512')
++    value_lr=float(getattr(args,'critic_lr',1e-3))
++    if not math.isfinite(value_lr) or not 1e-7<=value_lr<=.1:
++        raise MixedLearningError('critic_lr out of range')
+     if not 0<float(args.ppo_clip)<=.5:
+         raise MixedLearningError('ppo_clip must be in (0,.5]')
+     for name in ('ppo_kl_coef','ppo_value_coef'):
+@@ -101,9 +115,9 @@
+         raise MixedLearningError('PPO token cap must be 1..128, reuse 1..8')
+     if not 8<=int(getattr(args,'max_length',128))<=131072:
+         raise MixedLearningError('max_length must be >= 8 for mixed causal-LM')
+-    if not getattr(args,'mix_policy',None) and not getattr(args,'sft_jsonl',None) and getattr(args,'sft_weight',1.) != 1.:
++    if not getattr(args,'mix_policy',None) and not getattr(args,'sft_jsonl',None) and getattr(args,'sft_weight',1.) not in (0.,1.):
+         raise MixedLearningError('SFT weight supplied without --sft-jsonl')
+-    if not getattr(args,'mix_policy',None) and not getattr(args,'ppo_jsonl',None) and getattr(args,'ppo_weight',.2) != .2:
++    if not getattr(args,'mix_policy',None) and not getattr(args,'ppo_jsonl',None) and getattr(args,'ppo_weight',.2) not in (0.,.2):
+         raise MixedLearningError('PPO weight supplied without --ppo-jsonl')
+     if float(args.pt_weight)+ (float(args.sft_weight) if args.sft_jsonl else 0) + (float(args.ppo_weight) if args.ppo_jsonl else 0) == 0:
+         raise MixedLearningError('at least one mixed objective must have positive weight')
+@@ -185,9 +199,12 @@
+ 
+ 
+ class LocalValueHead(nn.Module):
+-    def __init__(self):
++    def __init__(self, kind='mlp', hidden=32):
+         super().__init__()
+-        self.net=nn.Sequential(nn.Linear(4,32),nn.Tanh(),nn.Linear(32,1))
++        if kind not in ('mlp','linear') or type(hidden) is not int or not 8 <= hidden <= 512:
++            raise MixedLearningError('Critic architecture must be mlp/linear with 8..512 hidden units')
++        self.net=(nn.Sequential(nn.Linear(4,hidden),nn.Tanh(),nn.Linear(hidden,1))
++                  if kind=='mlp' else nn.Sequential(nn.Linear(4,1)))
+     def forward(self,x):
+         return self.net(x).squeeze(-1)
+ 
+@@ -204,9 +221,21 @@
+         self.cached=None
+         self.reuses=0
+         self.counts={'pt':0,'sft':0,'ppo':0}
++        self.critic_steps=0
+         if self.ppo:
+-            self.critic=LocalValueHead()
+-            self.critic_optim=torch.optim.AdamW(self.critic.parameters(),lr=1e-3)
++            kind=getattr(args,'critic_kind','mlp')
++            hidden=int(getattr(args,'critic_hidden',32))
++            self.critic=LocalValueHead(kind,hidden)
++            self.critic_optim=torch.optim.AdamW(self.critic.parameters(),lr=float(getattr(args,'critic_lr',1e-3)))
++            self._critic_dir=getattr(args,'critic_state_dir',None)
++            self._critic_identity=str(getattr(args,'room_id',None) or getattr(args,'model','local'))
++            from .critic_state_v66 import snapshot_file, load
++            if self._critic_dir and snapshot_file(self._critic_dir).is_file():
++                self.critic_steps=load(snapshot_file(self._critic_dir),self.critic,self.critic_optim,
++                                       kind=kind,hidden=hidden,identity=self._critic_identity)
++            elif getattr(args,'critic_init',None):
++                load(args.critic_init,self.critic,self.critic_optim,kind=kind,hidden=hidden,
++                     identity=self._critic_identity,allow_initial=True)
+ 
+     def sft_loss(self,model,device):
+         row=self.sft.next()
+@@ -260,6 +289,11 @@
+                     raise MixedLearningError('PPO generation returned no tokens')
+                 feat=torch.stack(features)
+                 self.critic.to(device)
++                # AdamW moments restored from safe CPU checkpoint must follow
++                # their parameter tensors when an accelerator is selected.
++                for param,state in self.critic_optim.state.items():
++                    for key in ('exp_avg','exp_avg_sq'):
++                        if key in state:state[key]=state[key].to(param.device)
+                 self.critic_optim.zero_grad(set_to_none=True)
+                 old_values=self.critic(feat).detach()
+                 # Observable, deterministic reference-based reward. Never ask
+@@ -330,7 +364,17 @@
+         finally:
+             model.train(was_training)
+ 
++    def save_critic(self):
++        if self.critic is not None and getattr(self,'_critic_dir',None):
++            from .critic_state_v66 import save
++            save(self._critic_dir,self.critic,self.critic_optim,
++                 kind=getattr(self.args,'critic_kind','mlp'),
++                 hidden=int(getattr(self.args,'critic_hidden',32)),
++                 identity=self._critic_identity,steps=self.critic_steps)
++
+     def close(self):
++        if self.critic is not None:
++            self.save_critic()
+         for x in (self.sft,self.ppo):
+             if x:x.close()
+ 
+--- a/patchlib/webview_controller.py
++++ b/patchlib/webview_controller.py
+@@ -424,6 +424,38 @@
+     def upload_code(self, payload: dict):
+         from .code_registry import register_base64
+         return register_base64(self.workdir/'.fedpara-gui'/'codes',payload.get('name'),payload.get('contents'))
++
++    def mixed_settings(self, payload: dict):
++        """Return this machine's private datasets/critic selections for a room.
++
++        No local dataset paths are exposed through public room manifests.
++        """
++        from .mix_gui_v66 import DEFAULT
++        room=validate_room(payload['room'])
++        folder=self._room_path(room).parent
++        if not self._room_path(room).is_file():
++            raise FileNotFoundError('Select a locally saved model first')
++        with self.lock:
++            if room not in self.profiles:
++                self.profiles[room]=allocate_profile(folder)
++            profile=self.profiles[room]
++        config=folder/('mixed-local-'+profile.name+'.json')
++        if not config.is_file():
++            result=dict(DEFAULT)
++        else:
++            data=json.loads(config.read_text(encoding='utf8'))
++            if not isinstance(data,dict) or data.get('room')!=room or set(data)-{'room'}!=set(DEFAULT):
++                raise ValueError('Local mixed training configuration is malformed')
++            result={k:data[k] for k in DEFAULT}
++        # This contains only room-wide, nonsecret hyperparameters, never local
++        # dataset paths or imported critic checkpoint paths.
++        pinned=folder/'mixed-objectives-v66.json'
++        if pinned.exists():
++            policy=json.loads(pinned.read_text(encoding='utf8'))
++            if not isinstance(policy,dict) or not isinstance(policy.get('objectives'),list):
++                raise ValueError('Pinned mixed objective policy is invalid')
++            result['pinned_policy']=policy
++        return result
+ 
+     def start(self, payload: dict):
+         room=validate_room(payload['room'])
+@@ -510,6 +542,30 @@
+                     streaming_base=True
+                     automatic=False
+                     base=None
++            from .mix_gui_v66 import normalize, objective_policy, atomic_json
++            mixed_policy_file=path.parent/'mixed-objectives-v66.json'
++            existing_policy=None
++            if mixed_policy_file.exists():
++                try:existing_policy=json.loads(mixed_policy_file.read_text(encoding='utf8'))
++                except (OSError,ValueError) as exc:
++                    raise ValueError('Pinned shared mixed-learning policy is unreadable') from exc
++            mixed=normalize(payload.get('mixed_training',{}),
++                            task=manifest['model']['architecture'],
++                            allow_pt_only=existing_policy is not None)
++            if existing_policy is not None and not mixed['enabled']:
++                raise ValueError('Mixed training objective policy is immutable for this room. Choose mixed mode or create a NEW room.')
++            try:
++                mixed_spec=objective_policy(mixed, pinned=mixed_policy_file if existing_policy is not None else None)
++            except ValueError as exc:
++                raise ValueError('Mixed training objective policy is immutable for this room: '+str(exc)) from exc
++            if mixed_spec is not None and existing_policy is None:
++                # A room already trained with PT-only has another signed genesis.
++                if profile.journal.exists() and profile.journal.stat().st_size:
++                    raise ValueError('A PT-only journal already exists. Mixed PT/SFT/PPO requires a NEW room.')
++                # Peers joining later must receive the policy over an explicit,
++                # pinned channel; never synthesize it from different local files.
++                atomic_json(mixed_policy_file,mixed_spec)
++            critic_dir=path.parent/'critics'/profile.name
+             pause_file = path.parent / ('pause-'+profile.name+'.flag')
+             journal = profile.journal.resolve()
+             # Never overwrite/remove the immutable genesis or the append-only journal.
+@@ -551,7 +607,9 @@
+                 sharded_base_manifest=sharded_base_manifest,
+                 sharded_base_store=sharded_base_store,
+                 disk_cache_fraction=payload.get('disk_cache_fraction',.6),pause_file=pause_file,
+-                snapshot_request_file=snapshot_request_file)
++                snapshot_request_file=snapshot_request_file,
++                mixed_options=mixed,mixed_policy=mixed_policy_file if mixed_spec else None,
++                critic_state_dir=critic_dir)
+             # A bad new setting must never poison a healthy old journal.
+             # Record the immutable launch policy before dispatching, so a GUI
+             # crash between process creation and first metric cannot forget it.
+@@ -571,6 +629,8 @@
+             # still running: a new worker can service another request.
+             snapshot_request_file.with_suffix('.status.json').unlink(missing_ok=True)
+             pid=self.train.start(cmd,str(journal)+'.gui.log')
++            if mixed['enabled']:
++                atomic_json(path.parent/('mixed-local-'+profile.name+'.json'),{'room':room,**mixed})
+             self._pause_file=pause_file
+             self._snapshot_request_file=snapshot_request_file
+             self._current_room=room
+@@ -578,7 +638,8 @@
+             self._checkpoint_path=checkpoint
+             self._model_storage_path=model_storage
+             self._remember_room(room)
+-            return {'pid':pid,'journal':str(journal),'profile':profile.name,
++            return {'pid':pid,'journal':str(journal),'mixed_enabled':mixed['enabled'],
++                    'critic_dir':str(critic_dir) if mixed['ppo_jsonl'] else None,'profile':profile.name,
+                     'checkpoint_file':str(checkpoint),'model_storage_dir':str(model_storage),
+                     'auto_state':automatic,'initialization':initialization,
+                     'base':str(base) if base is not None else '(safetensors streaming genesis)'}
+--- a/patchlib/webview_gui.py
++++ b/patchlib/webview_gui.py
+@@ -56,6 +56,27 @@
+ 
+     def register_code(self, payload: dict):
+         return self._controller.upload_code(payload)
++
++    def pick_training_file(self, payload: dict):
++        """Native file selector; never read a large dataset into the WebView."""
++        if not isinstance(payload,dict) or payload.get('kind') not in ('sft','ppo','critic'):
++            raise ValueError('Invalid training file kind')
++        import webview
++        if not getattr(webview,'windows',None):
++            raise RuntimeError('A desktop window is required for file selection')
++        window=webview.windows[0]
++        if payload['kind']=='critic':
++            mask=('Safetensors (*.safetensors)', 'All files (*.*)')
++        else:
++            mask=('JSON Lines (*.jsonl)', 'All files (*.*)')
++        dialog_type=getattr(webview,'OPEN_DIALOG',None)
++        if dialog_type is None:
++            dialog_type=webview.FileDialog.OPEN
++        result=window.create_file_dialog(dialog_type,allow_multiple=False,file_types=mask)
++        return {'path':str(Path(result[0]).expanduser().resolve()) if result else ''}
++
++    def mixed_settings(self, payload: dict):
++        return self._controller.mixed_settings(payload)
+ 
+     def start_training(self, payload: dict):
+         return self._controller.start(payload)
+--- /dev/null
++++ b/tests/test_gui_mixed_critic_v66.py
+@@ -0,0 +1,250 @@
++"""Real WebView payload -> safe CLI flags, private paths, critic recovery."""
++from __future__ import annotations
++import json
++from pathlib import Path
++from types import SimpleNamespace
++import sys, types
++
++import pytest
++import torch
++from patchlib.mix_gui_v66 import normalize, command_options, objective_policy, DEFAULT
++from patchlib.mixed_learning_v65 import MixedObjectiveTrainer, LocalValueHead, MixedLearningError
++from patchlib.critic_state_v66 import save,load,CriticStateError,snapshot_file
++from patchlib.roomid import create_room_id
++from patchlib.webview_controller import WebviewController
++from patchlib.webview_gui import FedparaBridge, compose_html
++
++
++def file(tmp_path,name,row):
++    f=tmp_path/name;f.write_text(json.dumps(row)+'\n',encoding='utf8');return f
++
++
++def config(tmp_path,**kw):
++    sft=file(tmp_path,'sft.jsonl',{'prompt':'Q','response':'A'})
++    ppo=file(tmp_path,'ppo.jsonl',{'prompt':'Q','reference':'A'})
++    return {**DEFAULT,'enabled':True,'sft_jsonl':str(sft),'ppo_jsonl':str(ppo),**kw}
++
++
++def test_mixed_three_datasets_and_private_paths(tmp_path):
++    opts=normalize(config(tmp_path,critic_kind='linear',critic_lr=.002),task='causal-lm')
++    flags=command_options(opts,state_dir=tmp_path/'critic')
++    assert flags[flags.index('--sft-jsonl')+1]==str(tmp_path/'sft.jsonl')
++    assert flags[flags.index('--ppo-jsonl')+1]==str(tmp_path/'ppo.jsonl')
++    assert flags[flags.index('--critic-kind')+1]=='linear'
++    policy=objective_policy(opts)
++    assert policy['version']=='pt-sft-clipped-ppo-v66'
++    assert 'sft.jsonl' not in json.dumps(policy)
++    assert 'ppo.jsonl' not in json.dumps(policy)
++    assert 'critic' in policy and policy['critic']['kind']=='linear'
++
++
++def test_sft_only_and_invalid_path(tmp_path):
++    opts=config(tmp_path,ppo_jsonl='',ppo_weight=0)
++    parsed=normalize(opts,task='causal-lm')
++    assert parsed['ppo_jsonl']=='' and parsed['ppo_weight']==0
++    bad=dict(opts,sft_jsonl=str(tmp_path/'unknown.jsonl'))
++    with pytest.raises(ValueError,match='existing local'):
++        normalize(bad,task='causal-lm')
++    with pytest.raises(ValueError,match='causal'):
++        normalize(opts,task='masked-lm')
++    assert normalize({'enabled':False,'sft_jsonl':'/nonexistent'},task='causal-lm')==DEFAULT
++
++
++def test_critic_checkpoint_roundtrip_and_wrong_identity(tmp_path):
++    torch.manual_seed(9)
++    model=LocalValueHead(kind='mlp',hidden=16)
++    opt=torch.optim.AdamW(model.parameters(),lr=.005)
++    x=torch.rand(5,4)
++    for _ in range(3):
++        opt.zero_grad();model(x).square().sum().backward();opt.step()
++    expected=model(x).detach().clone()
++    where=tmp_path/'critic'
++    p=save(where,model,opt,kind='mlp',hidden=16,identity='room-123',steps=3)
++    restored=LocalValueHead(kind='mlp',hidden=16)
++    new_opt=torch.optim.AdamW(restored.parameters(),lr=.005)
++    assert load(p,restored,new_opt,kind='mlp',hidden=16,identity='room-123')==3
++    torch.testing.assert_close(expected,restored(x))
++    for p1,p2 in zip(model.parameters(),restored.parameters()):
++        assert opt.state[p1].keys()==new_opt.state[p2].keys()
++        for k in opt.state[p1]:torch.testing.assert_close(opt.state[p1][k],new_opt.state[p2][k])
++    with pytest.raises(CriticStateError,match='another room'):
++        load(snapshot_file(where),restored,new_opt,kind='mlp',hidden=16,identity='other-room')
++    with pytest.raises(CriticStateError,match='layout|kind'):
++        load(snapshot_file(where),LocalValueHead(kind='linear',hidden=16),
++             torch.optim.AdamW(LocalValueHead(kind='linear',hidden=16).parameters()),
++             kind='linear',hidden=16,identity='room-123')
++
++
++def make_controller(tmp_path,monkeypatch):
++    c=WebviewController(tmp_path)
++    room=create_room_id()
++    c.save({'room':room,'model':'org/ourmodel','revision':'main',
++            'task':'causal-lm','initialization':'pretrained','seed':42,
++            'sources':[{'repo':'org/pretraining','revision':'main','config':None,
++                        'split':'train','columns':{'text':'text'},'weight':1.0}]})
++    called=[]
++    monkeypatch.setattr(c.train,'start',lambda cmd,log:called.append(cmd) or 201)
++    return c,room,called
++
++
++def test_real_gui_to_cli_with_critic_and_pinned_policy(tmp_path,monkeypatch):
++    c,room,called=make_controller(tmp_path,monkeypatch)
++    b=FedparaBridge(c)
++    settings=config(tmp_path,critic_kind='linear')
++    payload={'room':room,'ws':'ws://127.0.0.1:8080/ws',
++             'streaming_base':True,'kind':'loha','rank':16,
++             'mixed_training':settings}
++    started=b.start_training(payload)
++    assert started['mixed_enabled'] is True and started['pid']==201
++    cmd=called[-1]
++    for x in ('--sft-jsonl','--ppo-jsonl','--critic-state-dir','--mix-policy'):
++        assert x in cmd
++    assert cmd[cmd.index('--pt-weight')+1]=='1.0'
++    assert b.mixed_settings({'room':room})['critic_kind']=='linear'
++    manifest=(tmp_path/'.fedpara-gui'/'rooms'/room/'manifest.json').read_text()
++    assert str(tmp_path) not in manifest
++    policyfile=Path(cmd[cmd.index('--mix-policy')+1]);policy=json.loads(policyfile.read_text())
++    assert policy['objectives']==[True,True]
++    assert str(tmp_path) not in policyfile.read_text()
++    with pytest.raises(ValueError,match='immutable'):
++        b.start_training({**payload,'mixed_training':{**settings,'ppo_clip':.1}})
++    with pytest.raises(ValueError,match='immutable'):
++        b.start_training({**payload,'mixed_training':{'enabled':False}})
++    # Local dataset shards may change without changing the shared objective protocol.
++    file(tmp_path,'sft2.jsonl',{'prompt':'b','response':'c'})
++    b.start_training({**payload,'mixed_training':{**settings,
++                      'sft_jsonl':str(tmp_path/'sft2.jsonl')}})
++
++
++def test_existing_pt_only_journal_requires_new_room(tmp_path,monkeypatch):
++    c,room,called=make_controller(tmp_path,monkeypatch)
++    profile=c.profiles.get(room)
++    # Simulate an established PT-only local journal.
++    p=c._room_path(room).parent/'persistent-events.sqlite3'
++    p.write_bytes(b'sqlite journal')
++    monkeypatch.setattr('patchlib.webview_controller.allocate_profile',lambda folder: SimpleNamespace(name='test',journal=p))
++    with pytest.raises(ValueError,match='NEW room'):
++        c.start({'room':room,'ws':'ws://127.0.0.1:8080/ws','streaming_base':True,
++                 'kind':'loha','rank':16,'mixed_training':config(tmp_path)})
++
++
++def test_real_html_contains_mixed_controls_bridge():
++    html=compose_html()
++    for item in ('mixSftPath','mixPpoPath','mixCriticKind','mixCriticInit',
++                 'mixPtDataset','mixCriticLr','mixed_training','mixed_settings'):
++        assert item in html
++
++class _ToyTokenizer:
++    eos_token_id=2
++    def encode(self,text,add_special_tokens=False):
++        return [3+(ord(c)%12) for c in text]
++
++
++def test_critic_saved_during_real_ppo_updates_and_resumed(tmp_path):
++    from patchlib.cli import run_step
++    from patchlib.core import UniversalAdapter
++    from torch import nn
++    torch.manual_seed(123)
++    class Toy(nn.Module):
++        def __init__(self):
++            super().__init__()
++            self.emb=nn.Embedding(18,12)
++            self.lin=nn.Linear(12,12)
++            self.head=nn.Linear(12,18)
++        def forward(self,input_ids,attention_mask=None):
++            return {'logits':self.head(torch.tanh(self.lin(self.emb(input_ids))))}
++    model=Toy()
++    adapter=UniversalAdapter(model,'toy','main',kind='lora',rank=2,target_scope='linear')
++    optimizer=torch.optim.AdamW(list(adapter.trainable_parameters()),lr=.01)
++    opts=config(tmp_path,critic_kind='linear',critic_hidden=8,critic_lr=.004,ppo_reuse=1)
++    cfg=normalize(opts,task='causal-lm')
++    args=SimpleNamespace(**cfg,room_id='test-room-critic',model='toy',max_length=32,
++                         hf_task='causal-lm',loss_policy='auto',input_map='',
++                         device='cpu',grad_accum=1,telemetry_file=None,batch_size=1,
++                         critic_state_dir=tmp_path/'savedcritic')
++    args._v65_mixer=MixedObjectiveTrainer(args,_ToyTokenizer())
++    # run_step will keep the explicitly built Critic and train it alongside
++    # actor LoRA. It must publish its 10th checkpoint without network I/O.
++    batch={'input_ids':torch.tensor([[3,4,5,6,7]],dtype=torch.long),
++           'attention_mask':torch.ones(1,5,dtype=torch.long),
++           'labels':torch.tensor([[3,4,5,6,7]],dtype=torch.long)}
++    for i in range(10):
++        optimizer.zero_grad(set_to_none=True)
++        loss=run_step(model,adapter,optimizer,batch,args)
++        assert isinstance(loss,float)
++        optimizer.step()
++    assert snapshot_file(args.critic_state_dir).is_file()
++    saved_steps=args._v65_mixer.critic_steps
++    before=[x.detach().clone() for x in args._v65_mixer.critic.parameters()]
++    restarted=MixedObjectiveTrainer(args,_ToyTokenizer())
++    assert restarted.critic_steps==saved_steps==10
++    for prior,later in zip(before,restarted.critic.parameters()):
++        torch.testing.assert_close(prior,later)
++    restarted.close()
++    args._v65_mixer.close()
++
++
++def test_initial_external_critic_is_loaded_without_code_execution(tmp_path):
++    from patchlib.critic_state_v66 import save
++    c=LocalValueHead(kind='linear',hidden=32)
++    opt=torch.optim.AdamW(c.parameters(),lr=.001)
++    initial=save(tmp_path/'initial',c,opt,kind='linear',hidden=32,
++                 identity='another-room',steps=0)
++    p=file(tmp_path,'rollouts.jsonl',{'prompt':'start','reference':'goal'})
++    args=SimpleNamespace(**{**DEFAULT,'enabled':True,'ppo_jsonl':str(p),
++        'sft_weight':0,'critic_kind':'linear', 'critic_init':str(initial)},
++        room_id='room2',max_length=32,hf_task='causal-lm',loss_policy='auto',
++        input_map='',critic_state_dir=tmp_path/'local2')
++    critic=MixedObjectiveTrainer(args,_ToyTokenizer())
++    assert critic.critic is not None
++    for a,b in zip(c.parameters(),critic.critic.parameters()):torch.testing.assert_close(a,b)
++    critic.close()
++
++
++def test_other_peers_can_use_distinct_objective_datasets(tmp_path, monkeypatch):
++    """Room-wide objective semantics stay pinned; private dataset paths can differ."""
++    c, room, called = make_controller(tmp_path, monkeypatch)
++    root=config(tmp_path)
++    base={'room':room,'ws':'ws://127.0.0.1:8080/ws',
++          'streaming_base':True,'kind':'loha','rank':16}
++    c.start({**base, 'mixed_training':root})
++    # A second peer can be PT-only or have just one of the room's objectives.
++    pt_only={**root,'sft_jsonl':'','ppo_jsonl':''}
++    c.start({**base,'mixed_training':pt_only})
++    assert '--mix-policy' in called[-1]
++    assert '--sft-jsonl' not in called[-1]
++    assert '--ppo-jsonl' not in called[-1]
++    sft_only={**root,'ppo_jsonl':''}
++    c.start({**base,'mixed_training':sft_only})
++    assert '--sft-jsonl' in called[-1] and '--ppo-jsonl' not in called[-1]
++    with pytest.raises(ValueError,match='immutable'):
++        c.start({**base,'mixed_training':{**sft_only,'critic_hidden':64}})
++
++
++def test_dataset_role_schema_validated_before_worker_starts(tmp_path):
++    invalid=file(tmp_path,'bad.jsonl',{'prompt':'Hello','reference':'Yes'})
++    with pytest.raises(ValueError,match='response'):
++        normalize(config(tmp_path,sft_jsonl=str(invalid)),task='causal-lm')
++    with pytest.raises(ValueError,match='reference'):
++        normalize(config(tmp_path,ppo_jsonl=str(file(tmp_path,'no-reference.jsonl',
++                  {'prompt':'Hi','response':'there'}))),task='causal-lm')
++
++
++def test_gui_recovers_shared_policy_even_without_local_objective_files(tmp_path, monkeypatch):
++    c,room,called=make_controller(tmp_path,monkeypatch)
++    base={'room':room,'ws':'ws://127.0.0.1:8080/ws',
++          'streaming_base':True,'kind':'loha','rank':16}
++    c.start({**base,'mixed_training':config(tmp_path,critic_kind='linear',critic_lr=.002)})
++    original=c.mixed_settings({'room':room})
++    assert original['pinned_policy']['critic']['kind']=='linear'
++    from patchlib.profiles import PeerProfile
++    c.close()
++    restarted=WebviewController(tmp_path)
++    try:
++        # No room-local paths are copied into the shared objective protocol.
++        data=restarted.mixed_settings({'room':room})
++        assert data['pinned_policy']['critic']['lr']==.002
++        assert data['enabled'] is True
++        assert data['sft_jsonl']==str(tmp_path/'sft.jsonl')
++    finally:
++        restarted.close()
+--- a/web/desktop_webview.html
++++ b/web/desktop_webview.html
+@@ -33,7 +33,19 @@
+       <section class="screen" id="panel-training" aria-label="Training">
+         <div class="screen-head"><div><div class="eyebrow">02 / LIVE OPTIMIZATION</div><h1>TRAINING</h1><p data-t="trainingIntro">LoHa / LoRA · 継続FedSum · ローカル学習メトリクス</p></div><div class="buttonrow"><button type="button" id="start" class="primary" data-t="start">▶ 開始 / 再開</button><button type="button" id="stop" class="secondary" data-t="pause">Ⅱ 学習停止（中継継続）</button><button type="button" id="disconnect" class="ghost-danger" data-t="disconnect">ネットワークから切断</button></div></div>
+         <div class="training-grid"><div class="training-left"><div class="surface metrics"><div class="metric"><span>TRAIN LOSS</span><strong id="monitorLoss">—</strong><small data-t="localLoss">Local minibatch</small></div><div class="metric"><span data-t="accuracy">TOKEN ACCURACY</span><strong id="monitorAccuracy">—</strong><small data-t="localAccuracy">Local top-1, not validation</small></div><div class="metric"><span>STEPS / SEC</span><strong id="monitorSpeed">—</strong><small data-t="throughput">Throughput</small></div><div class="metric"><span>LOCAL STEPS</span><strong id="monitorSteps">0</strong><small id="monitorUpdates">0 / 0 updates</small></div></div><div class="surface charts" id="chartsPanel"><div class="charts-toolbar"><span data-t="historyWindow">DISPLAY RANGE</span><select id="chartFocus" aria-label="Graph magnification"><option value="both" data-t="chartBoth">両方</option><option value="loss" data-t="chartLossOnly">Loss拡大</option><option value="accuracy" data-t="chartAccuracyOnly">Top-1拡大</option></select><select id="chartWindow" aria-label="Training graph history range"><option value="300">5 min</option><option value="1800" selected>30 min</option><option value="7200">2 h</option><option value="21600">6 h</option><option value="86400">24 h</option><option value="604800">7 days</option><option value="0" data-t="entireRun">Entire run</option></select></div><div class="chart-box"><div class="chart-header"><strong data-t="lossChart">Loss history</strong><small id="lossLatest">—</small></div><svg id="monitorLossPlot" viewBox="0 0 650 165" preserveAspectRatio="none" role="img" aria-label="Loss over steps"></svg></div><div class="chart-box"><div class="chart-header"><strong data-t="accuracyChart">Top-1 accuracy</strong><small id="accuracyLatest">—</small></div><svg id="monitorAccuracyPlot" viewBox="0 0 650 165" preserveAspectRatio="none" role="img" aria-label="Accuracy over steps"></svg></div></div><div class="surface logpane"><div class="compact-head"><strong data-t="activity">ACTIVITY LOG</strong><div class="buttonrow"><button id="copyLogs" type="button" data-t="copy">Copy</button><button id="saveLogs" type="button" data-t="saveLog">Save</button></div></div><pre id="logs">—</pre></div></div>
+-          <div class="surface training-controls"><div class="compact-head"><strong data-t="trainingSettings">TRAINING SETTINGS</strong><small id="runStatus">IDLE</small></div><div class="fieldgrid"><label><span data-t="adapter">Adapter</span><select id="kind"><option value="loha">LoHa</option><option value="lora">LoRA</option></select></label><label><span>Adapter coverage</span><select id="adapterScope"><option value="auto">Auto · 2D</option><option value="universal">Universal · all float tensors</option></select></label><div class="rank-readout"><span data-t="autoRankLabel">Rank · auto / shared</span><strong id="trainAutoRank">—</strong></div><label><span data-t="optimizer">Optimizer</span><select id="trainOptimizer"><option value="adamw">AdamW</option><option value="lora-muon">LoRA-Muon</option></select></label><label><span data-t="learningRate">Learning rate</span><input type="number" id="trainLr" step="0.00001" min="0.0000001" max="0.1" value="0.0001"></label><div class="auto-status wide" aria-live="polite"><strong data-t="autoTraining">AUTO TUNING · LIVE</strong><div><span data-t="contextLength">Context length</span><b id="trainAutoContext">—</b></div><div><span data-t="localSteps">Steps / publish</span><b id="trainAutoPublish">—</b></div><div><span data-t="peers">Online peers</span><b id="trainAutoPeers">—</b></div><small id="trainAutoNote" class="muted" data-t="autoNote">Automatically estimated from model/device; publish interval adapts to live membership.</small></div><label><span data-t="cacheFraction">VRAM cache budget</span><input type="number" id="trainDiskCacheFraction" min="0" max="0.85" step="0.05" value="0.6"></label><label><span data-t="streaming">Memory mode</span><select id="trainStreamingBase"><option value="off" data-t="normal">Normal</option><option value="on" data-t="streamMode">Streamed</option></select></label><label><span data-t="reinitEvery">Reinit interval</span><input type="number" id="trainReinitEvery" min="0" max="100000" value="20"></label></div><details class="advanced"><summary data-t="advanced">Advanced options</summary><div class="fieldgrid"><label><span data-t="wideRank">Embedding rank</span><input type="number" id="trainWideRank" min="1" max="16" value="4"></label><label><span>Push fanout</span><input type="number" id="trainPushFanout" min="1" max="8" value="2"></label><label><span data-t="journalSize">Journal GiB</span><input type="hidden" id="trainJournalMaxGb" value="0"><span class="muted">AUTO · no fixed limit (disk required)</span></label><label><span>SQLite sync</span><select id="trainJournalSync"><option value="full">FULL</option><option value="normal">NORMAL</option></select></label><label class="wide"><span data-t="baseCheckpoint">Base .fstate (optional)</span><input id="base" placeholder=".fstate"></label></div></details><p class="footnote" data-t="settingsNote">設定は新規ワーカー起動時に適用。停止中も署名済み更新・モデル断片を中継します。</p><div class="subtle-data"><span>INBOUND</span><strong id="monitorQueue">—</strong><span>CHANNELS</span><strong id="monitorChannels">—</strong></div></div>
++          <div class="surface training-controls"><div class="compact-head"><strong data-t="trainingSettings">TRAINING SETTINGS</strong><small id="runStatus">IDLE</small></div><div class="fieldgrid"><label><span data-t="adapter">Adapter</span><select id="kind"><option value="loha">LoHa</option><option value="lora">LoRA</option></select></label><label><span>Adapter coverage</span><select id="adapterScope"><option value="auto">Auto · 2D</option><option value="universal">Universal · all float tensors</option></select></label><div class="rank-readout"><span data-t="autoRankLabel">Rank · auto / shared</span><strong id="trainAutoRank">—</strong></div><label><span data-t="optimizer">Optimizer</span><select id="trainOptimizer"><option value="adamw">AdamW</option><option value="lora-muon">LoRA-Muon</option></select></label><label><span data-t="learningRate">Learning rate</span><input type="number" id="trainLr" step="0.00001" min="0.0000001" max="0.1" value="0.0001"></label><div class="auto-status wide" aria-live="polite"><strong data-t="autoTraining">AUTO TUNING · LIVE</strong><div><span data-t="contextLength">Context length</span><b id="trainAutoContext">—</b></div><div><span data-t="localSteps">Steps / publish</span><b id="trainAutoPublish">—</b></div><div><span data-t="peers">Online peers</span><b id="trainAutoPeers">—</b></div><small id="trainAutoNote" class="muted" data-t="autoNote">Automatically estimated from model/device; publish interval adapts to live membership.</small></div><label><span data-t="cacheFraction">VRAM cache budget</span><input type="number" id="trainDiskCacheFraction" min="0" max="0.85" step="0.05" value="0.6"></label><label><span data-t="streaming">Memory mode</span><select id="trainStreamingBase"><option value="off" data-t="normal">Normal</option><option value="on" data-t="streamMode">Streamed</option></select></label><label><span data-t="reinitEvery">Reinit interval</span><input type="number" id="trainReinitEvery" min="0" max="100000" value="20"></label></div><details class="advanced"><summary data-t="advanced">Advanced options</summary><div class="fieldgrid"><label><span data-t="wideRank">Embedding rank</span><input type="number" id="trainWideRank" min="1" max="16" value="4"></label><label><span>Push fanout</span><input type="number" id="trainPushFanout" min="1" max="8" value="2"></label><label><span data-t="journalSize">Journal GiB</span><input type="hidden" id="trainJournalMaxGb" value="0"><span class="muted">AUTO · no fixed limit (disk required)</span></label><label><span>SQLite sync</span><select id="trainJournalSync"><option value="full">FULL</option><option value="normal">NORMAL</option></select></label><label class="wide"><span data-t="baseCheckpoint">Base .fstate (optional)</span><input id="base" placeholder=".fstate"></label></div></details><details class="mixed-panel" id="mixedPanel" open>
++  <summary>PT + SFT + PPO <span class="muted">· independent datasets &amp; value critic</span></summary>
++  <div class="mixed-inner">
++    <label><span>Training objectives</span><select id="mixEnabled"><option value="off">PT only (legacy)</option><option value="on">Concurrent PT / SFT / PPO</option></select></label>
++    <div id="mixFields" hidden>
++      <div class="mixed-segment"><strong>01 · PRETRAINING</strong><p class="footnote">PT uses the immutable room's attached HF datasets. Create a new room to change them.</p><div class="mixed-info" id="mixPtDataset">—</div><label><span>PT loss weight</span><input id="mixPtWeight" type="number" min="0" max="100" step="0.1" value="1"></label></div>
++      <div class="mixed-segment"><strong>02 · SUPERVISED FINE-TUNING</strong><p class="footnote">Local JSONL: {"prompt":"...","response":"..."}. Paths are never broadcast to peers.</p><label><span>SFT dataset (.jsonl)</span><div class="mixed-path"><input id="mixSftPath" placeholder="/path/to/sft.jsonl" spellcheck="false"><button type="button" id="pickMixSft">Browse</button></div></label><label><span>SFT loss weight</span><input id="mixSftWeight" type="number" min="0" max="100" step="0.1" value="1"></label></div>
++      <div class="mixed-segment"><strong>03 · PPO</strong><p class="footnote">Local JSONL: {"prompt":"...","reference":"..."}. Ground-truth scoring; no Self-Critic.</p><label><span>PPO dataset (.jsonl)</span><div class="mixed-path"><input id="mixPpoPath" placeholder="/path/to/ppo.jsonl" spellcheck="false"><button type="button" id="pickMixPpo">Browse</button></div></label><div class="fieldgrid"><label><span>PPO loss weight</span><input id="mixPpoWeight" type="number" min="0" max="100" step="0.1" value="0.2"></label><label><span>Reward</span><select id="mixPpoReward"><option value="token_match">Token match</option><option value="exact">Exact text tokens</option></select></label><label><span>Clip epsilon</span><input id="mixPpoClip" type="number" value="0.2" step="0.05" min="0.01" max="0.5"></label><label><span>KL coefficient</span><input id="mixPpoKl" type="number" value="0.02" step="0.01" min="0" max="10"></label><label><span>Max rollout tokens</span><input id="mixPpoTokens" type="number" value="8" min="1" max="128"></label><label><span>Rollout reuse</span><input id="mixPpoReuse" type="number" value="2" min="1" max="8"></label></div></div>
++      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Separate local value estimator for PPO/GAE. This is not a reward judge or part of signed model updates.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><label><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">Critic weights and AdamW state are saved in the selected room's private local storage and reused after restart.</p></div>
++      <div id="mixedConfigStatus" class="footnote" role="status">These settings apply when launching a new worker; changing a room's pinned objective protocol requires a new room.</div>
++    </div>
++  </div>
++</details><p class="footnote" data-t="settingsNote">設定は新規ワーカー起動時に適用。停止中も署名済み更新・モデル断片を中継します。</p><div class="subtle-data"><span>INBOUND</span><strong id="monitorQueue">—</strong><span>CHANNELS</span><strong id="monitorChannels">—</strong></div></div>
+         </div>
+       </section>
+       <section class="screen" id="panel-datasets" aria-label="Datasets"><div class="screen-head"><div><div class="eyebrow">03 / HUGGING FACE HUB</div><h1>DATASETS</h1><p data-t="datasetsIntro">公開データセットを検索し、新規モデルに複数追加できます。</p></div><button id="searchDatasets" type="button" class="primary" data-t="search">検索</button></div><div class="datasets-layout"><div class="surface hf-list"><div class="toolbar"><label class="search"><span>⌕</span><input id="datasetQuery" data-ph="searchHF" placeholder="Search Hugging Face datasets"></label><div class="muted tiny" id="datasetCount">—</div></div><div id="hfResults" class="hf-results"><div class="empty" data-t="searchToStart">Search the public Hub to begin</div></div><div class="page-controls"><span data-t="hubCatalog">Hugging Face catalog</span><div><button id="datasetPrev">‹</button><span id="datasetPage">1 / 1</span><button id="datasetNext">›</button></div></div></div><div class="surface draft-datasets"><div class="compact-head"><strong data-t="attachedDatasets">ATTACHED TO DRAFT</strong><span class="pill" id="draftCount">0 / 12</span></div><div id="draftDatasetCards" class="draft-list"></div><div class="dataset-fields"><div class="tiny muted" id="datasetInspectNote" aria-live="polite"></div><datalist id="datasetConfigs"></datalist><datalist id="datasetSplits"></datalist><label><span data-t="datasetRepo">Repository</span><input id="repo" placeholder="org/dataset"></label><div class="fieldgrid"><label><span>Config</span><input id="config" list="datasetConfigs" placeholder="default"></label><label><span>Split</span><input id="split" list="datasetSplits" value="train"></label><label><span>Revision</span><input id="ds_revision" value="main"></label><label><span data-t="weight">Mix weight</span><input id="weight" type="number" value="1" min="0.001" max="100" step="0.1"></label></div><label><span data-t="columnMap">Columns (e.g. text=text)</span><input id="columns" value="text=text"></label><button class="secondary full" id="addDataset" type="button" data-t="addDataset">＋ Add dataset</button></div></div></div></section>
+--- a/web/desktop_webview.js
++++ b/web/desktop_webview.js
+@@ -135,7 +135,7 @@
+ function get(id){return String($(id).value||'').trim();}
+ const routes=Object.freeze({defaults:'defaults',newRoom:'new_room',save:'save_room',join:'join_room',register:'register_room',
+   publicModels:'list_rooms',localModels:'local_models',select:'select_model',compat:'model_compatibility',
+-  device:'device_capabilities',datasets:'search_datasets',inspect:'inspect_dataset',plan:'recommend_training',code:'register_code',start:'start_training',
++  mixedSettings:'mixed_settings',pickMixFile:'pick_training_file',device:'device_capabilities',datasets:'search_datasets',inspect:'inspect_dataset',plan:'recommend_training',code:'register_code',start:'start_training',
+   status:'training_status',history:'training_history',pause:'stop_training',resume:'resume_training',disconnect:'disconnect_training',
+   open:'open_storage',paths:'storage_paths',copy:'copy_logs',saveLog:'save_logs',eval:'evaluate',evalStatus:'eval_status',cancelEval:'cancel_eval',evalCheckpoints:'available_checkpoints',captureSnapshot:'request_eval_snapshot',snapshotStatus:'eval_snapshot_status'});
+ let bridgeWait;
+@@ -199,7 +199,7 @@
+   // A later training attempt can independently report device incompatibility.
+   activatedRoom=null;
+   const result=await api('select',{room:selected.room_id,ws:get('ws')});
+-  applyManifest(result,selected.room_id);
++  applyManifest(result,selected.room_id);await reloadMixed(selected.room_id);
+   if(result.local===false){
+     // Selecting a PUBLIC model is an explicit JOIN of that existing room ID,
+     // not authorization to mint a new room. Persist the server-pinned manifest.
+@@ -227,7 +227,7 @@
+     const bytes=new TextEncoder().encode(code);if(bytes.length>256*1024)throw Error('Code is over 256KiB');let bin='';for(let i=0;i<bytes.length;i+=4096)bin+=String.fromCharCode(...bytes.slice(i,i+4096));const result=await api('code',{name:'architecture.py',contents:btoa(bin)});codePath=result.path;setText('codeStatus','SHA-256 '+result.sha256);
+   }const data=settingsPayload();data.prevent_duplicate=true;data.allow_duplicate=$('allowDuplicateModel').checked;const saved=await api('save',data);setText('fingerprint','SHA-256 '+saved.sha256);notify(t('modelSaved'));selected={room_id:data.room,model:data.model,revision:data.revision,datasets:sources.map(s=>s.repo),task:data.task,local:true,online:0};activatedRoom=data.room;$('allowDuplicateModel').checked=false;await refreshModels();void refreshAutoPlan().catch(()=>{});return saved;}
+ $('save').addEventListener('click',safe('Create model',async()=>{await saveModel();navigate('models');}));
+-$('newRoom').addEventListener('click',safe('New ID',async()=>{$('room').value=(await api('newRoom')).room;activatedRoom=null;selectedByUser=false;codePath='';setText('fingerprint','—');}));
++$('newRoom').addEventListener('click',safe('New ID',async()=>{$('room').value=(await api('newRoom')).room;mixedPinnedPolicy=null;applyMixed({enabled:false});activatedRoom=null;selectedByUser=false;codePath='';setText('fingerprint','—');}));
+ function syncCreationMode(setDefault=true){const mode=get('creationMode');const init=$('modelInitialization');if(mode!=='weights'){init.value='config';init.disabled=true;}else{init.disabled=false;if(setDefault||init.value==='config')init.value='pretrained';}const tokFields=$('tokenizerFields');tokFields.hidden=mode!=='code';const editor=$('codeEditor');editor.disabled=false;editor.readOnly=false;$('codeUpload').disabled=false;if(mode==='code'&&!editor.value.trim()&&setDefault){editor.value='from transformers import GPT2Config\n\ndef build_config():\n    return GPT2Config(vocab_size=50257, n_positions=512, n_embd=256, n_layer=6, n_head=8)\n';}setText('codeStatus',mode==='code'?('Python Config · '+(codePath?'registered':'edit to define')):(mode==='architecture'?'Built-in HF architecture · no source execution':'Pretrained checkpoint'));}
+ $('creationMode').addEventListener('change',()=>{codePath='';syncCreationMode();});
+ // A click into the Python editor is an explicit opt-in to code-design mode.
+@@ -245,7 +245,7 @@
+   if(sources.length>=12)throw Error(t('datasetLimit'));
+   sources.push(opts);drawSources();notify(t('datasetAdded')+' · '+opts.repo);return true;
+ }
+-function drawSources(){setText('draftCount',sources.length+' / 12');const root=$('draftDatasetCards');root.replaceChildren();if(!sources.length){root.append(create('div','empty',t('noDataset')));}sources.forEach((src,i)=>{const r=create('div','draft-row');const names=create('div','truncate');names.append(create('strong','',src.repo));names.append(create('div','tiny muted',src.split+' · ×'+src.weight));const del=create('button','', '×');del.setAttribute('aria-label','Remove dataset');del.addEventListener('click',()=>{sources.splice(i,1);drawSources();});r.append(names,del);root.append(r);});taglist($('newDatasetTags'),sources.map(s=>s.repo));}
++function drawSources(){if($('mixPtDataset'))syncMixed();setText('draftCount',sources.length+' / 12');const root=$('draftDatasetCards');root.replaceChildren();if(!sources.length){root.append(create('div','empty',t('noDataset')));}sources.forEach((src,i)=>{const r=create('div','draft-row');const names=create('div','truncate');names.append(create('strong','',src.repo));names.append(create('div','tiny muted',src.split+' · ×'+src.weight));const del=create('button','', '×');del.setAttribute('aria-label','Remove dataset');del.addEventListener('click',()=>{sources.splice(i,1);drawSources();});r.append(names,del);root.append(r);});taglist($('newDatasetTags'),sources.map(s=>s.repo));}
+ $('addDataset').addEventListener('click',safe('Dataset',async()=>{const cols={};for(const v of get('columns').split(',')){const x=v.split('=');if(x.length!==2)throw Error('Expected text=text');cols[x[0].trim()]=x[1].trim();}appendDataset({repo:get('repo'),config:get('config')||null,revision:get('ds_revision'),split:get('split'),weight:Number(get('weight')),columns:cols});}));
+ function drawHub(){const pages=Math.max(1,Math.ceil(hubResults.length/5));datasetsPage=Math.min(datasetsPage,pages-1);const root=$('hfResults');root.replaceChildren();for(const x of hubResults.slice(datasetsPage*5,(datasetsPage+1)*5)){
+   const item=create('div','hf-card');const meta=create('div','truncate');meta.append(create('strong','',x.id));meta.append(create('small','',Math.round(m(x.downloads)).toLocaleString()+' downloads'+(x.gated?' · gated':'')));
+@@ -267,7 +267,62 @@
+  }if(!hubResults.length)root.append(create('div','empty',t('searchToStart')));setText('datasetCount',hubResults.length+' datasets');setPageControls('dataset',datasetsPage,pages,hubResults.length);}
+ async function searchDatasets(){setText('datasetCount','Searching...');const result=await api('datasets',{query:get('datasetQuery')});hubResults=result.datasets||[];datasetsPage=0;drawHub();}
+ $('searchDatasets').addEventListener('click',safe('Datasets',searchDatasets));$('datasetQuery').addEventListener('keydown',e=>{if(e.key==='Enter')void safe('Datasets',searchDatasets)();});$('datasetPrev').addEventListener('click',()=>{datasetsPage=Math.max(0,datasetsPage-1);drawHub();});$('datasetNext').addEventListener('click',()=>{datasetsPage++;drawHub();});
+-function trainingOptions(plan){if(!plan||!plan.can_train)throw Error('This device cannot train the pinned shared rank; relay-only participation is supported when a suitable peer worker is online.');if(!Number.isInteger(plan.max_length)||!Number.isInteger(plan.local_steps))throw Error('Automatic training policy not available');return {room:get('room'),base:get('base'),ws:get('ws'),kind:plan.kind,rank:plan.rank,reinit_every:Number(get('trainReinitEvery')),room_public:get('visibility')==='public',optimizer:get('trainOptimizer'),initialization:(get('creationMode')==='weights'?get('modelInitialization'):'config'),lr:Number(get('trainLr')),local_steps:plan.local_steps,max_length:plan.max_length,streaming_base:get('trainStreamingBase')==='on',disk_cache_fraction:Number(get('trainDiskCacheFraction')),wide_lora_rank:plan.wide_lora_rank,rounds:0,push_fanout:Number(get('trainPushFanout')),journal_sync:get('trainJournalSync'),max_journal_gb:0};}
++// Local paths are per-peer and must never appear in a public room manifest.
++let mixedPinnedPolicy=null;
++const mixedIds={sft_jsonl:'mixSftPath',ppo_jsonl:'mixPpoPath',critic_init:'mixCriticInit',
++  pt_weight:'mixPtWeight',sft_weight:'mixSftWeight',ppo_weight:'mixPpoWeight',
++  ppo_clip:'mixPpoClip',ppo_kl_coef:'mixPpoKl',ppo_value_coef:'mixValueCoef',
++  ppo_gamma:'mixGamma',ppo_gae_lambda:'mixGaeLambda',ppo_max_tokens:'mixPpoTokens',
++  ppo_reuse:'mixPpoReuse',ppo_reward:'mixPpoReward',critic_kind:'mixCriticKind',
++  critic_hidden:'mixCriticHidden',critic_lr:'mixCriticLr'};
++const mixedNumeric=new Set(['pt_weight','sft_weight','ppo_weight','ppo_clip','ppo_kl_coef',
++  'ppo_value_coef','ppo_gamma','ppo_gae_lambda','ppo_max_tokens','ppo_reuse',
++  'critic_hidden','critic_lr']);
++const mixedInt=new Set(['ppo_max_tokens','ppo_reuse','critic_hidden']);
++function syncMixed(){const on=get('mixEnabled')==='on';$('mixFields').hidden=!on;const k=get('mixCriticKind');$('mixCriticHidden').disabled=k==='linear';setText('mixPtDataset',sources.map(x=>x.repo+' ['+x.split+']').join(', ')||'No PT dataset');}
++function mixedPayload(){
++ const enabled=get('mixEnabled')==='on';if(!enabled)return {enabled:false};
++ const data={enabled:true};
++ for(const [field,id] of Object.entries(mixedIds)){
++   const raw=get(id);data[field]=mixedNumeric.has(field)?Number(raw):raw;
++   if(mixedNumeric.has(field)&&(!raw||!Number.isFinite(data[field])||(mixedInt.has(field)&&!Number.isInteger(data[field]))))throw Error('Invalid '+field);
++ }
++ if(!data.sft_jsonl&&!data.ppo_jsonl&&data.pt_weight<=0)throw Error('Select an SFT/PPO dataset or assign a positive PT weight');
++ if(!mixedPinnedPolicy){
++   if(!data.sft_jsonl)data.sft_weight=0;
++   if(!data.ppo_jsonl)data.ppo_weight=0;
++ }
++ if(get('task')!=='causal-lm')throw Error('Mixed PT/SFT/PPO currently requires causal-lm');
++ return data;
++}
++function applyMixed(data){$('mixEnabled').value=data?.enabled?'on':'off';for(const [field,id] of Object.entries(mixedIds)){
++  const value=data?.[field];const defaults={pt_weight:1,sft_weight:1,ppo_weight:.2,ppo_clip:.2,
++    ppo_kl_coef:.02,ppo_value_coef:.5,ppo_gamma:.99,ppo_gae_lambda:.95,
++    ppo_max_tokens:8,ppo_reuse:2,ppo_reward:'token_match',critic_kind:'mlp',critic_hidden:32,critic_lr:.001};
++  $(id).value=value??defaults[field]??'';
++ }syncMixed();}
++async function reloadMixed(room){
++ const data=await api('mixedSettings',{room});mixedPinnedPolicy=data.pinned_policy||null;
++ if(mixedPinnedPolicy&&!data.enabled){
++   data.enabled=true;
++   const p=mixedPinnedPolicy;
++   if(Array.isArray(p.weights)&&p.weights.length===3){
++     [data.pt_weight,data.sft_weight,data.ppo_weight]=p.weights;
++   }
++   for(const key of ['ppo_clip','ppo_kl_coef','ppo_value_coef','ppo_gamma',
++                     'ppo_gae_lambda','ppo_max_tokens','ppo_reuse','ppo_reward']){
++     if(p[key]!==undefined)data[key]=p[key];
++   }
++   if(p.critic){data.critic_kind=p.critic.kind;data.critic_hidden=p.critic.hidden;data.critic_lr=p.critic.lr;}
++ }
++ applyMixed(data);
++}
++$('mixEnabled').addEventListener('change',syncMixed);
++$('mixCriticKind').addEventListener('change',syncMixed);
++for(const [button,target,kind] of [['pickMixSft','mixSftPath','sft'],['pickMixPpo','mixPpoPath','ppo'],['pickMixCritic','mixCriticInit','critic']]){
++ $(button).addEventListener('click',safe('Browse',async()=>{const r=await api('pickMixFile',{kind});if(r.path)$(target).value=r.path;}));
++}
++function trainingOptions(plan){if(!plan||!plan.can_train)throw Error('This device cannot train the pinned shared rank; relay-only participation is supported when a suitable peer worker is online.');if(!Number.isInteger(plan.max_length)||!Number.isInteger(plan.local_steps))throw Error('Automatic training policy not available');return {room:get('room'),base:get('base'),ws:get('ws'),kind:plan.kind,rank:plan.rank,reinit_every:Number(get('trainReinitEvery')),room_public:get('visibility')==='public',optimizer:get('trainOptimizer'),initialization:(get('creationMode')==='weights'?get('modelInitialization'):'config'),lr:Number(get('trainLr')),local_steps:plan.local_steps,max_length:plan.max_length,streaming_base:get('trainStreamingBase')==='on',disk_cache_fraction:Number(get('trainDiskCacheFraction')),wide_lora_rank:plan.wide_lora_rank,rounds:0,push_fanout:Number(get('trainPushFanout')),journal_sync:get('trainJournalSync'),max_journal_gb:0,mixed_training:mixedPayload()};}
+ async function refreshAutoPlan(requireFresh=false){
+   const sequence=++autoPlanRequest;
+   const payload={room:get('room'),model:get('model'),revision:get('revision'),kind:get('kind')};
+@@ -479,7 +534,7 @@
+    try{
+      const entry=models.find(x=>x.room_id===settings.last_room&&x.local);
+      if(entry){const restored=await api('select',{room:entry.room_id,ws:get('ws')});
+-       applyManifest(restored,entry.room_id);activatedRoom=entry.room_id;
++       applyManifest(restored,entry.room_id);await reloadMixed(entry.room_id);activatedRoom=entry.room_id;
+        selected=entry;drawModels();drawSelection();}
+    }catch(e){notify('Resume selection: '+String(e.message||e),true);}
+  }
+--- a/web/tailwind.cdn.css
++++ b/web/tailwind.cdn.css
+@@ -95,3 +95,16 @@
+ input:focus,textarea:focus,select:focus{outline:1px solid #34d399;outline-offset:1px}
+ input:not([type=checkbox]):not(:disabled),textarea:not(:disabled){-webkit-text-fill-color: #ecfff3}
+ textarea::selection,input::selection{background:#246f4b;color:#ffffff}
++
++/* v66: independently configurable objectives and local PPO value critic */
++.training-controls{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#1c704a #0c1510}
++.mixed-panel{border-top:1px solid var(--line);padding-top:10px;flex-shrink:0}
++.mixed-panel summary{cursor:pointer;color:#8ad7ae;font:700 11px var(--latin);line-height:1.6}
++.mixed-inner{display:flex;flex-direction:column;gap:10px;padding:12px 1px}
++.mixed-segment{border:1px solid #2c4636;background:#0a1711;padding:11px;display:flex;flex-direction:column;gap:8px;border-radius:7px}
++.mixed-segment strong{font:700 10px var(--latin);color:#63cf96;letter-spacing:.3px}
++.mixed-info{font:10px var(--latin);color:#98c8ab;overflow-wrap:anywhere}
++.mixed-path{display:flex;gap:5px;align-items:center}.mixed-path input{flex:1;min-width:0}
++.mixed-path button{font-size:10px;padding:7px;white-space:nowrap}
++#mixFields[hidden]{display:none!important}
++.mixed-inner .fieldgrid{gap:7px}

@@ -1,7 +1,7 @@
 ## WebRTC signaling + TURN ephemeral credentials, with optional native endpoint.
 ## Usage: nim c -d:release --threads:on --mm:orc -r src/main.nim
 import mummy, mummy/routers
-import std/[json, locks, tables, strutils, times, os, base64, openssl]
+import std/[json, locks, tables, strutils, algorithm, sequtils, times, os, base64, openssl]
 when defined(rtcNative):
   import rtc_native
 
@@ -9,10 +9,14 @@ const WebPage = staticRead("../web/index.html")
 const PatchPage = staticRead("../web/patches.html")
 const MaxRooms = 1024
 const MaxGroups = 1024
-const MaxGroupMembers = 96
+# Upper admission limit; NOT a claim that 4096 simultaneous trainers converge.
+# A large room uses sparse topology notifications instead of O(N) broadcasts.
+const MaxGroupMembers = 4096
 const MaxStoredRooms = 4096
 const MaxListedRooms = 256
-const MaxClients = 4096
+# Each peer consumes one lobby WS plus up to 8 transient pair signaling WS.
+# The operator must configure OS file descriptors/RAM for this many sockets.
+const MaxClients = 65536
 const MaxWsMessageBytes = 140_000
 const MaxRoomManifestBytes = 4096
 const MaxMessagesPerTenSeconds = 80
@@ -37,6 +41,9 @@ var clients = initTable[WebSocket, Client]()
 var rooms = initTable[string, seq[WebSocket]]()
 var groups = initTable[string, seq[WebSocket]]()
 var groupManifests = initTable[string, JsonNode]()
+# All training groups use bounded-v2. No legacy full-roster fallback.
+var groupRevisions = initTable[string, int64]()
+var groupDegree = initTable[string, int]()
 var roomPublished = initTable[string, bool]()
 var roomCreated = initTable[string, int64]()
 var roomEverJoined = initTable[string, bool]()
@@ -203,12 +210,87 @@ proc acceptBudget(ws:WebSocket, n:int):bool {.gcsafe.} =
       result=meter.packets <= MaxMessagesPerTenSeconds and
              meter.bytes <= MaxBytesPerTenSeconds
 
+# Constant-degree four-ring overlay. Room roster churn changes O(degree)
+# edges, not O(N) long-distance chord edges. The FNV64 ordering MUST match
+# Python patchlib/topology.py exactly. This is a topology hash, NOT a MAC.
+proc ringHash(peer: string, ring: int): uint64 =
+  var h = 0xcbf29ce484222325'u64
+  let source = "kagami-v49-ring-" & $ring & ":" & peer
+  for c in source:
+    h = (h xor uint64(ord(c))) * 0x100000001b3'u64
+  h = h xor (h shr 33)
+  h = h * 0xff51afd7ed558ccd'u64
+  h = h xor (h shr 33)
+  h = h * 0xc4ceb9fe1a85ec53'u64
+  result = h xor (h shr 33)
+
+proc allNeighbors(ids: seq[string], degree: int = 8): Table[string,seq[string]] =
+  result = initTable[string,seq[string]]()
+  for peer in ids:
+    result[peer] = @[]
+  if ids.len < 2: return
+  if ids.len <= 32:
+    for pos, peer in ids:
+      for i in 0 ..< degree div 2:
+        let step = [1, 2, 4, 8][i]
+        for sign in [-1, 1]:
+          let index = ((pos + sign * step) mod ids.len + ids.len) mod ids.len
+          let candidate = ids[index]
+          if candidate != peer and candidate notin result[peer]:result[peer].add(candidate)
+      if ids.len == 16 and degree == 8:
+        let candidate = ids[(pos+(if pos mod 2 == 0: 3 else: -3)+16) mod 16]
+        if candidate != peer and candidate notin result[peer]:result[peer].add(candidate)
+      result[peer].sort()
+    return
+  for ring in 0 ..< degree div 2:
+    var order = ids
+    if ring > 0:
+      order = ids.sorted(proc(a,b:string):int =
+        let ha=ringHash(a,ring)
+        let hb=ringHash(b,ring)
+        if ha < hb: -1
+        elif ha > hb: 1
+        else: cmp(a,b))
+    for pos, peer in order:
+      let left=order[(pos-1+order.len) mod order.len]
+      let right=order[(pos+1) mod order.len]
+      if left != peer and left notin result[peer]:result[peer].add(left)
+      if right != peer and right notin result[peer]:result[peer].add(right)
+  for peer in ids:
+    result[peer].sort()
+
+proc sortedNeighbors(ids: seq[string], peer: string, degree: int = 8): seq[string] =
+  if peer notin ids: return @[]
+  allNeighbors(ids,degree).getOrDefault(peer)
+
+proc sortedPeers(sockets: seq[WebSocket]): seq[string] =
+  for sock in sockets:
+    if sock in clients:result.add(clients[sock].peerId)
+  result.sort()
+
+proc changedNeighborNotices(beforeIds, afterIds: seq[string], changed: string,
+                            wsByPeer: Table[string,WebSocket],
+                            version: int64, degree: int = 8): seq[tuple[target:WebSocket, payload:string]] =
+  # Build O(N log N) deterministic ring overlays once per membership change.
+  # A join/leave changes the two neighbors of a node in each ring; in steady
+  # state this sends only a bounded number of per-peer notifications.
+  let old=allNeighbors(beforeIds,degree)
+  let updated=allNeighbors(afterIds,degree)
+  for peer in afterIds:
+    if peer notin wsByPeer: continue
+    let nextPeers=updated.getOrDefault(peer)
+    if peer notin old or old[peer]!=nextPeers:
+      let notice = $(%*{"type":"group-neighbors", "topology":"bounded-v2",
+                        "peers":nextPeers, "online":afterIds.len,
+                        "revision":version})
+      result.add((target:wsByPeer[peer],payload:notice))
+
 proc removeClient(ws:WebSocket) {.gcsafe.} =
   {.cast(gcsafe).}:
     var peer: WebSocket
     var notify = false
-    var groupPeers:seq[WebSocket] = @[]
     var departed = ""
+    var topologyNotices:seq[tuple[target:WebSocket,payload:string]] = @[]
     when defined(rtcNative):
       var session:NativeSession = nil
     withLock mutex:
@@ -219,16 +301,25 @@ proc removeClient(ws:WebSocket) {.gcsafe.} =
           if client.native: session = client.session
         if client.group and client.room in groups:
           departed = client.peerId
+          let oldIds=sortedPeers(groups[client.room])
           var kept: seq[WebSocket] = @[]
+          var byPeer=initTable[string,WebSocket]()
           for candidate in groups[client.room]:
             if candidate != ws:
               kept.add(candidate)
-              groupPeers.add(candidate)
+              if candidate in clients:
+                byPeer[clients[candidate].peerId]=candidate
           if kept.len == 0:
             groups.del(client.room)
-            # Persistent room metadata must survive its last peer leaving.
-            discard
-          else: groups[client.room] = kept
+            groupDegree.del(client.room)
+            groupRevisions.del(client.room)
+          else:
+            groups[client.room] = kept
+            let ver=groupRevisions.getOrDefault(client.room,0'i64)+1
+            groupRevisions[client.room]=ver
+            topologyNotices=changedNeighborNotices(
+                oldIds,sortedPeers(kept),departed,byPeer,ver,
+                groupDegree.getOrDefault(client.room,8))
         elif not client.native and client.room in rooms:
           var kept: seq[WebSocket] = @[]
           for candidate in rooms[client.room]:
@@ -242,11 +333,9 @@ proc removeClient(ws:WebSocket) {.gcsafe.} =
     when defined(rtcNative):
       if session != nil: destroyNativeSession(session)
     if notify: peer.send("""{"type":"peer-left"}""")
-    if departed.len > 0:
-      let event = $(%*{"type":"group-peer-left","peer":departed})
-      for recipient in groupPeers:
-        try: recipient.send(event)
-        except CatchableError: discard
+    for notice in topologyNotices:
+      try: notice.target.send(notice.payload)
+      except CatchableError: discard
 
 proc groupRegister(ws:WebSocket, data:JsonNode) {.gcsafe.} =
   # Register metadata without joining or taking a peer slot. It does NOT mark
@@ -328,6 +417,20 @@ proc groupJoin(ws:WebSocket, data:JsonNode) {.gcsafe.} =
       return
     let room=getString(data,"room")
     let identity=getString(data,"peer")
+    # Required to prevent an old full-roster client from silently accepting
+    # an eight-peer partial roster and corrupting its topology decisions.
+    if not data.hasKey("topology_v2") or
+        data["topology_v2"].kind != JBool or not data["topology_v2"].getBool():
+      errorWs(ws,"Unsupported client: bounded-v2 topology is required; upgrade Fedpara")
+      return
+    let requestedDegree=(if data.hasKey("topology_degree") and
+                            data["topology_degree"].kind == JInt:
+                            data["topology_degree"].getInt() else: 8)
+    if requestedDegree notin [2,4,6,8] or
+        (data.hasKey("topology_degree") and
+         data["topology_degree"].kind != JInt):
+      errorWs(ws,"Invalid topology degree")
+      return
     let manifest=(if data.hasKey("manifest"):data["manifest"] else:nil)
     let publish = data.hasKey("publish") and data["publish"].kind == JBool and
                   data["publish"].getBool()
@@ -354,19 +457,27 @@ proc groupJoin(ws:WebSocket, data:JsonNode) {.gcsafe.} =
       if c notin {'0'..'9','a'..'f'}:
         errorWs(ws,"Invalid peer fingerprint")
         return
-    var current:seq[WebSocket] = @[]
     var members:seq[string] = @[]
     var accepted=false
     var previouslyRegistered=false
+    var incompatible=false
+    var capacityReached=false
+    var version=0'i64
+    var occupancy=1
+    var topologyNotices:seq[tuple[target:WebSocket,payload:string]] = @[]
     withLock mutex:
       previouslyRegistered = roomEverJoined.getOrDefault(room,false)
       if ws notin clients and clients.len < MaxClients and
           (room in groups or groups.len < MaxGroups):
         let existing=groups.getOrDefault(room)
-        let compatible=(room notin groupManifests or manifest == nil or
+        let degreeAllowed=(existing.len == 0 or
+                           groupDegree.getOrDefault(room,8)==requestedDegree)
+        if not degreeAllowed:incompatible=true
+        let compatible=degreeAllowed and (room notin groupManifests or manifest == nil or
                         groupManifests[room] == manifest) and
                         (not publish or room notin groupManifests or
                          roomPublished.getOrDefault(room,false))
+        if existing.len >= MaxGroupMembers: capacityReached=true
         if existing.len < MaxGroupMembers and compatible:
           var duplicate=false
           for prior in existing:
@@ -400,26 +511,43 @@ proc groupJoin(ws:WebSocket, data:JsonNode) {.gcsafe.} =
             else:
               roomEverJoined[room]=true
           if not duplicate:
+            var oldIds:seq[string] = @[]
+            var byPeer=initTable[string,WebSocket]()
             for prior in existing:
               if prior in clients:
-                current.add(prior)
-                members.add(clients[prior].peerId)
+                oldIds.add(clients[prior].peerId)
+                byPeer[clients[prior].peerId]=prior
             groups.mgetOrPut(room,@[]).add(ws)
             clients[ws]=Client(room:room,group:true,peerId:identity)
+            groupDegree[room]=requestedDegree
+            oldIds.sort()
+            var newIds=oldIds & @[identity]
+            newIds.sort()
+            occupancy=newIds.len
+            version=groupRevisions.getOrDefault(room,0'i64)+1
+            groupRevisions[room]=version
+            members=sortedNeighbors(newIds,identity,requestedDegree)
+            topologyNotices=changedNeighborNotices(oldIds,newIds,identity,
+                                                   byPeer,version,requestedDegree)
             accepted=true
     if not accepted:
-      errorWs(ws,"Group full, identity already online, or server busy")
+      errorWs(ws,(if incompatible: "Room topology version incompatible"
+                  elif capacityReached: "Room participant capacity reached"
+                  else: "Group full, identity already online, or server busy"))
       return
     var roster=newJArray()
     for id in members: roster.add(%id)
     var reply = %*{"type":"group-members","peers":roster,
                     "existing_room":previouslyRegistered}
+    reply["topology"] = %"bounded-v2"
+    reply["degree"] = %requestedDegree
+    reply["online"] = %occupancy
+    reply["revision"] = %version
     withLock mutex:
       if room in groupManifests:reply["manifest"]=groupManifests[room]
     ws.send($reply)
-    let announce = $(%*{"type":"group-peer-joined","peer":identity})
-    for recipient in current:
-      try: recipient.send(announce)
+    for notice in topologyNotices:
+      try: notice.target.send(notice.payload)
       except CatchableError: discard
 
 proc onJoin(ws:WebSocket, data:JsonNode) {.gcsafe.} =
@@ -575,7 +703,22 @@ proc websocketHandler(ws:WebSocket, event:WebSocketEvent, message:Message) {.gcs
     of "leave":
       removeClient(ws)
       ws.close()
-    of "ping": ws.send("""{"type":"pong"}""")
+    of "ping":
+      {.cast(gcsafe).}:
+        var compact=false
+        var count=0
+        var version=0'i64
+        withLock mutex:
+          if ws in clients and clients[ws].group:
+            let room=clients[ws].room
+            compact=true
+            count=groups.getOrDefault(room).len
+            version=groupRevisions.getOrDefault(room,0'i64)
+        if compact:
+          ws.send($(%*{"type":"group-count","online":count,
+                        "revision":version}))
+        else:
+          ws.send("""{"type":"pong"}""")
     else: errorWs(ws, "Unknown message type")
 
 proc htmlHandler(request:Request) {.gcsafe.} =

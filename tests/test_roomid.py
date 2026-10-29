@@ -100,14 +100,21 @@ def test_self_certified_hello_peer_validation(tmp_path):
 def test_room_discovery_membership_and_limit():
     id1='p'+'0'*32;id2='p'+'1'*32
     d=RoomDiscovery('wss://example.test/ws','A'*32,id1)
-    d.accept({'type':'group-members','peers':[id2,id1]})
+    d.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+              'revision':1,'online':2,'peers':[id2,id1]})
     assert d.members=={id2}
-    d.accept({'type':'group-peer-left','peer':id2})
+    d.accept({'type':'group-neighbors','topology':'bounded-v2',
+              'revision':2,'online':1,'peers':[]})
     assert not d.members
-    d.accept({'type':'group-peer-joined','peer':id2})
+    d.accept({'type':'group-neighbors','topology':'bounded-v2',
+              'revision':3,'online':2,'peers':[id2]})
     assert d.members=={id2}
-    with pytest.raises(PatchError):d.accept({'type':'group-members','peers':[id2,id2]})
-    with pytest.raises(PatchError):d.accept({'type':'group-peer-joined','peer':'a'})
+    with pytest.raises(PatchError):d.accept({'type':'group-members','topology':'bounded-v2',
+              'degree':8,'revision':4,'online':3,'peers':[id2,id2]})
+    with pytest.raises(PatchError,match='obsolete'):
+        d.accept({'type':'group-peer-joined','peer':id2})
+    with pytest.raises(PatchError,match='bounded-v2'):
+        d.accept({'type':'group-members','peers':[id2]})
 
 
 def test_room_only_elastic_training_with_no_peers(tmp_path,monkeypatch):
@@ -148,12 +155,17 @@ def test_room_only_elastic_training_with_no_peers(tmp_path,monkeypatch):
     asyncio.run(elasticnet.train_elastic(args,load_model=load,training_batches=batches,run_step=step))
     assert args.peer_id.startswith('p') and len(args.peer_id)==33
     assert (tmp_path/'events.db.identity.pem').is_file()
-    from patchlib.elastic import MAGIC
+    from patchlib.elastic import EventJournal
     import sqlite3
     with sqlite3.connect(args.journal) as db:
-        events=[row[0] for row in db.execute('select wire from events')]
-    assert len(events)==2
-    for ev in events:assert unpack_event(ev,{})[0]==args.peer_id
+        genesis=db.execute("SELECT value FROM meta WHERE name='genesis'").fetchone()[0]
+    journal=EventJournal(args.journal,genesis)
+    try:
+        events=list(journal.events())
+        assert len(events)==2
+        for ev in events:assert unpack_event(ev,{})[0]==args.peer_id
+    finally:
+        journal.close()
 
 
 def test_room_discovery_over_real_websockets(tmp_path):
@@ -164,21 +176,31 @@ def test_room_discovery_over_real_websockets(tmp_path):
         a='p'+'0'*32
         b='p'+'1'*32
         connections={}
+        version=0
         async def handler(ws):
+            nonlocal version
             msg=json.loads(await ws.recv())
             assert msg['type']=='group-join' and msg['room']==room
+            assert msg['topology_v2'] is True and msg['topology_degree']==8
             pid=msg['peer']
             peers=list(connections)
             connections[pid]=ws
-            await ws.send(json.dumps({'type':'group-members','peers':peers}))
+            version+=1
+            await ws.send(json.dumps({'type':'group-members','topology':'bounded-v2',
+                'degree':8,'revision':version,'online':len(connections), 'peers':peers}))
             for other in peers:
-                await connections[other].send(json.dumps({'type':'group-peer-joined','peer':pid}))
+                await connections[other].send(json.dumps({'type':'group-neighbors',
+                   'topology':'bounded-v2','revision':version,
+                   'online':len(connections),'peers':[pid]}))
             try:
                 async for _ in ws:pass
             finally:
                 connections.pop(pid,None)
+                version+=1
                 for other in connections.values():
-                    await other.send(json.dumps({'type':'group-peer-left','peer':pid}))
+                    await other.send(json.dumps({'type':'group-neighbors',
+                        'topology':'bounded-v2','revision':version,
+                        'online':len(connections),'peers':[]}))
         async with websockets.serve(handler,'127.0.0.1',0) as server:
             port=server.sockets[0].getsockname()[1]
             stopa=asyncio.Event();stopb=asyncio.Event()

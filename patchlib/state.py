@@ -322,12 +322,18 @@ def apply_effective_state(model: torch.nn.Module, adapter: 'UniversalAdapter', p
                     dest.copy_(src.to(device=dest.device))
         # Snapshot already includes all committed deltas. Newly initialized
         # factors must not re-add an old local update.
-        from .core import FactorDelta
+        from .relora import _refresh_spec
         with torch.no_grad():
             for group in adapter.groups:
-                factor=group.overlay.local
-                fresh=FactorDelta(group.shape,adapter.kind,adapter.rank,adapter.alpha)
-                for existing,new in zip(factor.parts,fresh.parts):
-                    existing.copy_(new.to(device=existing.device,dtype=existing.dtype))
-                    existing.grad=None
+                factor = group.overlay.local
+                _refresh_spec(factor)
+                # A received snapshot already includes the learned effective
+                # weight. Reset both local and its anchor: otherwise stale
+                # anchors re-add an old pre-snapshot local update.
+                if hasattr(group.overlay, 'anchor'):
+                    for index, current in enumerate(factor.parts):
+                        getattr(group.overlay.anchor, f'part{index}').copy_(current.detach())
+                # Remove overlay-only remotes, if any: snapshot supersedes them.
+                group.overlay.remotes.clear()
+                group.overlay._peer_ids.clear()
     return meta

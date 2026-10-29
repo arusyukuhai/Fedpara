@@ -38,15 +38,11 @@ def snapshot_inventory(journal, cutoffs=None):
     origin's signed cut-off are hashed, so those later events can be replayed
     over the received state without double-applying committed earlier ones.
     """
-    from .core import PEER_ID
+    from .snapshot_boundary import validate_cutoffs
     if cutoffs is None:
         cutoffs = {origin:seq for origin,seq in journal.db.execute(
             'SELECT origin,MAX(seq) FROM events GROUP BY origin')}
-    if (not isinstance(cutoffs,dict) or len(cutoffs)>256 or
-        any(not isinstance(p,str) or not PEER_ID.fullmatch(p) or
-            type(n) is not int or n < 1 or n >= 2**63
-            for p,n in cutoffs.items())):
-        raise PatchError('invalid snapshot inventory cutoffs')
+    validate_cutoffs(cutoffs)
     digest=hashlib.sha256()
     count=0
     for origin,seq,value in journal.db.execute(

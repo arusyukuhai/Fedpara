@@ -78,3 +78,11 @@ All peers must start from the **same checkpoint bytes**; do not separately expor
 `python -m pytest -q tests/test_webview_gui.py` checks the in-memory page, fixed JS bridge, room metadata, code registration, native window startup arguments, absence of TCP binding by the UI, and CLI routing without a GUI display. `node --check web/desktop_webview.js` verifies JavaScript syntax, and `node tests/webview_bridge_smoke.js` tests delayed API injection (both with and without the native ready event).
 
 The actual macOS WebView renderer, native window interaction, Mummy compilation, and end-to-end WebRTC learning are **not verified** in the test container.
+
+## Tailwind source (v15)
+
+The native console uses offline-compiled Tailwind CSS. See
+`README_TAILWIND_GUI_V15_2026_10_25.md`. For hand edits, change
+`web/desktop_webview.html` or `web/tailwind.cdn.css`, then relaunch the GUI.
+Tailwind v4 is loaded from a pinned CDN in the WebView at runtime: there is no
+Node/npm build step, but network access is required. See `README_TAILWIND_CDN_V24.md`.

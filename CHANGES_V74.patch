@@ -1,0 +1,204 @@
+--- v73/patchlib/cli.py
++++ v74/patchlib/cli.py
+@@ -500,7 +500,7 @@
+         if mixed:
+             previous=getattr(args,'_v65_mixer',None)
+             old_adapter=getattr(args,'_v65_mixer_adapter',None)
+-            if previous is None or (old_adapter is not None and old_adapter is not adapter):
++            if previous is None or getattr(previous,'_closed',False) or (old_adapter is not None and old_adapter is not adapter):
+                 if previous is not None:
+                     previous.close()  # epoch switch: discard old-policy PPO rollouts
+                 args._v65_mixer=build_mixer(args)
+@@ -516,18 +516,31 @@
+         if mixer is not None:
+             total=0.0
+             if loss is not None:
++                if not bool(torch.isfinite(loss.detach()).all()):
++                    raise ValueError('nonfinite PT objective; refusing mixed optimizer update')
+                 (loss * args.pt_weight / args.grad_accum).backward()
+                 total += float(loss.detach())*args.pt_weight
+                 mixer.counts['pt']+=1
+             if mixer.sft is not None and args.sft_weight>0:
+                 sft_loss=mixer.sft_loss(model,target)
++                if not bool(torch.isfinite(sft_loss.detach()).all()):
++                    raise ValueError('nonfinite SFT objective; refusing mixed optimizer update')
+                 (sft_loss*args.sft_weight/args.grad_accum).backward()
+                 total+=float(sft_loss.detach())*args.sft_weight
+             if mixer.ppo is not None and args.ppo_weight>0:
+                 mixer.critic_optim.zero_grad(set_to_none=True)
+                 ppo_actor,ppo_critic,metrics=mixer.ppo_loss(model,target)
++                if not bool(torch.isfinite(ppo_actor.detach()).all() and
++                            torch.isfinite(ppo_critic.detach()).all()):
++                    raise ValueError('nonfinite PPO objective; refusing mixed optimizer update')
+                 (ppo_actor*args.ppo_weight/args.grad_accum).backward()
+                 (ppo_critic*args.ppo_weight).backward()
++                # AdamW on nan/inf gradients can permanently corrupt the
++                # locally persisted Critic even when the actor step is refused.
++                if any(p.grad is not None and not bool(torch.isfinite(p.grad).all())
++                       for p in mixer.critic.parameters() if p.requires_grad):
++                    mixer.critic_optim.zero_grad(set_to_none=True)
++                    raise ValueError('nonfinite PPO Critic gradient; refusing optimizer update')
+                 mixer.critic_optim.step()  # critic is local; never part of signed P2P adapter
+                 mixer.critic_steps+=1
+                 if mixer.critic_steps%10==0:
+@@ -579,7 +592,7 @@
+         return float(loss.detach().cpu())
+ 
+ 
+-def train(args):
++def _train_impl(args):
+     model, adapter = load(args)
+     base_seq = 0
+     if args.resume:
+@@ -629,7 +642,7 @@
+         print('saved sharded effective state:',args.shard_state_manifest)
+ 
+ 
+-async def train_p2p(args):
++async def _train_p2p_impl(args):
+     model, adapter = load(args)
+     base_seq = 0
+     if args.resume:
+@@ -723,6 +736,38 @@
+         except asyncio.CancelledError: pass
+ 
+ 
++def _close_mixed_trainer(args):
++    """Persist the final Critic state and release HF row prefetch workers.
++
++    This must run on success *and* failure: a ten-step periodic checkpoint
++    cannot substitute for the final head/AdamW update on normal exit.
++    """
++    mixer=getattr(args,'_v65_mixer',None)
++    if mixer is None:
++        return
++    try:
++        mixer.close()
++    finally:
++        # Keep completed counters available to CLI telemetry/tests. run_step
++        # notices _closed and builds a fresh instance on a later run.
++        args._v65_mixer_adapter=None
++
++
++def train(args):
++    try:
++        return _train_impl(args)
++    finally:
++        _close_mixed_trainer(args)
++
++
++async def train_p2p(args):
++    try:
++        return await _train_p2p_impl(args)
++    finally:
++        # run_step runs in an awaited to_thread; it must be finished before
++        # the local head, optimizer and iterable worker are closed.
++        await asyncio.to_thread(_close_mixed_trainer,args)
++
+ def merge(args):
+     model, adapter = load(args)
+     if args.local_patch:
+--- v73/patchlib/livefed.py
++++ v74/patchlib/livefed.py
+@@ -236,7 +236,7 @@
+     return out
+ 
+ 
+-async def train_live(args, *, load_model: Callable, training_batches: Callable,
++async def _train_live_impl(args, *, load_model: Callable, training_batches: Callable,
+                      run_step: Callable):
+     """Run one PatchNode per peer, train until a send or incoming contribution.
+ 
+@@ -396,3 +396,13 @@
+                     await asyncio.sleep(.03)
+         for task in tasks.values(): task.cancel()
+         await asyncio.gather(*tasks.values(),return_exceptions=True)
++
++
++async def train_live(args, *, load_model, training_batches, run_step):
++    """Always release mixed-data workers and persist the latest local Critic."""
++    try:
++        return await _train_live_impl(args,load_model=load_model,
++                                     training_batches=training_batches,run_step=run_step)
++    finally:
++        from .cli import _close_mixed_trainer
++        await asyncio.to_thread(_close_mixed_trainer,args)
+--- v73/patchlib/mixed_learning_v65.py
++++ v74/patchlib/mixed_learning_v65.py
+@@ -295,9 +295,28 @@
+ 
+ class MixedObjectiveTrainer:
+     def __init__(self,args,tokenizer):
++        # A HF reward/critic checkpoint may fail to load *after* dataset
++        # prefetch workers have started. Release partial construction eagerly.
++        self.sft=None
++        self.ppo=None
++        self.reward_scorer=None
++        try:
++            self._initialize(args,tokenizer)
++        except BaseException:
++            for item in (self.sft,self.ppo):
++                if item is not None:
++                    try:item.close()
++                    except Exception:pass
++            if self.reward_scorer is not None:
++                try:self.reward_scorer.close()
++                except Exception:pass
++            raise
++
++    def _initialize(self,args,tokenizer):
+         validate_args(args)
+         self.args=args
+         self.tok=tokenizer
++        self._closed=False
+         self.sft=(PrefetchedRows(HFRowCycle(source_spec(args,'sft'),'sft')) if getattr(args,'sft_hf_repo','') else
+                   JsonlCycle(args.sft_jsonl) if getattr(args,'sft_jsonl',None) else None)
+         self.ppo=(PrefetchedRows(HFRowCycle(source_spec(args,'ppo'),'ppo')) if getattr(args,'ppo_hf_repo','') else
+@@ -518,13 +537,22 @@
+                      identity=self._critic_identity,steps=self.critic_steps)
+ 
+     def close(self):
+-        if self.critic is not None:
+-            self.save_critic()
+-        if self.reward_scorer is not None:
+-            close=getattr(self.reward_scorer,'close',None)
+-            if callable(close):close()
+-        for x in (self.sft,self.ppo):
+-            if x:x.close()
++        if self._closed:
++            return
++        self._closed=True
++        try:
++            if self.critic is not None:
++                self.save_critic()
++        finally:
++            # Even a full disk/permission error must not strand open files
++            # or background HF network readers during shutdown.
++            try:
++                if self.reward_scorer is not None:
++                    close=getattr(self.reward_scorer,'close',None)
++                    if callable(close):close()
++            finally:
++                for x in (self.sft,self.ppo):
++                    if x:x.close()
+ 
+ 
+ def build(args, *, tokenizer=None):
+--- v73/patchlib/hf_mixed_datasets_v68.py
++++ v74/patchlib/hf_mixed_datasets_v68.py
+@@ -110,7 +110,14 @@
+                 row=next(self._rows)
+             except StopIteration:
+                 if attempt:break
+-                self._open()
++                # Most HF streaming datasets are re-iterable. Reusing the pinned
++                # dataset object avoids a new Hub metadata/config load every epoch.
++                restarted=iter(self._dataset)
++                if restarted is self._rows:
++                    # Preserve compatibility with genuinely single-pass sources.
++                    self._open()
++                else:
++                    self._rows=restarted
+                 continue
+             except Exception as exc:
+                 raise HFMixedDatasetError(f'{self.role}: Hub streaming failed, check login/network/dataset: {exc}') from exc

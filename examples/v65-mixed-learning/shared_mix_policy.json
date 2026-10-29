@@ -1,0 +1,23 @@
+{
+  "version": "pt-sft-clipped-ppo-v65",
+  "objectives": [
+    true,
+    true
+  ],
+  "weights": [
+    1.0,
+    1.0,
+    0.2
+  ],
+  "ppo_clip": 0.2,
+  "ppo_kl_coef": 0.02,
+  "ppo_value_coef": 0.5,
+  "ppo_gamma": 0.99,
+  "ppo_gae_lambda": 0.95,
+  "ppo_max_tokens": 8,
+  "ppo_reuse": 2,
+  "ppo_reward": "token_match",
+  "input_map": "",
+  "reward_source": "ground-truth-reference-v1",
+  "task": "causal-lm"
+}

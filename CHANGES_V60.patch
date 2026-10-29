@@ -1,0 +1,789 @@
+--- /dev/null
++++ b/patchlib/lazy_mutable_weights_v60.py
+@@ -0,0 +1,166 @@
++"""On-first-signed-update writable backing for a frozen safetensors genesis.
++
++This is NOT sparse delta storage: each *modified tensor* is copied once on first
++update, so the eventual disk footprint can approach the full model.  It avoids
++up-front O(model-size) disk copies and, critically, never mutates the genesis.
++
++Only the ContinualElasticEngine write gate can materialize a group.  This module
++must not be used for arbitrary third-party in-place writes to base Parameters.
++Ephemeral scratch is reconstructed from the signed journal after restart.
++"""
++from __future__ import annotations
++
++import hashlib
++import errno
++import os
++import tempfile
++import weakref
++from pathlib import Path
++
++import torch
++
++
++class LazyWeightError(RuntimeError):
++    pass
++
++
++class LazyMutableWeights:
++    def __init__(self, model, *, scratch_dir=None, copy_mib=4, limit_gib=0):
++        if not 1 <= copy_mib <= 128:
++            raise ValueError('copy_mib must be 1..128')
++        if limit_gib < 0:
++            raise ValueError('limit_gib must be nonnegative')
++        self.model=model
++        from .live_linear_workspace_v59 import allocate, _release
++        # v59's locked lease collector is crash-safe. Use a dedicated root so
++        # another offload subsystem can never reclaim our active scratch.
++        scratch_root=Path(scratch_dir or tempfile.gettempdir())/'kagami-lazy-v60'
++        self.directory,lease=allocate(scratch_root)
++        self._cleanup=weakref.finalize(model,_release,lease,self.directory)
++        self.block_bytes=int(copy_mib*1024**2)
++        self.limit_bytes=int(limit_gib*1024**3)
++        self.used_bytes=0
++        self.materialized={}
++
++    def materialize_group(self, group):
++        """Called with adapter.lock held before the first potential base write."""
++        if group.canonical in self.materialized:
++            return False
++        members=[]
++        for alias in group.aliases:
++            owner,sep,attr=alias.rpartition('.')
++            if not sep:
++                module=self.model
++                attr=alias
++            else:
++                module=self.model.get_submodule(owner)
++            original=module.parametrizations[attr].original
++            members.append((module,original))
++        if not members or any(p is not members[0][1] for _,p in members):
++            raise LazyWeightError('tied base group is inconsistent')
++        original=members[0][1]
++        if original.device.type!='cpu' or not original.is_contiguous() or original.layout!=torch.strided:
++            raise LazyWeightError('lazy mutable base requires contiguous CPU safetensors')
++        count=original.numel()
++        byte_size=count*original.element_size()
++        if self.limit_bytes and self.used_bytes+byte_size>self.limit_bytes:
++            raise LazyWeightError('lazy writable tensor would exceed configured disk quota')
++        digest=hashlib.sha256(group.canonical.encode('utf-8')).hexdigest()
++        dest=self.directory/(digest+'.raw')
++        # A different process or previous epoch must never reuse this scratch.
++        if dest.exists():raise LazyWeightError('writable scratch name already exists')
++        try:
++            with dest.open('xb') as fp:
++                # Reserve blocks before mapping. A sparse truncate followed
++                # by mmap writes can SIGBUS the whole trainer on disk-full.
++                # posix_fallocate detects ENOSPC as an ordinary exception.
++                if byte_size:
++                    allocated=False
++                    if hasattr(os,'posix_fallocate'):
++                        try:
++                            os.posix_fallocate(fp.fileno(),0,byte_size)
++                            allocated=True
++                        except OSError as e:
++                            if e.errno not in (errno.EOPNOTSUPP,errno.ENOSYS,errno.EINVAL):
++                                raise
++                    if not allocated:
++                        # Fallback for filesystems/platforms without fallocate.
++                        # Never allocate a multi-GB temporary Python bytestring.
++                        block=b'\0' * min(self.block_bytes,1024*1024)
++                        left=byte_size
++                        while left:
++                            n=min(left,len(block))
++                            fp.write(block[:n]);left-=n
++                fp.truncate(byte_size)
++            mapped=torch.from_file(str(dest),shared=True,size=count,dtype=original.dtype).view(original.shape)
++            with torch.no_grad():
++                src=original.detach().reshape(-1)
++                target=mapped.reshape(-1)
++                step=max(1,self.block_bytes//original.element_size())
++                for i in range(0,count,step):
++                    target[i:i+step].copy_(src[i:i+step])
++            # Only publish the new tensor after the entire source has been copied.
++            # Disk kernels cache the source separately from the Parameter.
++            old_data=original.data
++            old_raw=getattr(original,'_fedpara_raw_path',None)
++            previous=[]
++            seen=set()
++            try:
++                for module,_ in members:
++                    if id(module) in seen:continue
++                    seen.add(id(module))
++                    if hasattr(module,'_fedpara_disk_source'):
++                        previous.append((module,module._fedpara_disk_source,
++                                         module._fedpara_disk_path))
++                original.data=mapped
++                original._fedpara_raw_path=str(dest)
++                for module,_,_ in previous:
++                    cache=getattr(module,'_fedpara_disk_cache',None)
++                    if cache is not None:cache.invalidate()
++                    module._fedpara_disk_source=str(dest)
++                    module._fedpara_disk_path=str(dest)
++                self.materialized[group.canonical]=str(dest)
++                self.used_bytes+=byte_size
++            except BaseException:
++                original.data=old_data
++                if old_raw is None and hasattr(original,'_fedpara_raw_path'):
++                    delattr(original,'_fedpara_raw_path')
++                elif old_raw is not None:
++                    original._fedpara_raw_path=old_raw
++                for module,old_source,old_path in previous:
++                    module._fedpara_disk_source=old_source
++                    module._fedpara_disk_path=old_path
++                raise
++            return True
++        except BaseException:
++            # Fail closed: do not allow an incomplete snapshot to masquerade
++            # as the mutable base. The engine must poison on apply failure.
++            if group.canonical not in self.materialized:
++                dest.unlink(missing_ok=True)
++            raise
++
++    def stats(self):
++        return {'materialized_tensors':len(self.materialized),
++                'mutable_disk_bytes':self.used_bytes,
++                'scratch':str(self.directory)}
++
++
++def attach_lazy_mutable(model,adapter,*,scratch_dir=None,copy_mib=4,limit_gib=0):
++    if getattr(model,'_fedpara_streaming_base_info',{}).get('mode')!='read-only-mmap':
++        raise LazyWeightError('lazy mutable weights require immutable safetensors base')
++    manager=LazyMutableWeights(model,scratch_dir=scratch_dir,copy_mib=copy_mib,limit_gib=limit_gib)
++    object.__setattr__(model,'_fedpara_lazy_mutable_weights',manager)
++    return manager
++
++
++def prepare_base_group(adapter,group):
++    manager=getattr(adapter.model,'_fedpara_lazy_mutable_weights',None)
++    if manager is not None:
++        manager.materialize_group(group)
++
++
++def materialize_all(adapter):
++    manager=getattr(adapter.model,'_fedpara_lazy_mutable_weights',None)
++    if manager is not None:
++        for group in adapter.groups:
++            manager.materialize_group(group)
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -130,6 +130,12 @@
+     if initialization not in ('pretrained', 'random', 'config'):
+         raise ValueError('initialization must be pretrained/random/config')
+     streaming=bool(getattr(args,'streaming_base',False))
++    lazy_write=bool(getattr(args,'streaming_lazy_write',False))
++    if lazy_write and (not streaming or getattr(args,'cmd',None)!='train-elastic'
++                       or getattr(args,'mode','elastic')!='elastic'):
++        raise ValueError('--streaming-lazy-write requires --streaming-base and elastic train-elastic mode')
++    if lazy_write and getattr(args,'disk_linear_dir',None):
++        raise ValueError('--streaming-lazy-write cannot share --disk-linear-dir scratch')
+     if streaming and initialization != 'pretrained':
+         raise ValueError('--streaming-base requires pretrained safetensors, not random initialization')
+     if streaming and getattr(args,'factory_file',None):
+@@ -180,7 +186,7 @@
+                 from huggingface_hub import snapshot_download
+                 snapshot_dir=snapshot_download(args.model,revision=args.revision,
+                     allow_patterns=['*.safetensors','*.json'],local_files_only=custom)
+-            writable=getattr(args,'cmd','') in ('train-live','train-elastic','train-p2p')
++            writable=(getattr(args,'cmd','') in ('train-live','train-elastic','train-p2p') and not lazy_write)
+             materialize_meta_from_safetensors(mdl,snapshot_dir,writable=writable,
+                 scratch_dir=getattr(args,'streaming_scratch_dir',None),
+                 chunk_mib=getattr(args,'stream_chunk_mib',8),strict=True,
+@@ -306,6 +312,13 @@
+             print('STREAMING ACCELERATOR PLACEMENT:',json.dumps(placement),flush=True)
+             # Recheck factor placements after custom CPU/GPU dispatch.
+             check_adapter_placement(adapter)
++    if lazy_write:
++        from .lazy_mutable_weights_v60 import attach_lazy_mutable
++        manager=attach_lazy_mutable(mdl,adapter,
++            scratch_dir=getattr(args,'streaming_scratch_dir',None),
++            copy_mib=getattr(args,'stream_chunk_mib',8),
++            limit_gib=getattr(args,'stream_lazy_limit_gb',0))
++        print('LAZY STREAM MUTABLE:',json.dumps(manager.stats()),flush=True)
+     print('adapter:',json.dumps({**adapter.counts(),'layout':adapter.layout,
+                                    'resolved_revision':revision},indent=2))
+     return mdl,adapter
+@@ -831,6 +844,10 @@
+     p.add_argument('--allow-legacy-bin', action='store_true', help='Opt in to non-safetensors legacy checkpoint files')
+     p.add_argument('--streaming-base', action='store_true',
+         help='Create HF model on meta and mmap local safetensors; CPU streaming execution only')
++    p.add_argument('--streaming-lazy-write',action='store_true',
++        help='Experimental train-elastic: no up-front full mutable base copy; materialize each modified tensor once into private scratch')
++    p.add_argument('--stream-lazy-limit-gb',type=int,default=0,
++        help='Maximum lazy writable tensor scratch GiB (0=no hard cap; monitor disk usage)')
+     p.add_argument('--streaming-scratch-dir',type=Path,
+         help='Fast disk for temporary writable pages; live restarts reconstruct from immutable genesis')
+     p.add_argument('--stream-chunk-mib',type=int,default=8,
+@@ -1151,6 +1168,12 @@
+             parser.error('--disk-optimizer-max-gb must be positive')
+         if getattr(args,'resume_disk_optimizer',False):
+             parser.error('live disk optimizer restores ONLY its journal-matched working snapshot; omit --resume-disk-optimizer')
++        if getattr(args,'streaming_lazy_write',False) and not getattr(args,'streaming_base',False):
++            parser.error('--streaming-lazy-write requires --streaming-base')
++        if getattr(args,'streaming_lazy_write',False) and getattr(args,'mode',None)!='elastic':
++            parser.error('--streaming-lazy-write requires --mode elastic')
++        if getattr(args,'stream_lazy_limit_gb',0)<0:
++            parser.error('--stream-lazy-limit-gb must be >= 0')
+         if getattr(args,'disk_linear_dir',None) and getattr(args,'streaming_base',False):
+             parser.error('mutable live disk Linear cannot use the immutable safetensors streaming-base mapping')
+         if getattr(args,'live_disk_linear_max_gb',32)<=0:
+--- a/patchlib/continual.py
++++ b/patchlib/continual.py
+@@ -21,6 +21,7 @@
+ from .elastic import ElasticEngine, EventInfo, pack_event, unpack_event
+ from .livefed import _delta_block
+ from .numerics import squared_l2
++from .lazy_mutable_weights_v60 import prepare_base_group
+ 
+ PROTOCOL = 'fedpara-continual-elastic-fedsum-relora-mixed-async-v6'
+ 
+@@ -160,6 +161,7 @@
+ 
+             for group, delta, a, b in zip(self.adapter.groups, prepared.deltas,
+                                           prepared.now_parts, prepared.old_parts):
++                prepare_base_group(self.adapter,group)
+                 path, _, attr = group.aliases[0].rpartition('.')
+                 original = self.adapter.model.get_submodule(path).parametrizations[attr].original
+                 spec = group.overlay.local
+@@ -250,6 +252,7 @@
+                 staged_bytes=0;pending_device=None
+ 
+             for index,group in enumerate(self.adapter.groups):
++                prepare_base_group(self.adapter,group)
+                 path,_,attr=group.aliases[0].rpartition('.')
+                 original=self.adapter.model.get_submodule(path).parametrizations[attr].original
+                 spec=group.overlay.local
+--- a/patchlib/shards.py
++++ b/patchlib/shards.py
+@@ -438,6 +438,10 @@
+     if (meta['model_id'],meta['revision'])!=(model_id,revision):
+         raise PatchError('sharded snapshot model identity/revision mismatch')
+     with adapter.lock:
++        # v60: cold-join / shadow installation must never write through a
++        # read-only safetensors genesis mapping. Prepare private scratch first.
++        from .lazy_mutable_weights_v60 import materialize_all
++        materialize_all(adapter)
+         _install_verified_shards(meta,store,_sharded_destinations(model,adapter),
+                                  chunk_bytes=chunk_bytes)
+         from .relora import _refresh_spec
+--- a/patchlib/layer_offload.py
++++ b/patchlib/layer_offload.py
+@@ -3,7 +3,8 @@
+ Supports nn.Linear including parametrized LoRA/LoHa weights. Training gradients
+ flow to inputs and factor parameters. Base weights are immutable; every forward
+ and backward loads only the active layer's frozen weight from its disk file.
+-This deliberately refuses tied parameters and unsupported projections.
++Supports Hugging Face GPT-2 style Conv1D (stored [in,out]) as well as
++Linear ([out,in]); refuses unsupported tied or packed projections.
+ """
+ from __future__ import annotations
+ 
+@@ -254,6 +255,78 @@
+     return y
+ 
+ 
++def _is_conv1d(module):
++    """Hugging Face GPT-2 Conv1D without materializing parametrized weights."""
++    if not any(cls.__name__=='Conv1D' for cls in type(module).__mro__):return False
++    plist=getattr(module,'parametrizations',None)
++    base=(plist.weight.original if plist is not None and 'weight' in plist
++          else module._parameters.get('weight'))
++    bias=module._parameters.get('bias')
++    return (isinstance(base,torch.Tensor) and isinstance(bias,torch.Tensor)
++            and base.ndim==2 and bias.ndim==1
++            and base.shape[1]==bias.numel())
++
++
++class _FrozenDiskConv1D(torch.autograd.Function):
++    @staticmethod
++    def forward(ctx,x,bias,source,shape,dtype,cache):
++        ctx.source,ctx.shape,ctx.dtype,ctx.cache=source,shape,dtype,cache
++        weight=(cache.weight(source,shape,dtype,x.device,compute_dtype=x.dtype)
++                if cache is not None else None)
++        if weight is None:
++            weight=_mapping(source,shape,dtype,'cpu')
++        if weight.device==x.device and weight.dtype==x.dtype:
++            return F.linear(x,weight.T,bias.to(x.device,dtype=x.dtype))
++        tile=cache.tile_bytes if cache is not None else 16*1024**2
++        return _tiled_linear_forward(x,weight.T,bias,x.device,tile)
++
++    @staticmethod
++    def backward(ctx,grad):
++        gx=gb=None
++        if ctx.needs_input_grad[0]:
++            cache=ctx.cache
++            weight=(cache.weight(ctx.source,ctx.shape,ctx.dtype,grad.device,
++                    compute_dtype=grad.dtype) if cache is not None else None)
++            if weight is None:weight=_mapping(ctx.source,ctx.shape,ctx.dtype,'cpu')
++            if weight.device==grad.device and weight.dtype==grad.dtype:
++                gx=grad @ weight.T
++            else:
++                gx=_tiled_linear_backward(grad,weight.T,grad.device,
++                     cache.tile_bytes if cache is not None else 16*1024**2)
++        if ctx.needs_input_grad[1]:
++            gb=grad.reshape(-1,grad.shape[-1]).sum(0)
++        return gx,gb,None,None,None,None
++
++
++def _factor_conv1d(x,spec):
++    parts=(list(spec.parts) if hasattr(spec,'parts')
++           else [getattr(spec,f'part{i}') for i in range(spec.nparts)])
++    if spec.dense:return x @ parts[0]
++    if spec.kind=='lora':
++        a,b=parts
++        return (x @ a) @ b.T * (spec.alpha/spec.rank)
++    if spec.kind=='loha':
++        a,b,c,d=parts
++        projection=torch.einsum('...i,ir,is->...rs',x,a,c)
++        return torch.einsum('...rs,or,os->...o',projection,b,d) * (spec.alpha/spec.rank)
++    raise ValueError('unsupported Conv1D factor')
++
++
++def _disk_conv1d_forward(module,x):
++    result=_FrozenDiskConv1D.apply(x,module.bias,module._fedpara_disk_source,
++            module._fedpara_disk_shape,module._fedpara_disk_dtype,
++            getattr(module,'_fedpara_disk_cache',None))
++    overlay=getattr(module,'_fedpara_disk_overlay',None)
++    if overlay is not None:
++        residual=_factor_conv1d(x,overlay.local)
++        if hasattr(overlay,'anchor'):
++            residual=residual-_factor_conv1d(x,overlay.anchor)
++        for remote in overlay.remotes.values():
++            residual=residual+_factor_conv1d(x,remote)
++        result=result+residual/(1+len(overlay.remotes))
++    return result
++
++
+ def install_disk_linear_offload(model: nn.Module, adapter, directory, *, min_weight_mib=0.,
+                                 allowed_paths=None,cache_fraction=.6,cache_mib=0,tile_mib=16,
+                                 include_embeddings=False,max_dir_bytes=None):
+@@ -270,7 +343,7 @@
+     allowed=set(allowed_paths) if allowed_paths is not None else None
+     owners={}
+     for owner_path,owner_module in model.named_modules():
+-        if isinstance(owner_module,nn.Linear):
++        if isinstance(owner_module,nn.Linear) or _is_conv1d(owner_module):
+             plist=getattr(owner_module,'parametrizations',None)
+             weight=(plist.weight.original if plist is not None and 'weight' in plist
+                     else owner_module.weight)
+@@ -281,7 +354,7 @@
+                           limit_mib=cache_mib,tile_mib=tile_mib)
+     count=0; bytes_total=0; skipped=[]
+     for path,module in model.named_modules():
+-        if not isinstance(module,nn.Linear) or (allowed is not None and path not in allowed):
++        if not (isinstance(module,nn.Linear) or _is_conv1d(module)) or (allowed is not None and path not in allowed):
+             continue
+         plist=getattr(module,'parametrizations',None)
+         overlay=plist.weight[0] if plist is not None and 'weight' in plist else None
+@@ -332,7 +405,7 @@
+         module._fedpara_disk_cache=cache
+         # Do not register overlay twice: nn.Linear's parametrization contains it.
+         object.__setattr__(module,'_fedpara_disk_overlay',overlay)
+-        module.forward=types.MethodType(_disk_forward,module)
++        module.forward=types.MethodType(_disk_conv1d_forward if _is_conv1d(module) else _disk_forward,module)
+         bytes_total+=size;count+=1
+     embeddings=0
+     if include_embeddings:
+@@ -375,7 +448,7 @@
+     frozen={}
+     for prefix,mod in model.named_modules():
+         if not hasattr(mod,'_fedpara_disk_source'):continue
+-        if not isinstance(mod,(nn.Linear,nn.Embedding)):
++        if not (isinstance(mod,(nn.Linear,nn.Embedding)) or _is_conv1d(mod)):
+             raise RuntimeError(f'unsupported disk compute module {prefix}')
+         plist=getattr(mod,'parametrizations',None)
+         weight=(plist.weight.original if plist is not None and 'weight' in plist else mod.weight)
+--- a/patchlib/streaming_base.py
++++ b/patchlib/streaming_base.py
+@@ -12,6 +12,7 @@
+ from __future__ import annotations
+ 
+ import json
++import itertools
+ import math
+ import os
+ import tempfile
+@@ -82,13 +83,19 @@
+         if not shape:
+             target.copy_(src[:])
+         else:
+-            row=math.prod(shape[1:])
+-            if row*data_type.itemsize > chunk_bytes:
+-                raise StreamingModelError(f'single tensor row exceeds --stream-chunk-mib ({row*data_type.itemsize} bytes)')
+-            stride=max(1,chunk_bytes//(row*data_type.itemsize))
+-            for start in range(0,shape[0],stride):
+-                end=min(shape[0],start+stride)
+-                target[start:end].copy_(src[start:end])
++            # Safetensors get_slice supports multidimensional slicing. Split
++            # wide rows as well as the leading axis: no row-sized allocation.
++            axis=next((d for d in range(len(shape))
++                       if math.prod(shape[d+1:])*data_type.itemsize<=chunk_bytes),None)
++            if axis is None:raise StreamingModelError('stream chunk smaller than a dtype element')
++            suffix=math.prod(shape[axis+1:])
++            step=max(1,chunk_bytes//max(1,suffix*data_type.itemsize))
++            prefixes=itertools.product(*(range(v) for v in shape[:axis]))
++            for prefix in prefixes:
++                for start in range(0,shape[axis],step):
++                    index=(*prefix,slice(start,min(shape[axis],start+step)),
++                           *(slice(None) for _ in shape[axis+1:]))
++                    target[index].copy_(src[index])
+     # data is durable enough for the process lifetime; journal recovery does
+     # not depend on this temp file. Pages will flush lazily during execution.
+     return target
+--- /dev/null
++++ b/tests/test_lazy_mutable_v60.py
+@@ -0,0 +1,274 @@
++"""v60: on-demand writable out-of-core training and failure handling."""
++import hashlib
++from pathlib import Path
++
++import pytest
++import torch
++from torch import nn
++from safetensors.torch import save_file
++
++from patchlib.core import UniversalAdapter
++from patchlib.continual import ContinualElasticEngine
++from patchlib.elastic import EventJournal
++from patchlib.lazy_mutable_weights_v60 import attach_lazy_mutable, LazyWeightError
++from patchlib.layer_offload import install_disk_linear_offload
++from patchlib.streaming_base import materialize_meta_from_safetensors
++
++
++class Little(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.first=nn.Linear(10,8)
++        self.second=nn.Linear(8,6)
++        self.tail=nn.LayerNorm(6)
++
++    def forward(self,x):
++        return self.tail(self.second(torch.relu(self.first(x))))
++
++
++def _make(root, scratch):
++    with torch.device('meta'):
++        model=Little()
++    materialize_meta_from_safetensors(model,root,writable=False,chunk_mib=1)
++    adapter=UniversalAdapter(model,'toy','v1',kind='loha',rank=3,target_scope='auto')
++    info=install_disk_linear_offload(model,adapter,scratch/'kernel',tile_mib=1)
++    manager=attach_lazy_mutable(model,adapter,scratch_dir=scratch,copy_mib=1)
++    return model,adapter,manager
++
++
++def _reference(root):
++    torch.manual_seed(12)
++    base=Little()
++    save_file({k:v.detach().contiguous() for k,v in base.state_dict().items()},str(root/'model.safetensors'))
++    return base
++
++
++def _seal_event(adapter, engine):
++    optim=torch.optim.AdamW(list(adapter.trainable_parameters()),lr=.002)
++    x=torch.randn(3,10)
++    engine.adapter.model(x).square().mean().backward()
++    optim.step();optim.zero_grad(set_to_none=True)
++    return engine.seal_local(1)
++
++
++def test_lazy_unsigned_read_and_signed_update_dedup_replay(tmp_path):
++    root=tmp_path/'immutable';root.mkdir()
++    _reference(root)
++    model,adapter,manager=_make(root,tmp_path/'active')
++    genesis=hashlib.sha256(b'signed-cow-genesis').hexdigest()
++    journal=EventJournal(tmp_path/'a.sqlite',genesis)
++    engine=ContinualElasticEngine(adapter,'alice',genesis,journal,unsafe=True)
++    assert manager.used_bytes==0 and not manager.materialized
++    immutable=(root/'model.safetensors').read_bytes()
++    initial=model(torch.randn(2,10))
++    assert initial.isfinite().all()
++    wire=_seal_event(adapter,engine)
++    assert manager.used_bytes>0
++    assert len(manager.materialized)==2
++    assert (root/'model.safetensors').read_bytes()==immutable
++    # The disk kernel must refer to the writable per-model file, not a stale
++    # cached safetensors tensor after a signed update.
++    for name in ('first','second'):
++        module=getattr(model,name)
++        assert isinstance(module._fedpara_disk_source,str)
++        assert Path(module._fedpara_disk_source).exists()
++    x=torch.randn(3,10)
++    expected=model(x).detach().clone()
++    assert engine.ingest(wire) is False
++    assert torch.allclose(model(x),expected,atol=1e-6)
++    journal.close()
++    reboot,adapt2,mgr2=_make(root,tmp_path/'reboot')
++    j2=EventJournal(tmp_path/'b.sqlite',genesis)
++    follower=ContinualElasticEngine(adapt2,'bob',genesis,j2,unsafe=True)
++    assert follower.ingest(wire)
++    # Distinct random local LoHA offsets cancel their anchors after first seal;
++    # apply exact additive effective base update to the same immutable genesis.
++    for ga,gb in zip(adapter.groups,adapt2.groups):
++        ma=adapter.model.get_submodule(ga.aliases[0].rpartition('.')[0]).parametrizations.weight.original
++        mb=adapt2.model.get_submodule(gb.aliases[0].rpartition('.')[0]).parametrizations.weight.original
++        assert torch.allclose(ma,mb,atol=2e-6)
++    assert mgr2.used_bytes==manager.used_bytes
++    j2.close()
++
++
++def test_lazy_disk_quota_fail_before_base_change(tmp_path):
++    root=tmp_path/'immutable';root.mkdir()
++    _reference(root)
++    model,adapter,manager=_make(root,tmp_path/'scratch')
++    manager.limit_bytes=1
++    genesis=hashlib.sha256(b'quota').hexdigest()
++    journal=EventJournal(tmp_path/'j.sqlite',genesis)
++    engine=ContinualElasticEngine(adapter,'alice',genesis,journal,unsafe=True)
++    original=model.first.parametrizations.weight.original.detach().clone()
++    with pytest.raises(LazyWeightError,match='quota'):
++        _seal_event(adapter,engine)
++    assert manager.used_bytes==0
++    assert torch.equal(model.first.parametrizations.weight.original,original)
++    journal.close()
++
++
++def test_lazy_unmodified_groups_stay_shared_and_epochs_get_private_dirs(tmp_path):
++    root=tmp_path/'immutable';root.mkdir()
++    _reference(root)
++    m,a,one=_make(root,tmp_path/'scratch')
++    n,b,two=_make(root,tmp_path/'scratch')
++    assert one.directory!=two.directory
++    one.materialize_group(a.groups[0])
++    assert one.used_bytes>0 and two.used_bytes==0
++    assert not one.materialize_group(a.groups[0])
++    first_source=a.model.get_submodule(a.groups[0].aliases[0].rpartition('.')[0]).parametrizations.weight.original
++    second_source=b.model.get_submodule(b.groups[0].aliases[0].rpartition('.')[0]).parametrizations.weight.original
++    with torch.no_grad():first_source.add_(2)
++    assert not torch.allclose(first_source,second_source)
++    assert (root/'model.safetensors').is_file()
++
++
++def test_writable_stream_loader_can_tile_with_row_wider_than_chunk(tmp_path):
++    class Wide(nn.Module):
++        def __init__(self):
++            super().__init__()
++            self.w=nn.Parameter(torch.empty((2,300_000)))
++    data=torch.arange(600_000,dtype=torch.float32).reshape(2,300_000)
++    save_file({'w':data},str(tmp_path/'model.safetensors'))
++    with torch.device('meta'):
++        meta=Wide()
++    materialize_meta_from_safetensors(meta,tmp_path,writable=True,chunk_mib=1)
++    assert torch.equal(meta.w,data)
++    meta.w.data[1,-1]=42
++    assert data[1,-1]!=42
++
++
++def test_loader_flag_rejects_unsafe_configuration():
++    from types import SimpleNamespace
++    from patchlib.cli import load_model
++    args=SimpleNamespace(streaming_lazy_write=True,streaming_base=False,
++                         cmd='train-elastic',initialization='pretrained',factory_file=None)
++    with pytest.raises(ValueError,match='streaming-lazy-write'):
++        load_model(args,use_adapter=True)
++
++class Conv1D(nn.Module):
++    """GPT-2-style Conv1D orientation without a transformers dependency."""
++    def __init__(self,features,input_features):
++        super().__init__()
++        self.weight=nn.Parameter(torch.randn(input_features,features)*.15)
++        self.bias=nn.Parameter(torch.randn(features)*.1)
++
++    def forward(self,x):
++        return torch.addmm(self.bias,x.reshape(-1,x.shape[-1]),self.weight).view(*x.shape[:-1],-1)
++
++
++def test_gpt2_style_conv1d_training_gradient_and_mutable_update(tmp_path):
++    torch.manual_seed(17)
++    baseline=Conv1D(11,9)
++    model=Conv1D(11,9)
++    model.load_state_dict(baseline.state_dict())
++    a=UniversalAdapter(model,'c','v1',kind='loha',rank=3,target_scope='auto')
++    b=UniversalAdapter(baseline,'c','v1',kind='loha',rank=3,target_scope='auto')
++    for g,ref in zip(a.groups,b.groups):
++        for x,y in zip(g.overlay.local.parts,ref.overlay.local.parts):
++            y.data.copy_(x.data)
++    installed=install_disk_linear_offload(model,a,tmp_path/'paged',tile_mib=1)
++    assert installed['layers']==1
++    # All gradients, including the input and LoHA factors, must agree.
++    x=torch.randn(3,2,9,requires_grad=True)
++    y=x.detach().clone().requires_grad_(True)
++    m_out=model(x);b_out=baseline(y)
++    assert torch.allclose(m_out,b_out,atol=1e-5)
++    m_out.square().mean().backward();b_out.square().mean().backward()
++    assert torch.allclose(x.grad,y.grad,atol=1e-5)
++    for p,q in zip(a.trainable_parameters(),b.trainable_parameters()):
++        assert torch.allclose(p.grad,q.grad,atol=1e-5)
++
++
++def test_gpt2_conv1d_lazy_stream_signed_apply(tmp_path):
++    model_base=Conv1D(7,9)
++    immutable=tmp_path/'immutable';immutable.mkdir()
++    save_file({k:v.detach().contiguous() for k,v in model_base.state_dict().items()},
++              str(immutable/'model.safetensors'))
++    with torch.device('meta'):
++        model=Conv1D(7,9)
++    materialize_meta_from_safetensors(model,immutable,writable=False)
++    adapter=UniversalAdapter(model,'toy','genesis',kind='lora',rank=3,target_scope='auto')
++    install_disk_linear_offload(model,adapter,tmp_path/'page',tile_mib=1)
++    mgr=attach_lazy_mutable(model,adapter,scratch_dir=tmp_path/'scratch')
++    j=EventJournal(tmp_path/'journal.sqlite','c'*64)
++    eng=ContinualElasticEngine(adapter,'alice','c'*64,j,unsafe=True)
++    initial=(immutable/'model.safetensors').read_bytes()
++    optim=torch.optim.AdamW(list(adapter.trainable_parameters()),lr=.02)
++    x=torch.randn(3,9)
++    model(x).pow(2).mean().backward();optim.step()
++    eng.seal_local(1)
++    assert mgr.used_bytes==9*7*4
++    assert isinstance(model._fedpara_disk_source,str)
++    assert (immutable/'model.safetensors').read_bytes()==initial
++    assert model(x).isfinite().all()
++    j.close()
++
++
++def test_cli_train_elastic_meta_loader_is_lazily_writable(tmp_path,monkeypatch):
++    # Exercise actual load_model() wiring without downloading a HF artifact.
++    # This substitutes only the HF model factory, not streaming or the adapter.
++    import sys
++    from types import ModuleType, SimpleNamespace
++    from patchlib.cli import load_model
++    root=tmp_path/'immutable';root.mkdir()
++    _reference(root)
++    class Config:
++        _commit_hash=None
++        use_cache=True
++    class FakeConfig:
++        @staticmethod
++        def from_pretrained(*args,**kwargs):return Config()
++    class FakeAuto:
++        @staticmethod
++        def from_config(config,**kwargs):
++            result=Little()
++            result.config=config
++            return result
++    transformers=ModuleType('transformers')
++    transformers.AutoConfig=FakeConfig
++    transformers.AutoModelForCausalLM=FakeAuto
++    monkeypatch.setitem(sys.modules,'transformers',transformers)
++    args=SimpleNamespace(cmd='train-elastic',initialization='pretrained',
++        model=str(root),revision='main',factory_file=None,trust_remote_code=False,
++        streaming_base=True,streaming_lazy_write=True,
++        streaming_scratch_dir=tmp_path/'scratch',stream_chunk_mib=1,
++        stream_lazy_limit_gb=0,device='cpu',auto_class=None,hf_task='causal-lm',
++        model_id=None,kind='loha',rank=3,alpha=None,max_peers=2,target_scope='auto',
++        state_base=None,sharded_base_manifest=None,sharded_base_store=None,
++        disk_linear_dir=None,auto_rank=False,resource_report=None,
++        gradient_checkpointing=False)
++    mdl,ada=load_model(args,use_adapter=True)
++    manager=mdl._fedpara_lazy_mutable_weights
++    assert manager.used_bytes==0
++    assert not list((tmp_path/'scratch'/'kagami-lazy-v60').rglob('*.raw'))
++    assert mdl._fedpara_streaming_base_info['mode']=='read-only-mmap'
++    assert mdl(torch.rand(2,10)).shape==(2,6)
++    j=EventJournal(tmp_path/'e.sqlite','e'*64)
++    eng=ContinualElasticEngine(ada,'peer','e'*64,j,unsafe=True)
++    _seal_event(ada,eng)
++    assert manager.used_bytes>0
++    j.close()
++
++
++def test_disk_full_before_publication_does_not_mutate_genesis(tmp_path,monkeypatch):
++    import errno
++    import os
++    root=tmp_path/'immutable';root.mkdir()
++    _reference(root)
++    model,adapter,manager=_make(root,tmp_path/'scratch')
++    import hashlib
++    g=adapter.groups[0]
++    owner=g.aliases[0].rpartition('.')[0]
++    original=adapter.model.get_submodule(owner).parametrizations.weight.original
++    old=original.detach().clone()
++    def no_space(*args):raise OSError(errno.ENOSPC,'no space left')
++    if not hasattr(os,'posix_fallocate'):
++        pytest.skip('requires posix_fallocate failure injection')
++    monkeypatch.setattr(os,'posix_fallocate',no_space)
++    with pytest.raises(OSError,match='no space'):
++        manager.materialize_group(g)
++    assert manager.used_bytes==0
++    assert not list(manager.directory.glob('*.raw'))
++    assert torch.equal(original,old)
++    assert not isinstance(getattr(adapter.model.get_submodule(owner),'_fedpara_disk_source',None),str)
+--- /dev/null
++++ b/benchmarks/bench_v60_lazy_boot.py
+@@ -0,0 +1,75 @@
++"""v60 local CPU boot cost; NOT a 300B / GPU / distributed benchmark.
++
++Run: PYTHONPATH=. python benchmarks/bench_v60_lazy_boot.py --output BENCHMARK_V60.json
++"""
++from __future__ import annotations
++import argparse
++import gc
++import json
++import tempfile
++import time
++from pathlib import Path
++
++import torch
++from torch import nn
++from safetensors.torch import save_file
++
++from patchlib.streaming_base import materialize_meta_from_safetensors
++from patchlib.core import UniversalAdapter
++from patchlib.lazy_mutable_weights_v60 import attach_lazy_mutable
++
++
++class FourLayers(nn.Module):
++    def __init__(self, width):
++        super().__init__()
++        self.layers=nn.ModuleList([nn.Linear(width,width,bias=False) for _ in range(4)])
++
++
++def benchmark(width=1536):
++    torch.set_num_threads(2)
++    with tempfile.TemporaryDirectory(prefix='kagami-v60-boot-bench-') as folder:
++        root=Path(folder)
++        weights=FourLayers(width)
++        source=root/'model.safetensors'
++        save_file({k:p.detach().contiguous() for k,p in weights.state_dict().items()},str(source))
++        del weights
++        gc.collect()
++        with torch.device('meta'):
++            eager=FourLayers(width)
++        start=time.perf_counter()
++        materialize_meta_from_safetensors(eager,root,writable=True,chunk_mib=8)
++        eager_elapsed=time.perf_counter()-start
++        old_scratch=Path(eager._fedpara_ephemeral_weights.name)
++        eager_bytes=sum(f.stat().st_size for f in old_scratch.glob('*.raw'))
++        del eager
++        gc.collect()
++        with torch.device('meta'):
++            lazy=FourLayers(width)
++        start=time.perf_counter()
++        materialize_meta_from_safetensors(lazy,root,writable=False,chunk_mib=8)
++        adapter=UniversalAdapter(lazy,'benchmark','v1',kind='lora',rank=2,target_scope='auto')
++        manager=attach_lazy_mutable(lazy,adapter,scratch_dir=root/'scratch')
++        lazy_elapsed=time.perf_counter()-start
++        lazy_initial=manager.used_bytes
++        materialization_start=time.perf_counter()
++        manager.materialize_group(adapter.groups[0])
++        first_update=time.perf_counter()-materialization_start
++        first_update_bytes=manager.used_bytes
++        return {'disclaimer':'local CPU synthetic startup only; does not cover 300B, P2P, GPU, or full optimizer',
++            'width':width,'layers':4,'base_size_bytes':source.stat().st_size,
++            'eager_startup_s':round(eager_elapsed,6),
++            'eager_initial_mutable_scratch_bytes':eager_bytes,
++            'lazy_startup_and_adapter_s':round(lazy_elapsed,6),
++            'lazy_initial_mutable_scratch_bytes':lazy_initial,
++            'lazy_first_tensor_materialization_s':round(first_update,6),
++            'lazy_first_tensor_materialized_bytes':first_update_bytes,
++            'note':'Times not apples-to-apples: lazy path includes adapter construction; first mutation cost is deferred.'}
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--output',type=Path,default=Path('BENCHMARK_V60.json'))
++    p.add_argument('--width',type=int,default=1536)
++    args=p.parse_args()
++    result=benchmark(args.width)
++    args.output.write_text(json.dumps(result,indent=2)+'\n')
++    print(json.dumps(result,indent=2))

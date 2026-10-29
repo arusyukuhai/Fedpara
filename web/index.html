@@ -1,28 +1,23 @@
 <!DOCTYPE html>
+
 <html lang="ja">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1" name="viewport"/>
 <title>Mummy WebRTC test</title>
-<style>
-body{font:15px system-ui,-apple-system,sans-serif;max-width:820px;margin:3em auto;padding:0 1em;color:#202632}
-h1{font-size:1.5em} .form{display:grid;gap:.6em;grid-template-columns:9em 1fr}
-input,select,button{font:inherit;padding:.45em} button{cursor:pointer} label{padding:.45em 0}
-video{max-width:47%;background:#111;min-height:120px} pre{max-height:230px;overflow:auto;white-space:pre-wrap;background:#f2f4f8;padding:1em}
-#chat{width:70%} .hint{color:#596273;font-size:.9em}
-</style></head><body>
-<h1>Mummy WebRTC デモ</h1>
-<p class="hint">P2P: 同じルームを2つのタブで開きます。Native echo: -d:rtcNative でコンパイルしたサーバーにDataChannel接続します。</p>
-<div class="form">
-  <label for="mode">モード</label><select id="mode"><option value="p2p">2者P2P</option><option value="echo">Nimネイティブエコー</option></select>
-  <label for="room">ルームID</label><input id="room" autocomplete="off" spellcheck="false">
-  <label for="token">APP_TOKEN</label><input id="token" type="password" placeholder="未設定なら空欄">
-  <label for="media">音声・映像</label><div><input id="media" type="checkbox"> P2P送受信 / nativeエコーはSRTP受信数を計測</div>
-  <label for="relay">接続経路</label><div><input id="relay" type="checkbox"> TURN relayだけを利用（検証用）</div>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.10"></script></head><body class="min-h-screen bg-[#080e0b] text-[#e5f6ec] font-mono text-sm antialiased selection:bg-emerald-500 selection:text-[#080e0b] mx-auto max-w-[1100px] px-4 pb-16 pt-9 sm:px-7">
+<h1 class="mb-5 border-b-2 border-emerald-500 pb-3 text-3xl font-extrabold tracking-tight text-emerald-300 sm:text-4xl">Mummy WebRTC デモ</h1>
+<p class="hint my-3 leading-relaxed text-[#91a79b] my-3 text-xs leading-relaxed text-[#91a79b]">P2P: 同じルームを2つのタブで開きます。Native echo: -d:rtcNative でコンパイルしたサーバーにDataChannel接続します。</p>
+<div class="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-[9rem_minmax(0,1fr)] sm:items-center">
+<label class="my-3 block text-xs font-bold text-emerald-50" for="mode">モード</label><select class="mt-1 min-w-0 w-full border border-emerald-900 bg-[#0c1912] px-3 py-2.5 text-sm text-emerald-50 placeholder:text-[#89a596] caret-emerald-400 focus:outline-2 focus:outline-offset-2 focus:outline-emerald-500 disabled:opacity-50" id="mode"><option value="p2p">2者P2P</option><option value="echo">Nimネイティブエコー</option></select>
+<label class="my-3 block text-xs font-bold text-emerald-50" for="room">ルームID</label><input autocomplete="off" class="mt-1 min-w-0 w-full border border-emerald-900 bg-[#0c1912] px-3 py-2.5 text-sm text-emerald-50 placeholder:text-[#89a596] caret-emerald-400 focus:outline-2 focus:outline-offset-2 focus:outline-emerald-500 disabled:opacity-50" id="room" spellcheck="false"/>
+<label class="my-3 block text-xs font-bold text-emerald-50" for="token">APP_TOKEN</label><input class="mt-1 min-w-0 w-full border border-emerald-900 bg-[#0c1912] px-3 py-2.5 text-sm text-emerald-50 placeholder:text-[#89a596] caret-emerald-400 focus:outline-2 focus:outline-offset-2 focus:outline-emerald-500 disabled:opacity-50" id="token" placeholder="未設定なら空欄" type="password"/>
+<label class="my-3 block text-xs font-bold text-emerald-50" for="media">音声・映像</label><div><input class="mr-2 h-4 w-4 accent-emerald-500 align-middle" id="media" type="checkbox"/> P2P送受信 / nativeエコーはSRTP受信数を計測</div>
+<label class="my-3 block text-xs font-bold text-emerald-50" for="relay">接続経路</label><div><input class="mr-2 h-4 w-4 accent-emerald-500 align-middle" id="relay" type="checkbox"/> TURN relayだけを利用（検証用）</div>
 </div>
-<p><button id="connect">接続</button> <button id="disconnect" disabled>切断</button></p>
-<p>状態: <strong id="status">未接続</strong></p>
-<div><video id="local" autoplay playsinline muted></video> <video id="remote" autoplay playsinline></video></div>
-<p><input id="chat" placeholder="DataChannelのメッセージ" disabled> <button id="send" disabled>送信</button></p>
-<pre id="log"></pre>
+<p class="my-3 leading-relaxed text-[#91a79b]"><button class="inline-flex min-h-10 cursor-pointer items-center justify-center border border-emerald-500 bg-emerald-500 px-4 py-2 text-xs font-bold text-[#03170f] hover:bg-emerald-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:cursor-not-allowed disabled:opacity-50 mr-2 mt-2 mb-1" id="connect">接続</button> <button class="inline-flex min-h-10 cursor-pointer items-center justify-center border border-emerald-800 bg-[#0d1b13] px-4 py-2 text-xs font-bold text-emerald-100 hover:bg-emerald-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:cursor-not-allowed disabled:opacity-50 mr-2 mt-2 mb-1" disabled="" id="disconnect">切断</button></p>
+<p class="my-3 leading-relaxed text-[#91a79b]">状態: <strong id="status">未接続</strong></p>
+<div><video autoplay="" class="inline-block min-h-[120px] max-w-[48%] bg-black" id="local" muted="" playsinline=""></video> <video autoplay="" class="inline-block min-h-[120px] max-w-[48%] bg-black" id="remote" playsinline=""></video></div>
+<p class="my-3 leading-relaxed text-[#91a79b]"><input class="mt-1 min-w-0 w-full border border-emerald-900 bg-[#0c1912] px-3 py-2.5 text-sm text-emerald-50 placeholder:text-[#89a596] caret-emerald-400 focus:outline-2 focus:outline-offset-2 focus:outline-emerald-500 disabled:opacity-50 w-3/4" disabled="" id="chat" placeholder="DataChannelのメッセージ"/> <button class="inline-flex min-h-10 cursor-pointer items-center justify-center border border-emerald-500 bg-emerald-500 px-4 py-2 text-xs font-bold text-[#03170f] hover:bg-emerald-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:cursor-not-allowed disabled:opacity-50 mr-2 mt-2 mb-1" disabled="" id="send">送信</button></p>
+<pre class="max-h-[280px] min-h-[90px] overflow-auto whitespace-pre-wrap break-words border border-emerald-900 bg-[#020705] p-4 text-xs leading-relaxed text-emerald-100" id="log"></pre>
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
@@ -140,3 +135,4 @@ $('send').onclick=()=>{if(channel?.readyState==='open'){
 }};
 $('chat').onkeydown=e=>{if(e.key==='Enter')$('send').click();};
 </script></body></html>
+

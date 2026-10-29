@@ -492,7 +492,9 @@ def run_effectiveness_benchmark(*, peers=4, rounds=5, local_steps=2, batch_size=
             model_revision='benchmark-v1'
         else:
             try:
-                from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+                from transformers import AutoModelForCausalLM
+                from .hf_config_v83 import load_hf_config
+                from .hf_load_v85 import load_hf_model, load_hf_tokenizer
             except ImportError as e:
                 raise RuntimeError('TinyStories-1M requires: pip install "transformers>=4.45"') from e
             print(f'MODEL: {TINYSTORIES_1M_ID} architecture; '
@@ -501,7 +503,7 @@ def run_effectiveness_benchmark(*, peers=4, rounds=5, local_steps=2, batch_size=
             if initialization == 'random':
                 # from_config constructs all parameter tensors afresh. NEVER
                 # download or restore TinyStories pretrained model weights.
-                config=AutoConfig.from_pretrained(
+                config=load_hf_config(
                     TINYSTORIES_1M_ID,revision=TINYSTORIES_1M_REVISION,
                     trust_remote_code=False)
                 config._attn_implementation='eager'
@@ -513,11 +515,11 @@ def run_effectiveness_benchmark(*, peers=4, rounds=5, local_steps=2, batch_size=
                 major, minor = [int(x) for x in torch.__version__.split('+')[0].split('.')[:2]]
                 if (major, minor) < (2, 6):
                     raise RuntimeError('Pretrained .bin requires torch>=2.6 safe loader')
-                initial_model=AutoModelForCausalLM.from_pretrained(
+                initial_model=load_hf_model(AutoModelForCausalLM,
                     TINYSTORIES_1M_ID,revision=TINYSTORIES_1M_REVISION,
                     trust_remote_code=False,use_safetensors=False,
                     weights_only=True,attn_implementation='eager')
-            tokenizer=AutoTokenizer.from_pretrained(
+            tokenizer=load_hf_tokenizer(
                 TINYSTORIES_1M_ID,revision=TINYSTORIES_1M_REVISION,trust_remote_code=False)
             config=initial_model.config
             if getattr(config,'model_type',None)!='gpt_neo':

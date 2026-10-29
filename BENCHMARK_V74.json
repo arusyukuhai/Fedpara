@@ -1,0 +1,11 @@
+{
+  "benchmark": "synthetic dataset construction delay 1ms, 200 rows (2 row split)",
+  "v73": {
+    "seconds": 0.109002,
+    "load_dataset_calls": 100
+  },
+  "v74": {
+    "seconds": 0.000238,
+    "load_dataset_calls": 1
+  }
+}

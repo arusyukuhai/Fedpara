@@ -15,6 +15,12 @@ RANDOM_MANIFEST_DESCRIPTION = 'fedpara:random-tinystories-1m:v1'
 
 def room_initialization(manifest):
     desc=manifest['model'].get('description','')
+    if desc in ('kagami:architecture:v1','kagami:python-config:v1'):
+        from .model_design import validate_design, DESCRIPTION
+        design=validate_design(manifest.get('design'))
+        if DESCRIPTION[design['mode']] != desc:
+            raise ValueError('invalid pinned architecture mode')
+        return 'config'
     if desc == RANDOM_MANIFEST_DESCRIPTION:
         if manifest['model']['id'] != TINY_STORIES_ID or manifest['model']['revision'] != TINY_STORIES_REVISION or manifest['model']['architecture'] != 'causal-lm':
             raise ValueError('random TinyStories room model must use the pinned official GPT-Neo model/revision')
@@ -29,8 +35,9 @@ def create_random_tinystories_model(model_id, revision, seed):
         raise ValueError('random model generation is supported only for pinned TinyStories-1M')
     if type(seed) is not int or not 0 <= seed <= 2**31 - 1:
         raise ValueError('initial_seed must be an unsigned 31-bit integer')
-    from transformers import AutoConfig, AutoModelForCausalLM
-    config = AutoConfig.from_pretrained(model_id, revision=revision,
+    from transformers import AutoModelForCausalLM
+    from .hf_config_v83 import load_hf_config
+    config = load_hf_config(model_id, revision=revision,
                                        trust_remote_code=False)
     if getattr(config, 'model_type', None) != 'gpt_neo':
         raise RuntimeError('TinyStories-1M config is not GPT-Neo; refusing to generate a different architecture')

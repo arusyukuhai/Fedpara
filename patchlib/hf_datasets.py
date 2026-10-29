@@ -93,8 +93,11 @@ def batches_from_room(args, manifest: dict, *, rows=None):
     for spec in manifest['datasets']['sources']:
         if set(spec['columns']) != required:
             raise PatchError('task '+task+' requires dataset columns '+str(sorted(required)))
-    from transformers import AutoTokenizer, DataCollatorForLanguageModeling
-    tokenizer=AutoTokenizer.from_pretrained(args.model,revision=args.revision,trust_remote_code=False)
+    from transformers import DataCollatorForLanguageModeling
+    from .hf_load_v85 import load_hf_tokenizer
+    from .model_design import tokenizer_identity
+    tokenizer_id,tokenizer_revision=tokenizer_identity(manifest)
+    tokenizer=load_hf_tokenizer(tokenizer_id,revision=tokenizer_revision,trust_remote_code=False)
     if tokenizer.pad_token is None:
         if tokenizer.eos_token is None:
             raise ValueError('tokenizer must have pad or eos token')
@@ -103,19 +106,29 @@ def batches_from_room(args, manifest: dict, *, rows=None):
         rows=rows_from_room(manifest,peer_id=getattr(args,'peer_id',None) or '',
                             shuffle_buffer=getattr(args,'hf_shuffle_buffer',512))
     mlm=task=='masked-lm'
-    collator=(DataCollatorForLanguageModeling(tokenizer,mlm=mlm,mlm_probability=0.15)
-              if task in ('causal-lm','masked-lm') else None)
+    # Only masked LM needs HF's masking collator. Its CLM path masks by token
+    # VALUE, which destroys real EOS targets if pad_token_id == eos_token_id.
+    collator=(DataCollatorForLanguageModeling(tokenizer,mlm=True,mlm_probability=0.15)
+              if mlm else None)
     while True:
         samples=list(itertools.islice(rows,args.batch_size))
         if not samples:
             raise PatchError('dataset iterator exhausted unexpectedly')
         if task in ('causal-lm','masked-lm'):
             encoded=tokenizer([x['text'] for x in samples],padding=True,truncation=True,
-                              max_length=args.max_length,return_tensors='pt')
-            batch=collator([{k:v[j] for k,v in encoded.items()} for j in range(len(samples))])
+                              max_length=args.max_length,return_tensors='pt',
+                              **({'return_token_type_ids':False} if not mlm else {}))
+            if mlm:
+                batch=collator([{k:v[j] for k,v in encoded.items()} for j in range(len(samples))])
+            else:
+                from .training_compat_v84 import causal_labels_from_attention
+                batch=dict(encoded)
+                batch['labels']=causal_labels_from_attention(batch['input_ids'],
+                                                             batch['attention_mask'])
         elif task=='seq2seq-lm':
             batch=tokenizer([x['input'] for x in samples],padding=True,truncation=True,
-                            max_length=args.max_length,return_tensors='pt')
+                            max_length=args.max_length,return_tensors='pt',
+                            return_token_type_ids=False)
             labels=tokenizer(text_target=[x['target'] for x in samples],padding=True,
                              truncation=True,max_length=args.max_length,return_tensors='pt')['input_ids']
             labels[labels==tokenizer.pad_token_id]=-100

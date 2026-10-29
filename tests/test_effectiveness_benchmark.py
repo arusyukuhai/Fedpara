@@ -51,8 +51,10 @@ def test_invalid_benchmark_dimensions_and_gui_input(tmp_path):
 
 def test_benchmark_gui_bridge_is_functional(tmp_path):
     html=compose_html()
-    assert 'id="benchStart"' in html
-    assert '/api/bench/status' in html
+    # Kagami's six fixed tabs intentionally omit the old benchmark controls.
+    # Benchmark RPC remains supported for compatibility and scripting.
+    assert 'id="panel-training"' in html
+    assert 'id="panel-new"' in html
     ctl=WebviewController(tmp_path)
     api=FedparaBridge(ctl)
     # Keep the CI GUI-process smoke test offline. User GUI defaults to TinyStories-1M.

@@ -24,6 +24,7 @@ class DesktopController:
         self.proc = None
         self.logfile = None
         self.log_handle = None
+        self.stop_requested = False
 
     @staticmethod
     def create_manifest(model: str, revision: str, task: str, sources: list,
@@ -42,21 +43,51 @@ class DesktopController:
 
     @staticmethod
     def build_command(*,room,model,revision,base,manifest,ws,task,kind,rank,journal,auto_state=False,room_public=False,optimizer='adamw',reinit_every=20,
-                      initialization=None,initial_seed=None,lr=1e-4,local_steps=64,max_length=64):
+                      initialization=None,initial_seed=None,lr=1e-4,local_steps=4,max_length=64,
+                      wide_lora_rank=4,peers=None,rounds=200,telemetry_file=None,journal_sync="full",push_fanout=2,
+                      shard_state_manifest=None,shard_store=None,max_state_gb=32,
+                      max_journal_gb=0,streaming_base=False,stream_chunk_mib=8,
+                      disk_cache_fraction=.6,pause_file=None,snapshot_request_file=None,
+                      sharded_base_manifest=None,sharded_base_store=None,
+                      mixed_options=None,mixed_policy=None,critic_state_dir=None):
         from .room_manifest import load_manifest
         validate_room(room)
         desc=load_manifest(Path(manifest))
         if desc['version'] != 2 or desc['model']['id'] != model or desc['model']['revision'] != revision:
             raise ValueError('selected manifest and local model/revision disagree')
-        if not str(base).strip():
-            raise ValueError('初期状態ファイルを指定してください (.fstate)。')
-        base = Path(base).expanduser()
-        if base.is_dir():
-            raise IsADirectoryError('初期状態に指定されたのはフォルダです。.fstate ファイルを指定してください: '+str(base))
-        if base.suffix.lower() != '.fstate':
-            raise ValueError('初期状態ファイルは .fstate 形式で指定してください: '+str(base))
-        if not base.is_file() and not auto_state:
-            raise FileNotFoundError('initial .fstate checkpoint not found: '+str(base)+'。state-export コマンドで生成するか、既存ファイルを指定してください。')
+        from .live_initialization import room_initialization
+        room_init=room_initialization(desc)
+        if bool(sharded_base_manifest) != bool(sharded_base_store):
+            raise ValueError('generation sharded base needs manifest AND store')
+        if sharded_base_manifest and streaming_base:
+            raise ValueError('generation base cannot be combined with streaming base')
+        if sharded_base_manifest:
+            if base is not None:
+                raise ValueError('generation base cannot be combined with old .fstate genesis')
+            if auto_state:
+                raise ValueError('generation base cannot be automatically initialized')
+            from .shards import read_manifest, verify_shards
+            meta=read_manifest(Path(sharded_base_manifest),max_state_bytes=max_state_gb*1024**3)
+            if meta['model_id']!=model:
+                raise ValueError('generation checkpoint model identity differs')
+            verify_shards(meta,Path(sharded_base_store))
+        if streaming_base:
+            if room_init != 'pretrained' or base or auto_state:
+                raise ValueError('out-of-core initial weights need pretrained mode, blank .fstate field, no auto-state')
+            if not 1<=stream_chunk_mib<=128 or not 0<=disk_cache_fraction<=.85:
+                raise ValueError('invalid out-of-core resource budget')
+        elif sharded_base_manifest:
+            pass
+        else:
+            if not str(base).strip():
+                raise ValueError('初期状態ファイルを指定してください (.fstate)。')
+            base = Path(base).expanduser()
+            if base.is_dir():
+                raise IsADirectoryError('初期状態に指定されたのはフォルダです。.fstate ファイルを指定してください: '+str(base))
+            if base.suffix.lower() != '.fstate':
+                raise ValueError('初期状態ファイルは .fstate 形式で指定してください: '+str(base))
+            if not base.is_file() and not auto_state:
+                raise FileNotFoundError('initial .fstate checkpoint not found: '+str(base)+'。state-export コマンドで生成するか、既存ファイルを指定してください。')
         if not ws.startswith(('ws://','wss://')) or len(ws)>512:
             raise ValueError('invalid signaling address')
         p=urlsplit(ws)
@@ -75,35 +106,84 @@ class DesktopController:
             raise ValueError('モデル初期化seedはルーム定義と一致する必要があります')
         if not isinstance(lr,(float,int)) or isinstance(lr,bool) or not 1e-7 <= lr <= .1:
             raise ValueError('invalid live learning rate')
+        if type(wide_lora_rank) is not int or not 1 <= wide_lora_rank <= 16:
+            raise ValueError('wide rank must be 1..16')
+        if peers is not None and (type(peers) is not int or not 2 <= peers <= 4096):
+            raise ValueError('legacy expected peers must be 2..4096')
+        if type(push_fanout) is not int or not 1 <= push_fanout <= 8:
+            raise ValueError('push_fanout must be 1..8')
+        if type(rounds) is not int or not 0 <= rounds <= 100000:
+            raise ValueError('rounds/commit limit must be 0..100000')
+        if type(max_journal_gb) is not int or not 0 <= max_journal_gb <= 4096:
+            raise ValueError('journal storage budget must be 0..4096 GiB (0 = no cap)')
+        if type(max_state_gb) is not int or not 1 <= max_state_gb <= 4096:
+            raise ValueError('model export safety budget must be 1..4096 GiB')
+        if (shard_state_manifest is None) != (shard_store is None):
+            raise ValueError('both checkpoint manifest and model shard store must be given')
         if type(local_steps) is not int or not 1 <= local_steps <= 10000:
             raise ValueError('local_steps must be 1..10000')
-        if type(max_length) is not int or not 8 <= max_length <= 2048:
-            raise ValueError('max_length must be 8..2048')
+        if type(max_length) is not int or not 8 <= max_length <= 8192:
+            raise ValueError('max_length must be 8..8192')
+        if desc.get('adapter',{}).get('target_scope') == 'universal' and optimizer == 'lora-muon':
+            raise ValueError('universal multi-dimensional adapter requires AdamW, not matrix-only LoRA-Muon')
         if optimizer not in ('adamw','lora-muon') or (optimizer=='lora-muon' and kind!='lora'):
             raise ValueError('LoRA-Muon requires LoRA factorization')
         if kind not in ('lora','loha') or rank not in (4,8,16,32,64):
             raise ValueError('invalid adapter settings')
+        if journal_sync not in ('full','normal'):
+            raise ValueError('journal_sync must be full or normal')
         if type(reinit_every) is not int or not 0 <= reinit_every <= 100000:
             raise ValueError('reinit_every must be 0..100000')
         if not str(journal).endswith('.sqlite3'):
             raise ValueError('journal must be a .sqlite3 path')
-        return [sys.executable,'-m','patchlib.cli','train-live',
+        command = [sys.executable,'-m','patchlib.cli','train-live',
                 '--room-id',room,'--model',model,'--revision',revision,
-                '--hf-task',task,'--state-base',str(base),
+                '--hf-task',task,
                 '--initialization',room_init,'--initial-seed',str(room_seed),
                 '--room-manifest',str(manifest),'--ws',ws,
                 '--kind',kind,'--optimizer',optimizer,'--rank',str(rank),
+                '--wide-lora-rank',str(wide_lora_rank),
+                '--push-fanout',str(push_fanout),
                 '--reinit-every',str(reinit_every),
-                '--target-scope','gpt_neo_linear' if optimizer=='lora-muon' else 'auto',
+                '--target-scope',(
+                    ('gpt_neo_linear' if model=='roneneldan/TinyStories-1M' else 'linear')
+                    if optimizer=='lora-muon' else
+                    desc.get('adapter',{}).get('target_scope','auto')),
                 '--init-style','balanced' if kind=='loha' else 'legacy',
                 '--lr',str(0.01 if optimizer=='lora-muon' else lr),
                 '--local-steps',str(local_steps),'--max-length',str(max_length),
                 '--device','auto',
-                '--journal',str(journal),'--rounds','0'] + (['--auto-state'] if auto_state else []) + (['--room-public'] if room_public else []) + (['--hf-shuffle-buffer',str(int(os.environ['FEDPARA_HF_SHUFFLE_BUFFER']))] if os.environ.get('FEDPARA_HF_SHUFFLE_BUFFER','').isdigit() else [])
+                '--journal',str(journal),'--journal-sync',journal_sync,'--rounds',str(rounds),
+                '--working-save-every','10','--durable-every','0',
+                '--max-state-gb',str(max_state_gb),'--max-journal-gb',str(max_journal_gb)] + (['--shard-state-manifest',str(shard_state_manifest),'--shard-store',str(shard_store),'--shard-mb','16'] if shard_state_manifest is not None else []) + (['--telemetry-file',str(telemetry_file)] if telemetry_file is not None else []) + (['--sharded-base-manifest',str(sharded_base_manifest),
+                  '--sharded-base-store',str(sharded_base_store)] if sharded_base_manifest else
+                 (['--state-base',str(base)] if not streaming_base else [
+                  '--streaming-base','--gradient-checkpointing',
+                  '--stream-chunk-mib',str(stream_chunk_mib),
+                  '--disk-cache-fraction',str(disk_cache_fraction),
+                  '--streaming-scratch-dir',str((Path(shard_store) if shard_store is not None else Path(journal).parent / (Path(journal).stem + '-streaming')) / '.temporary-streaming-pages')])) + (['--auto-state'] if auto_state else []) + (['--swarm-pause-file',str(pause_file)] if pause_file is not None else []) + (['--eval-snapshot-request-file',str(snapshot_request_file)] if snapshot_request_file is not None else []) + (['--room-public'] if room_public else []) + (['--hf-shuffle-buffer',str(int(os.environ['FEDPARA_HF_SHUFFLE_BUFFER']))] if os.environ.get('FEDPARA_HF_SHUFFLE_BUFFER','').isdigit() else [])
+        if mixed_options and mixed_options.get('enabled'):
+            from .mix_gui_v66 import command_options
+            command.extend(command_options(mixed_options,state_dir=critic_state_dir))
+            if mixed_policy: command.extend(['--mix-policy',str(mixed_policy)])
+        return command
 
     def start(self, command, logfile):
         if self.proc is not None and self.proc.poll() is None:
-            raise RuntimeError('training is already running')
+            if not self.stop_requested:
+                raise RuntimeError('training is already running')
+            # A double-click or an opposite-window join during SIGTERM must
+            # never open the same journal twice. Give the departing worker a
+            # short grace window to release SQLite/profile/ICE ownership.
+            try:
+                self.proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError('previous peer is still stopping; retry after it exits; '
+                                   'do not kill the process and lose an unpublished LoHa block') from exc
+        if self.log_handle is not None:
+            self.log_handle.close()
+            self.log_handle = None
+        self.stop_requested = False
         self.logfile=Path(logfile).resolve()
         self.logfile.parent.mkdir(parents=True,exist_ok=True)
         fd=os.open(self.logfile,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
@@ -119,8 +199,11 @@ class DesktopController:
                          'VECLIB_MAXIMUM_THREADS','NUMEXPR_NUM_THREADS'):
                 env[name]=str(threads)
             env.setdefault('TOKENIZERS_PARALLELISM','false')
+            # Give the trainer its own process session on POSIX. Closing the
+            # WebView/terminal must not SIGHUP a multi-GB checkpoint export.
             self.proc=subprocess.Popen(command,cwd=ROOT,env=env,
-                       stdout=self.log_handle,stderr=subprocess.STDOUT)
+                       stdout=self.log_handle,stderr=subprocess.STDOUT,
+                       start_new_session=(os.name == 'posix'))
             # Deprioritize heavy worker compared to native Cocoa/WebKit UI.
             if hasattr(os,'setpriority') and hasattr(os,'PRIO_PROCESS'):
                 try: os.setpriority(os.PRIO_PROCESS,self.proc.pid,10)
@@ -135,7 +218,11 @@ class DesktopController:
 
     def stop(self, wait=False):
         if self.status():
-            self.proc.terminate()
+            # Do not emit repeated TERM signals while one cleanup is already
+            # under way. This is idempotent under rapid GUI stop/restart clicks.
+            if not self.stop_requested:
+                self.proc.terminate()
+                self.stop_requested=True
             if wait:
                 try:
                     self.proc.wait(timeout=30)
@@ -169,7 +256,7 @@ class FederatedDesktop:
             root.configure(bg='#080e0b')
             theme=ttk.Style(root)
             theme.theme_use('clam')
-            theme.configure('.',background='#080e0b',foreground='#e5f6ec',font=('Courier',11))
+            theme.configure('.',background='#080e0b',foreground='#e5f6ec',font=('Noto Sans JP',11))
             theme.configure('TFrame',background='#080e0b')
             theme.configure('TLabel',background='#080e0b',foreground='#e5f6ec')
             theme.configure('TButton',background='#10b981',foreground='#062016',bordercolor='#10b981')

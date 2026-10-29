@@ -1,0 +1,964 @@
+--- /dev/null
++++ b/README_V80_STATUS.md
+@@ -0,0 +1,40 @@
++# Kagami v80 — Signed Trajectory Gossip and Receiver-Side Off-Policy Critic Replay
++
++## Implemented
++
++v80 introduces a separate **opt-in** Critic distribution protocol. In a new `train-elastic` room use `--distributed-critic --critic-rollout-gossip --critic-offpolicy trajectory_is` (or GUI: TRAINING → VALUE CRITIC → Critic training → `P2P · signed trajectories / receiver-side IS`). The shared objective policy pins `critic_distribution=signed-trajectory-recipient-is-v80` and `version=pt-sft-clipped-ppo-v80`, disallowing accidental joining of older parameter-delta rooms.
++
++Unlike v78/v79, a v80 participant publishes a **signed source PPO trajectory**, NOT a Critic value-head parameter delta. Each authenticated receiving peer independently computes the sampled action log-probabilities using its own **current Actor**, then trains only its own Critic using the non-clipped terminal-reward trajectory importance-sampling Monte Carlo value surrogate from v79. Actor gradients are not propagated from incoming trajectories.
++
++The signed `KTR80` event contains: room/critic genesis fingerprint, originating peer + per-origin sequence, certified source Actor epoch, optional signed observed Actor journal cursor, bounded **tokenized prompt**, bounded sampled action IDs, source-reported behavior action log-probabilities, reward kind, reward value and reference token IDs. The receiver recomputes the reward for `exact` and `token_match` modes; Hugging Face scorer rewards are intentionally refused because they require a different proof of immutable scorer and inputs. Frame size <=64KiB and <=128 generated actions, with max input length <=4096; policy and size bounds are enforced.
++
++The original v78 Critic certificate-ledger machinery remains to authenticate certified Actor epoch history and Critic head architecture/initialization, but in this v80 mode **no KVC78 Critic parameter deltas may be imported or broadcast**. The per-room trajectory lane is separately signed and stored durably via EventJournal's SQLite + fsynced binary archive. Anti-entropy uses paged `trajectory-frontier`/`trajectory-need` with bounded request and outgoing queues for reconnecting peers. Duplicate receipts do not update the value head again and equivocation is rejected.
++
++Local receiver state is stored as a bounded `safetensors` value-head + AdamW moment snapshot, together with an applied `(origin,seq)` receipt in **one SQLite transaction**. On restart, the prior snapshot is restored and only pending events are eligible to be applied. A failure during the Critic update or persistence rolls back weights and optimizer moments to the prior local snapshot. This is a **local atomic receipt/state commit**, NOT a transaction across the Actor's signed journal and the Critic lane. A source's uncommitted latest local step can still be lost after a crash.
++
++## Mathematical guarantee: precise scope
++
++For truthful, complete behavior action probabilities `mu`, a fixed target Actor policy `pi` during evaluation, a fixed prompt distribution, identical autoregressive action space/tokenizer, unchanged reward semantics, and the support condition, v79's *unclipped trajectory IS* Critic surrogate has a **target-on-policy unbiased expected value gradient** (under integrability and a valid terminal-reward objective). The receiving peer supplies `pi` from its own Actor and obtains its own locally estimated Critic gradient. This is **not** sample-wise exact recovery of unobserved trajectories or future rewards; off-policy IS has potentially unbounded variance and finite precision guards may reject extreme samples. Training on already-received trajectories cannot guarantee the same global update order or parameter convergence across peers.
++
++**Especially important:** A digital signature attests that a peer *claimed* a behavior probability and Actor journal cursor. It does **not** prove the probability actually resulted from the referenced Actor checkpoint or the sampling process. Authenticating that claim against a reproducible immutable Actor snapshot/replay would require an additional verification protocol. A Byzantine peer can lie about log probabilities, even with a valid signature. `KTR80` should therefore be used within an appropriately trusted room; source honesty is a mathematical assumption, not a cryptographic guarantee.
++
++## Limitations and operating safeguards
++
++- New rooms only; v78/v79 delta-sharing rooms are not auto-migrated.
++- Only `train-elastic` / `train-live --mode elastic`; nonelastic commands fail CLI validation.
++- Only `exact` and `token_match` verifiable PPO reward modes in v80. No remote Hugging Face scorer reward sharing yet.
++- Only bounded, trainable Critic value heads; HF Critic backbone remains frozen (as in v79). The recipient pays the inference cost of its own current Actor and Critic for each imported sample. This implementation's synchronous recipient replay can transiently stall the event loop, especially on large HF models; a GPU-safe background scheduler remains future work.
++- Independent Critic heads will **not** necessarily converge to the same weights, because peers can have different Actor targets, sample receipt order, and optimizers. This is distributed training by sharing experiences and recomputing per-peer gradients, not synchronous data-parallel training with a global optimizer.
++- Local Critic state + receipt are atomically committed but not globally synchronized with Actor journal checkpoints, nor is the full remote PPO dataset checkpointed. A local Critic step not yet persisted can be lost on power failure.
++- The v80 trajectory journal is capped to the smaller of the configured journal maximum or 512MiB; currently no safe archival GC/retention consensus. This limits long-running training until a bounded checkpoint/GC protocol is introduced.
++- Receiving a peer's signed token IDs and references **exposes reversible tokenized prompts and reference data** to participants. Only use approved datasets whose content may be distributed. Trajectory sharing is opt-in.
++- No real multi-host WAN endurance, GPU pretrained HF, or long-term Byzantine-stress experiments were performed in this environment. All direct replay tests use small toy CPU models and simulated signed peers.
++
++## Main code paths
++
++- `patchlib/trajectory_gossip_v80.py`: signed events, reward verification, journal, anti-entropy, local checkpoint and atomic receipt, replay.
++- `patchlib/mixed_learning_v65.py`: sampled source trajectory export, receiving Actor probability re-evaluation, Critic-only IS update, v80 objective policy.
++- `patchlib/elasticnet.py`: WebRTC message/control integration, epoch certificate gating, relay, local publish, restart and replay.
++- `patchlib/cli.py`: new `--critic-rollout-gossip` opt-in and mode validation.
++- `patchlib/mix_gui_v66.py`, `web/desktop_webview.js`, `web/desktop_webview.html`: v80 GUI selection and policy display.
++- `tests/test_trajectory_gossip_v80.py`: source/recipient proof-of-concept, update/restart, malformed reward, tampering, equivocation, missing event recovery, source probability change, failed persistence rollback and CLI/GUI policy pinning.
+--- /dev/null
++++ b/VALIDATION_V80.md
+@@ -0,0 +1,26 @@
++# Kagami v80 — Validation record
++
++## Test suite
++
++The complete v80 suite, before the final addition of one extra recipient-Actor drift regression, ran successfully:
++
++```
++910 passed, 3 skipped in 68.43s
++```
++
++The final additional regression (`test_receiver_recomputes_probability_after_its_actor_changes`) was run with the full v80-specific module and all nine tests passed. A final full-suite rerun after this addition should be used to produce a single unified number; do not portray 910 as that final rerun.
++
++Python bytecode compilation and `node --check web/desktop_webview.js` passed.
++
++## Newly exercised behavior
++
++- 9 v80 module tests: authenticated signed KTR80 wire, certified source Actor-epoch gating, reward checks from reference tokens, bounded behavior probabilities, direct two-peer experience ingestion and Critic-only update, source Actor unchanged, duplicate protection and equivocation, missing-event/frontier gap repair, crash after append before replay, restored head + AdamW state after restart, storage failure rollback, corrupted checkpoint rejection, v80 objective/GUI CLI selection, and changes in receiving Actor affecting computed importance ratio.
++- Existing v78/v79 Critic / PPO / GUI tests were included in both the related subset and full-suite run.
++
++## Not tested
++
++Live WebRTC between independent physical machines, authentic heterogeneous pretrained Hugging Face GPUs and multiday WAN/Gossip convergence, source Actor probability forensic verification, adversarial bounded traffic over thousands of peers, unbounded-stale importance ratios. Do **not** claim mathematical exactness for Byzantine sources, rejected out-of-range trajectories, or finite samples.
++
++## Sample wire size
++
++A synthetic 2-token rollout (two prompt IDs, two action IDs, two behavior log probabilities, two reference IDs) produced a 480-byte signed wire using a short test-signature stub. This is not a measured bandwidth-per-learning-step for real workloads; actual wire size varies with prompt, trajectory length and signature representation.
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -552,7 +552,8 @@
+                        for p in mixer.critic.parameters() if p.requires_grad):
+                     mixer.critic_optim.zero_grad(set_to_none=True)
+                     raise ValueError('nonfinite PPO Critic gradient; refusing optimizer update')
+-                if getattr(args,'distributed_critic',False) and getattr(args,'mode',None)=='elastic':
++                if (getattr(args,'distributed_critic',False) and not getattr(args,'critic_rollout_gossip',False)
++                        and getattr(args,'mode',None)=='elastic'):
+                     # CPU copy under the SAME lock as the value update. SQLite
+                     # commits and RTC fanout happen on the event loop, never
+                     # from this model-training worker thread.
+@@ -564,6 +565,9 @@
+                 mixer.critic_steps+=1
+                 if before is not None:
+                     args._v77_critic_before=before
++                if (getattr(args,'critic_rollout_gossip',False) and getattr(args,'mode',None)=='elastic'
++                        and mixer.reuses==1):
++                    args._v80_rollout_pending=mixer.export_rollout_v80()
+                 if mixer.critic_steps%10==0 and not getattr(mixer,'_v75_paired',False):
+                     mixer.save_critic()
+                 total+=float(ppo_actor.detach())*args.ppo_weight
+@@ -1105,6 +1109,8 @@
+     p.add_argument('--critic-hidden',type=int,default=32,help='Local value critic hidden width (8..512)')
+     p.add_argument('--critic-lr',type=float,default=1e-3,help='Local PPO value critic learning rate')
+     p.add_argument('--distributed-critic',action='store_true',help='Opt-in independent signed P2P Critic value-head training (new room; PPO peers only)')
++    p.add_argument('--critic-rollout-gossip',action='store_true',
++        help='EXPERIMENTAL v80: signed replay of peer PPO trajectories with receiver-side IS Critic updates (instead of sharing Critic parameter deltas)')
+     p.add_argument('--critic-offpolicy',choices=('auto','gae','trajectory_is'),default='auto',
+                    help='Critic value target: auto=unclipped trajectory IS in P2P mode, legacy GAE locally. No clipping; high variance possible')
+     p.add_argument('--critic-hf-repo',default='',help='Pinned HF scalar value-model repo (organization/name)')
+@@ -1432,6 +1438,8 @@
+         validate_mixed_args(args)
+     except ValueError as exc:
+         parser.error(str(exc))
++    if getattr(args,'critic_rollout_gossip',False) and not (args.cmd in ('train-live','train-elastic') and args.mode=='elastic'):
++        parser.error('--critic-rollout-gossip requires train-elastic or train-live --mode elastic')
+     if args.cmd in ('train-live','train-elastic'):
+         if getattr(args,'disk_optimizer_dir',None) and (args.mode!='elastic' or args.optimizer!='adamw'):
+             parser.error('live disk AdamW requires --mode elastic --optimizer adamw')
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -331,6 +331,9 @@
+         self.bridge_only = False
+         self.remote_supports_generation = False
+         self.remote_supports_critic = False
++        self.remote_supports_rollout = False
++        self.last_rollout_frontier = 0.0
++        self.rollout_frontier_offset = 0
+         self.last_critic_frontier = 0.0
+         self.critic_frontier_offset = 0
+         self.counter = 0
+@@ -421,7 +424,7 @@
+                 'generation-carry-offer','generation-carry-need','generation-carry-chunk'):
+             return False  # A signed v1 update must never cross epochs.
+         if kind != 'hello' and not self.hello_sent:
+-            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, critic_v78=True,
++            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, critic_v78=True, trajectory_v80=True,
+                     **({'generation_root':self.generation_root} if self.generation_root else {}),
+                     **({'pub':self.public_key} if self.public_key else {})):
+                 return False
+@@ -820,6 +823,7 @@
+                         # Capability negotiation preserves compatibility with
+                         # older v3 peers that do not understand 'frontier'.
+                         self.remote_supports_critic = decoded.get('critic_v78') is True
++                        self.remote_supports_rollout = decoded.get('trajectory_v80') is True
+                         self.remote_supports_frontier = decoded.get('frontier_v1') is True
+                         self.remote_supports_aggregate = decoded.get('aggregate_v1') is True
+                         self.remote_supports_snapshot_pages = decoded.get('snapshot_tip_pages_v1') is True
+@@ -913,7 +917,7 @@
+                         # requests retried). Closing an authenticated DTLS
+                         # link because its small control queue is temporarily
+                         # full creates a reconnect storm under 8+ peers.
+-                        if decoded.get('type') in ('heartbeat','inventory','hello-ack','hello','snapshot-request','snapshot-status','epoch-v2-wire','critic-frontier'):
++                        if decoded.get('type') in ('heartbeat','inventory','hello-ack','hello','snapshot-request','snapshot-status','epoch-v2-wire','critic-frontier','trajectory-frontier'):
+                             self.backpressure_drops+=1
+                             return
+                         # Snapshot controls are NOT silently dropped. A fresh
+@@ -1611,6 +1615,10 @@
+     _v75_paired_active=bool(_v75_has_source(args,'ppo') and
+         getattr(args,'optimizer','adamw')=='adamw' and
+         not getattr(args,'disk_optimizer_dir',None))
++    if getattr(args,'critic_rollout_gossip',False):
++        # The v75 paired file represents a LOCAL value state; v80 maintains
++        # a separate atomic Critic+receipt snapshot under its own signed lane.
++        _v75_paired_active=False
+     if _v75_paired_active and not getattr(args,'critic_state_dir',None):
+         # Durable local value state should not depend on the GUI having
+         # provided this optional path; CLI elastic rooms get a private one.
+@@ -1621,6 +1629,7 @@
+     # The original v75 paired file may restore local optimizer state, but the
+     # Critic head is reconstructed from its OWN journal after that restore.
+     critic_gossip=None
++    trajectory_gossip=None
+     critic_baseline=None
+     distributed_critic=bool(getattr(args,'distributed_critic',False))
+     critic_journal_path=Path(str(args.journal)+'.critic-v78.sqlite3')
+@@ -1717,6 +1726,14 @@
+             baseline=critic_baseline,lock=adapter.lock,
+             allowed_actor_epochs=critic_known_epochs,actor_epoch=genesis)
+         args._v65_mixer._v75_paired=_v75_paired_active
++        if getattr(args,'critic_rollout_gossip',False):
++            from .trajectory_gossip_v80 import TrajectoryGossip
++            trajectory_gossip=TrajectoryGossip(
++                Path(str(args.journal)+'.trajectory-v80.sqlite3'),critic_gossip.genesis,args._v65_mixer,
++                args.peer_id,signer,pub=room_pub if room_only else None,
++                trusted=trusted,allowed_epochs=critic_gossip.known_actor_epochs,
++                actor_epoch=genesis,max_bytes=min(args.max_journal_gb*1024**3,512*1024**2))
++            print('SIGNED TRAJECTORY REPLAY active; Critic weight delta broadcasts disabled',flush=True)
+         print('DISTRIBUTED CRITIC active signed_events='
+               f'{critic_gossip.journal.count()} lane={critic_gossip.genesis[:16]}',flush=True)
+     critic_step_lock=asyncio.Lock()
+@@ -2194,6 +2211,22 @@
+                         nd.last_critic_frontier=now
+                 else:
+                     nd.last_critic_frontier=now
++        if trajectory_gossip is not None:
++            now=loop.time()
++            heads=trajectory_gossip.frontiers()
++            for ps in slots.values():
++                nd=ps.node
++                if (nd is None or nd.bridge_only or not nd.verified_at or
++                        not nd.remote_supports_rollout or now<nd.last_rollout_frontier+2.0):
++                    continue
++                if heads:
++                    k=nd.rollout_frontier_offset%len(heads)
++                    page=(heads[k:]+heads[:k])[:32]
++                    if nd.control('trajectory-frontier',heads=page):
++                        nd.rollout_frontier_offset=(k+len(page))%len(heads)
++                        nd.last_rollout_frontier=now
++                else:
++                    nd.last_rollout_frontier=now
+         for slot in list(slots.values()):
+             node=slot.node
+             if node is None or slot.disabled: continue
+@@ -2353,6 +2386,24 @@
+                             wire=critic_gossip.journal.get(*entry)
+                             if wire is not None and not node.outgoing.full():
+                                 node.outgoing.put_nowait(wire)
++                elif typ == 'trajectory-frontier':
++                    if trajectory_gossip is not None and node.remote_supports_rollout:
++                        needed=trajectory_gossip.need(msg.get('heads'),limit=16)
++                        if needed:node.control('trajectory-need',events=[list(x) for x in needed])
++                elif typ == 'trajectory-need':
++                    if trajectory_gossip is not None and node.remote_supports_rollout:
++                        requests=msg.get('events')
++                        if not isinstance(requests,list) or len(requests)>16:
++                            raise PatchError('invalid trajectory-need list')
++                        from .core import PEER_ID as _v80_PEER_ID
++                        for entry in requests:
++                            if (not isinstance(entry,list) or len(entry)!=2 or
++                                not isinstance(entry[0],str) or not _v80_PEER_ID.fullmatch(entry[0]) or
++                                type(entry[1]) is not int or not 1<=entry[1]<2**63):
++                                raise PatchError('invalid trajectory-need identity')
++                            wire=trajectory_gossip.journal.get(*entry)
++                            if wire is not None and not node.outgoing.full():
++                                node.outgoing.put_nowait(wire)
+                 elif typ in ('hello-ack','heartbeat'):
+                     if controller is not None:
+                         controller.observe(slot.peer,msg.get('cap'))
+@@ -2366,7 +2417,23 @@
+                 wire=node.incoming.get_nowait()
+                 if not isinstance(wire,bytes):
+                     raise PatchError('nonbinary elastic event')
++                if wire.startswith(b'KTR80\0'):
++                    if trajectory_gossip is None or not node.remote_supports_rollout:
++                        raise PatchError('unexpected v80 trajectory frame')
++                    async with critic_step_lock:
++                        with adapter.lock:
++                            fresh=trajectory_gossip.ingest(wire)
++                    if fresh:
++                        for ps in slots.values():
++                            other=ps.node
++                            if (ps.peer!=slot.peer and other is not None and
++                                    other.remote_supports_rollout and other.verified_at and
++                                    not other.outgoing.full() and not other.bridge_only):
++                                other.outgoing.put_nowait(wire)
++                    continue
+                 if wire.startswith(b'KVC78\0'):
++                    if trajectory_gossip is not None:
++                        raise PatchError('v80 rollout room must not ingest old Critic parameter deltas')
+                     if critic_gossip is None or not node.remote_supports_critic:
+                         raise PatchError('unexpected signed Critic frame in a non-v78 room')
+                     async with critic_step_lock:
+@@ -2540,7 +2607,16 @@
+                 wire=node.incoming.get_nowait()
+                 if not isinstance(wire,bytes):
+                     raise PatchError('malformed old DataChannel event at handoff')
++                if wire.startswith(b'KTR80\0'):
++                    if trajectory_gossip is None:
++                        raise PatchError('unexpected trajectory frame at epoch handoff')
++                    async with critic_step_lock:
++                        with adapter.lock:
++                            trajectory_gossip.ingest(wire)
++                    continue
+                 if wire.startswith(b'KVC78\0'):
++                    if trajectory_gossip is not None:
++                        raise PatchError('old-generation Critic delta in a v80 rollout room')
+                     if critic_gossip is None:
+                         raise PatchError('unexpected Critic frame at epoch handoff')
+                     async with critic_step_lock:
+@@ -2585,6 +2661,11 @@
+             # publish_new_epoch executes only after the verified quorum
+             # certificate, complete carry handoff, and frozen source writer.
+             critic_gossip.register_certified_epoch(new.genesis,archive.source_genesis)
++            if trajectory_gossip is not None:
++                trajectory_gossip.actor_epoch=new.genesis
++                # Keep the shared value head while resetting any optimizer
++                # history calculated for a previous Actor epoch.
++                trajectory_gossip.persist()
+         model,adapter,optimizer,journal=(new.model,new.adapter,new.optimizer,new.journal)
+         if hasattr(old.optimizer,'close'):old.optimizer.close()
+         engine=new_engine;genesis=new.genesis;carry_archive=archive
+@@ -3468,6 +3549,14 @@
+             # iteration. Never run another step after reaching the event cap.
+             if args.rounds and emitted >= args.rounds:
+                 break
++            if trajectory_gossip is not None:
++                # Each receiver chooses its own CURRENT target Actor and
++                # independently evaluates the signed sample. No sender Critic
++                # gradient or parameter delta is accepted in this mode.
++                async with critic_step_lock:
++                    with adapter.lock:
++                        from .cli import input_device
++                        trajectory_gossip.apply_pending(model,input_device(model,args.device),limit=1)
+             if critic_gossip is not None:
+                 # Prevent network ingestion between the local Critic optimizer
+                 # step and durable commit of its signed delta.
+@@ -3485,6 +3574,25 @@
+                                                 supplied_batch=batch)
+                     before=getattr(args,'_v77_critic_before',None)
+                     args._v77_critic_before=None
++                    if trajectory_gossip is not None:
++                        from .trajectory_gossip_v80 import validate_rollout
++                        sample=getattr(args,'_v80_rollout_pending',None)
++                        args._v80_rollout_pending=None
++                        with adapter.lock:
++                            if sample is not None:
++                                from .localprogress import _tip
++                                signed=trajectory_gossip.local(sample,actor_tip=_tip(journal))
++                            else:
++                                trajectory_gossip.persist()  # repeated PPO step
++                        if sample is not None:
++                            for ps in slots.values():
++                                nd=ps.node
++                                if (nd is not None and nd.remote_supports_rollout and
++                                    nd.verified_at and not nd.outgoing.full() and not nd.bridge_only):
++                                    nd.outgoing.put_nowait(signed)
++                        # v80 substitutes recipient-side Critic training for
++                        # weight delta gossip (avoid duplicated experience).
++                        before=None
+                     if before is not None:
+                         from .localprogress import _tip
+                         with adapter.lock:
+@@ -3656,6 +3764,7 @@
+         if generation_compact_control is not None:generation_compact_control.close()
+         if generation_compact_ledger is not None:generation_compact_ledger.close()
+         if carry_relay is not None:carry_relay.close()
++        if trajectory_gossip is not None:trajectory_gossip.close()
+         if critic_gossip is not None:critic_gossip.close()
+         journal.close()
+         if hasattr(optimizer,'close'):optimizer.close()
+--- a/patchlib/mix_gui_v66.py
++++ b/patchlib/mix_gui_v66.py
+@@ -11,8 +11,8 @@
+ from types import SimpleNamespace
+ import secrets
+ 
+-FIELDS=('critic_offpolicy','distributed_critic', 'sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'critic_hf_repo', 'critic_hf_revision', 'critic_hf_loader', 'critic_hf_device', 'critic_hf_max_length', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_idle_offload', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
+-DEFAULT={'critic_offpolicy':'auto','distributed_critic': False, 'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'critic_hf_repo': '', 'critic_hf_revision': '', 'critic_hf_loader': 'sequence_classification', 'critic_hf_device': 'cpu', 'critic_hf_max_length': 512, 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_idle_offload': False, 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
++FIELDS=('critic_offpolicy','critic_rollout_gossip','distributed_critic', 'sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'critic_hf_repo', 'critic_hf_revision', 'critic_hf_loader', 'critic_hf_device', 'critic_hf_max_length', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_idle_offload', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
++DEFAULT={'critic_offpolicy':'auto','critic_rollout_gossip': False,'distributed_critic': False, 'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'critic_hf_repo': '', 'critic_hf_revision': '', 'critic_hf_loader': 'sequence_classification', 'critic_hf_device': 'cpu', 'critic_hf_max_length': 512, 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_idle_offload': False, 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
+ 
+ 
+ def _path(value, *, ext, role=None, hf_reward=False):
+@@ -74,6 +74,7 @@
+     if type(values['reward_model_idle_offload']) is not bool:
+         raise ValueError('Reward idle offload must be a boolean')
+     if type(values['distributed_critic']) is not bool:raise ValueError('distributed_critic must be boolean')
++    if type(values['critic_rollout_gossip']) is not bool:raise ValueError('critic_rollout_gossip must be boolean')
+     if values['critic_offpolicy'] not in ('auto','gae','trajectory_is'):
+         raise ValueError('Critic off-policy correction must be auto, gae or trajectory_is')
+     if values['ppo_reward']=='hf_model':
+@@ -114,6 +115,7 @@
+             '--critic-lr',str(values['critic_lr']),
+             '--critic-state-dir',str(state_dir)]
+     if values['distributed_critic']:result.append('--distributed-critic')
++    if values['critic_rollout_gossip']:result.append('--critic-rollout-gossip')
+     result.extend(['--critic-offpolicy',values['critic_offpolicy']])
+     if values['critic_kind']=='hf':
+         for key,flag in (('critic_hf_repo','--critic-hf-repo'),
+--- a/patchlib/mixed_learning_v65.py
++++ b/patchlib/mixed_learning_v65.py
+@@ -76,6 +76,9 @@
+     if resolved_mode(args)=='trajectory_is':
+         generated['critic_offpolicy']='unclipped-trajectory-is-mc-v79'
+         generated['version']='pt-sft-clipped-ppo-v79'
++    if getattr(args,'critic_rollout_gossip',False):
++        generated['critic_distribution']='signed-trajectory-recipient-is-v80'
++        generated['version']='pt-sft-clipped-ppo-v80'
+     if not getattr(args,'mix_policy',None):
+         return generated
+     path=Path(args.mix_policy)
+@@ -108,6 +111,15 @@
+         resolved_mode(args)
+     except OffPolicyCorrectionError as exc:
+         raise MixedLearningError(str(exc)) from exc
++    if getattr(args,'critic_rollout_gossip',False):
++        if not getattr(args,'distributed_critic',False):
++            raise MixedLearningError('trajectory gossip requires --distributed-critic')
++        if getattr(args,'ppo_reward','token_match') not in ('exact','token_match'):
++            raise MixedLearningError('v80 trajectory relay requires receiver-verifiable reference rewards; HF reward not supported')
++        if resolved_mode(args)!='trajectory_is':
++            raise MixedLearningError('v80 distributed trajectory replay requires un-clipped trajectory_is')
++        if int(getattr(args,'max_length',1024))>4096:
++            raise MixedLearningError('v80 signed trajectory frame requires max_length <= 4096')
+     if getattr(args,'distributed_critic',False):
+         if not source_selected(args,'ppo') or float(getattr(args,'ppo_weight',.2))<=0:
+             raise MixedLearningError('distributed Critic v78 currently needs a PPO dataset on every Critic participant')
+@@ -484,7 +496,7 @@
+                         'tokens':torch.tensor(chosen,device=device),
+                         'old_lp':torch.stack(old_lp).detach(), 'old_values':old_values.detach(),
+                         'adv':adv.detach(),'returns':returns.detach(), 'reward':reward,
+-                        'critic_prefixes':prefixes}
++                        'critic_prefixes':prefixes, 'reference_tokens':reference}
+         finally:
+             model.train(was_training)
+ 
+@@ -561,6 +573,73 @@
+         finally:
+             model.train(was_training)
+ 
++    def export_rollout_v80(self):
++        """Capture only source-sampled actions (once per PPO rollout).
++
++        Never export activations/Gradients from the sender's Critic. The peer
++        must evaluate its OWN Actor and re-derive its own value gradient.
++        """
++        from .trajectory_gossip_v80 import validate_rollout
++        r=self.cached
++        if r is None or r.get('reference_tokens') is None:
++            raise MixedLearningError('v80 requires ground-truth reference rollout')
++        data={'prompt':r['ids'][0,:r['start']].detach().cpu().tolist(),
++              'tokens':r['tokens'].detach().cpu().tolist(),
++              'behavior_logp':r['old_lp'].detach().cpu().float().tolist(),
++              'reward':float(r['reward']),
++              'reference':list(r['reference_tokens']),
++              'reward_mode':str(self.args.ppo_reward)}
++        validate_rollout(data,max_length=int(self.args.max_length),reward_mode=self.args.ppo_reward)
++        return data
++
++    def train_imported_rollout(self,model,device,data):
++        """One local Critic-only AdamW step, on an authenticated remote sample.
++
++        Actor never receives gradients. It is the TARGET pi, not the source's
++        historic behavior mu, so its current action probabilities are used.
++        """
++        from .trajectory_gossip_v80 import validate_rollout
++        validate_rollout(data,max_length=int(self.args.max_length),reward_mode=self.args.ppo_reward)
++        prompt=data['prompt'];tokens=data['tokens'];n=len(tokens)
++        # Network may try a different generation or vocab: safe input must
++        # satisfy the current Actor's actual embedding indices.
++        ids=torch.tensor([prompt+tokens],device=device,dtype=torch.long)
++        was_training=model.training
++        model.eval()
++        try:
++            with torch.no_grad():
++                logits=_logits(model,ids,self.args,start=len(prompt)-1,length=n)
++                target=F.log_softmax(logits,dim=-1).gather(
++                    -1,torch.tensor(tokens,device=device).reshape(1,n,1)).reshape(n)
++                if not bool(torch.isfinite(target).all()):
++                    raise MixedLearningError('nonfinite recipient Actor probability')
++                if getattr(self.args,'critic_kind','mlp')!='hf':
++                    features=_features(logits,offset=len(prompt)-1)[0]
++            if getattr(self.args,'critic_kind','mlp')=='hf':
++                prefixes=[self.tok.decode(prompt+tokens[:i],skip_special_tokens=False) for i in range(n)]
++                values=self.critic.values(prefixes,actor_device=device).flatten()
++            else:
++                self.critic.to(device)
++                values=self.critic(features).flatten()
++            for param,state in self.critic_optim.state.items():
++                for key in ('exp_avg','exp_avg_sq'):
++                    if key in state: state[key]=state[key].to(param.device)
++            self.critic_optim.zero_grad(set_to_none=True)
++            loss,diagnostics=exact_trajectory_value_surrogate(
++                values,torch.tensor(data['behavior_logp'],device=device,dtype=torch.float64),
++                target.detach(),float(data['reward']),float(self.args.ppo_gamma))
++            (loss*float(self.args.ppo_value_coef)*float(self.args.ppo_weight)).backward()
++            params=(self.critic.trainable_parameters() if getattr(self.args,'critic_kind','mlp')=='hf' else self.critic.parameters())
++            if any(p.grad is not None and not bool(torch.isfinite(p.grad).all()) for p in params):
++                self.critic_optim.zero_grad(set_to_none=True)
++                raise MixedLearningError('nonfinite received Critic gradient')
++            self.critic_optim.step()
++            self.critic_steps+=1
++            self.cached=None;self.reuses=0
++            return {'loss':float(loss.detach()),**diagnostics}
++        finally:
++            model.train(was_training)
++
+     def save_critic(self):
+         if (self.critic is not None and getattr(self,'_critic_dir',None) and
+                 not getattr(self,'_v75_paired',False)):
+--- /dev/null
++++ b/patchlib/trajectory_gossip_v80.py
+@@ -0,0 +1,262 @@
++"""Opt-in signed, bounded PPO trajectories for recipient-side Critic IS replay.
++
++This is NOT a claim of deterministic global Critic convergence or exact
++finite-sample/off-policy correction. Source behavior log probabilities are
++signed claims, not independently attested executions of a past Actor.
++"""
++from __future__ import annotations
++import hashlib
++import json
++import math
++import struct
++
++import torch
++from safetensors.torch import save as safe_save, load as safe_load
++from .core import PatchError, PEER_ID, _canonical_json
++from .elastic import EventJournal
++from .paired_checkpoint_v75 import _record
++
++MAGIC=b'KTR80\0'
++DOMAIN=b'KAGAMI-V80-SIGNED-TRAJECTORY\0'
++MAX_WIRE=65536
++MAX_HEAD=4096
++MAX_STATE=8*1024*1024
++
++
++def _id(x):
++    return isinstance(x,str) and len(x)==64 and all(y in '0123456789abcdef' for y in x)
++
++
++def validate_rollout(data,*,max_length=1024,reward_mode=None):
++    if not isinstance(data,dict) or set(data)!={'prompt','tokens','behavior_logp','reward','reference','reward_mode'}:
++        raise PatchError('invalid or missing trajectory fields')
++    prompt=data['prompt'];tokens=data['tokens'];logps=data['behavior_logp'];ref=data['reference']
++    if not isinstance(prompt,list) or not 1<=len(prompt)<=max_length-1:
++        raise PatchError('invalid trajectory prompt length')
++    if not isinstance(tokens,list) or not 1<=len(tokens)<=128 or len(prompt)+len(tokens)>max_length:
++        raise PatchError('invalid trajectory generated length')
++    if (not isinstance(ref,list) or not 1<=len(ref)<=1024 or
++        any(type(n) is not int or not 0<=n<2**31 for n in prompt+tokens+ref)):
++        raise PatchError('invalid trajectory token ids')
++    if not isinstance(logps,list) or len(logps)!=len(tokens) or any(
++            type(x) not in (int,float) or not math.isfinite(x) or x>1e-5 or x<-1e6 for x in logps):
++        raise PatchError('invalid behavior action log probabilities')
++    if data['reward_mode'] not in ('exact','token_match') or (reward_mode is not None and reward_mode!=data['reward_mode']):
++        raise PatchError('unsupported or mismatched trajectory reward mode')
++    expected=(float(tokens==ref) if data['reward_mode']=='exact' else
++              float(sum(a==b for a,b in zip(tokens,ref))/max(len(tokens),len(ref))))
++    reward=data['reward']
++    if type(reward) not in (float,int) or not math.isfinite(reward) or abs(float(reward)-expected)>1e-6:
++        raise PatchError('unverified trajectory reward')
++    return data
++
++
++def make_wire(origin,seq,genesis,actor_epoch,rollout,signer,*,pub=None,actor_tip=None):
++    if not isinstance(origin,str) or not PEER_ID.fullmatch(origin) or type(seq) is not int or not 1<=seq<2**63 or not _id(genesis) or not _id(actor_epoch):
++        raise PatchError('invalid rollout event identity')
++    validate_rollout(rollout,max_length=4096)
++    payload=_canonical_json(rollout)
++    head={'origin':origin,'seq':seq,'genesis':genesis,'actor_epoch':actor_epoch,
++          'size':len(payload),'sha256':hashlib.sha256(payload).hexdigest()}
++    if actor_tip is not None:
++        if (not isinstance(actor_tip,list) or len(actor_tip)!=2 or type(actor_tip[0]) is not int or
++            actor_tip[0]<0 or not (actor_tip[1] is None or (isinstance(actor_tip[1],list) and
++            len(actor_tip[1])==3 and isinstance(actor_tip[1][0],str) and PEER_ID.fullmatch(actor_tip[1][0]) and
++            type(actor_tip[1][1]) is int and actor_tip[1][1]>0 and _id(actor_tip[1][2])))):
++            raise PatchError('invalid signed behavior Actor journal position')
++        head['actor_tip']=actor_tip
++    if pub is not None:
++        from .roomid import identity_from_public_b64
++        identity_from_public_b64(pub,origin)
++        head['pub']=pub
++    signing=DOMAIN+_canonical_json(head)
++    head['signature']=signer(len(signing),hashlib.sha256(signing).hexdigest())
++    header=_canonical_json(head)
++    wire=MAGIC+struct.pack('!I',len(header))+header+payload
++    if len(header)>MAX_HEAD or len(wire)>MAX_WIRE:
++        raise PatchError('trajectory event exceeds bounded frame')
++    return wire
++
++
++def parse_wire(wire,genesis,allowed_epochs,trusted=None,*,reward_mode,max_length=1024):
++    if not isinstance(wire,bytes) or not wire.startswith(MAGIC) or not len(MAGIC)+4<len(wire)<=MAX_WIRE:
++        raise PatchError('invalid trajectory frame magic/size')
++    count=struct.unpack('!I',wire[len(MAGIC):len(MAGIC)+4])[0]
++    if not 0<count<=MAX_HEAD or len(wire)<=len(MAGIC)+4+count:
++        raise PatchError('invalid trajectory header length')
++    try:
++        head=json.loads(wire[len(MAGIC)+4:len(MAGIC)+4+count])
++        payload=wire[len(MAGIC)+4+count:]
++        data=json.loads(payload)
++    except (ValueError,UnicodeDecodeError,TypeError) as exc:
++        raise PatchError('invalid trajectory JSON') from exc
++    if not isinstance(head,dict) or set(head)-{'origin','seq','genesis','actor_epoch','actor_tip','size','sha256','pub','signature'} or not {'origin','seq','genesis','actor_epoch','size','sha256','signature'}<=set(head):
++        raise PatchError('bad trajectory authenticated metadata')
++    origin=head['origin']; seq=head['seq']
++    if (not isinstance(origin,str) or not PEER_ID.fullmatch(origin) or type(seq) is not int or not 1<=seq<2**63 or
++        head['genesis']!=genesis or not _id(head['actor_epoch']) or head['actor_epoch'] not in allowed_epochs or
++        type(head['size']) is not int or head['size']!=len(payload) or
++        not _id(head['sha256']) or head['sha256']!=hashlib.sha256(payload).hexdigest()):
++        raise PatchError('trajectory commitment / lineage mismatch')
++    if 'actor_tip' in head:
++        tip=head['actor_tip']
++        if (not isinstance(tip,list) or len(tip)!=2 or type(tip[0]) is not int or
++            tip[0]<0 or not (tip[1] is None or (isinstance(tip[1],list) and
++            len(tip[1])==3 and isinstance(tip[1][0],str) and PEER_ID.fullmatch(tip[1][0]) and
++            type(tip[1][1]) is int and tip[1][1]>0 and _id(tip[1][2])))):
++            raise PatchError('invalid signed behavior Actor journal position')
++    if 'pub' in head:
++        from .roomid import identity_from_public_b64
++        verify=identity_from_public_b64(head['pub'],origin)
++    else:
++        verify=(trusted or {}).get(origin)
++    if verify is None:raise PatchError('unauthenticated trajectory origin')
++    signed={k:v for k,v in head.items() if k!='signature'}
++    signing=DOMAIN+_canonical_json(signed)
++    verify({'size':len(signing),'sha256':hashlib.sha256(signing).hexdigest(),'sig':head['signature']})
++    return origin,seq,validate_rollout(data,max_length=max_length,reward_mode=reward_mode)
++
++
++class TrajectoryGossip:
++    """Durable arrival + replay with atomic local value/AdamW state + receipt.
++
++    Every recipient has its OWN changing Actor and therefore its own value
++    estimator. Snapshot+receipt are a single SQLite transaction. A crash
++    after compute but before commit reloads the prior snapshot; it does not
++    apply a permanently half-committed value update twice.
++    """
++    def __init__(self,path,root_genesis,mixer,self_id,signer,*,pub=None,trusted=None,allowed_epochs,actor_epoch,max_bytes=256*1024**2):
++        if not _id(root_genesis):raise PatchError('invalid rollout room genesis')
++        self.genesis=hashlib.sha256(('kagami-signed-rollout-v80:'+root_genesis).encode()).hexdigest()
++        self.journal=EventJournal(path,self.genesis,max_bytes=max_bytes)
++        self.mixer=mixer;self.self_id=self_id;self.signer=signer;self.pub=pub;self.trusted=trusted or {}
++        self.allowed_epochs=allowed_epochs;self.actor_epoch=actor_epoch
++        self.reward_mode=mixer.args.ppo_reward;self.max_length=int(mixer.args.max_length)
++        self.journal.db.execute('CREATE TABLE IF NOT EXISTS trajectory_applied (origin TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(origin,seq))')
++        self.journal.db.execute('CREATE TABLE IF NOT EXISTS trajectory_state (id INTEGER PRIMARY KEY CHECK(id=1), tensors BLOB NOT NULL, digest TEXT NOT NULL, critic_steps INTEGER NOT NULL)')
++        self.journal.db.commit()
++        try:
++            self._restore()
++        except BaseException:
++            self.journal.close()
++            raise
++
++    def _params(self):
++        from .distributed_critic_v78 import critic_params
++        return critic_params(self.mixer)
++
++    def _snapshot(self):
++        tensors=_record('c',self._params(),self.mixer.critic_optim)
++        blob=safe_save(tensors)
++        if len(blob)>MAX_STATE:raise PatchError('trajectory replay state exceeds 8MiB')
++        return blob,hashlib.sha256(blob).hexdigest(),int(self.mixer.critic_steps)
++
++    def _restore(self):
++        row=self.journal.db.execute('SELECT tensors,digest,critic_steps FROM trajectory_state WHERE id=1').fetchone()
++        if row is None:
++            if self.journal.db.execute('SELECT COUNT(*) FROM trajectory_applied').fetchone()[0]:
++                raise PatchError('trajectory receipts exist without checkpoint')
++            self.persist()
++            return
++        blob,digest,steps=row
++        if hashlib.sha256(blob).hexdigest()!=digest or len(blob)>MAX_STATE:
++            raise PatchError('corrupt local trajectory replay checkpoint')
++        try:tensors=safe_load(blob)
++        except Exception as exc:raise PatchError('invalid trajectory checkpoint tensors') from exc
++        params=self._params()
++        # Validate every parameter and AdamW state before changing anything.
++        expected=set();prepared=[]
++        for i,p in enumerate(params):
++            key=f'c.p.{i}';expected.add(key)
++            if key not in tensors:raise PatchError('missing replay value parameter')
++            w=tensors[key]
++            if w.shape!=p.shape or w.dtype!=p.dtype or not bool(torch.isfinite(w).all()):
++                raise PatchError('invalid replay value tensor')
++            moment={};seen=[]
++            for name in ('step','exp_avg','exp_avg_sq'):
++                k=f'c.o.{i}.{name}'
++                if k in tensors:
++                    expected.add(k);seen.append(name);v=tensors[k]
++                    if not bool(torch.isfinite(v).all()):raise PatchError('nonfinite replay moment')
++                    if name=='step' and (v.numel()!=1 or float(v.item())<0):raise PatchError('invalid step')
++                    if name!='step' and (v.shape!=p.shape or v.dtype!=p.dtype):raise PatchError('bad moment layout')
++                    moment[name]=v
++            if seen and len(seen)!=3:raise PatchError('incomplete replay optimizer')
++            prepared.append((p,w.to(p.device),{k:v.to('cpu' if k=='step' else p.device) for k,v in moment.items()}))
++        if set(tensors)!=expected or type(steps) is not int or steps<0:raise PatchError('unexpected replay checkpoint content')
++        with torch.no_grad():
++            self.mixer.critic_optim.state.clear()
++            for p,w,states in prepared:
++                p.copy_(w);p.grad=None
++                if states:self.mixer.critic_optim.state[p]=states
++        self.mixer.critic_steps=steps
++        self.mixer.cached=None;self.mixer.reuses=0
++
++    def persist(self,receipt=None):
++        state=self._snapshot()
++        with self.journal.db:
++            self.journal.db.execute('INSERT OR REPLACE INTO trajectory_state(id,tensors,digest,critic_steps) VALUES(1,?,?,?)',state)
++            if receipt is not None:
++                self.journal.db.execute('INSERT INTO trajectory_applied(origin,seq) VALUES(?,?)',receipt)
++
++    def local(self,rollout,*,actor_tip=None):
++        validate_rollout(rollout,max_length=self.max_length,reward_mode=self.reward_mode)
++        seq=self.journal.next_seq(self.self_id)
++        wire=make_wire(self.self_id,seq,self.genesis,self.actor_epoch,rollout,self.signer,pub=self.pub,actor_tip=actor_tip)
++        if not self.journal.append(self.self_id,seq,wire):raise PatchError('duplicate local trajectory')
++        self.persist((self.self_id,seq))
++        return wire
++
++    def ingest(self,wire):
++        origin,seq,_=parse_wire(wire,self.genesis,self.allowed_epochs,self.trusted,
++                    reward_mode=self.reward_mode,max_length=self.max_length)
++        found=self.journal.has(origin,seq)
++        if found:
++            if found[0]!=hashlib.sha256(wire).hexdigest():raise PatchError('trajectory equivocation')
++            return False
++        if not self.journal.append(origin,seq,wire):raise PatchError('trajectory index race')
++        return True
++
++    def pending(self,limit=4):
++        rows=self.journal.db.execute('''SELECT e.origin,e.seq FROM events e LEFT JOIN trajectory_applied a
++          ON (a.origin=e.origin AND a.seq=e.seq) WHERE a.origin IS NULL
++          ORDER BY e.origin,e.seq LIMIT ?''',(limit,)).fetchall()
++        return [(origin,seq,self.journal.get(origin,seq)) for origin,seq in rows]
++
++    def apply_pending(self,model,device,limit=1):
++        n=0
++        for origin,seq,wire in self.pending(limit):
++            if wire is None:raise PatchError('missing durable trajectory event')
++            _,_,data=parse_wire(wire,self.genesis,self.allowed_epochs,self.trusted,
++                                reward_mode=self.reward_mode,max_length=self.max_length)
++            # Do not mutate state or acknowledge on unrepresentable IS ratios.
++            # The caller must be under adapter.lock and the PPO step fence.
++            before=self._snapshot()
++            try:
++                self.mixer.train_imported_rollout(model,device,data)
++                self.persist((origin,seq))
++            except BaseException:
++                # Recover both weights AND optimizer on any failure, including
++                # SQLite commit errors, without marking the event as applied.
++                self.journal.db.execute('INSERT OR REPLACE INTO trajectory_state(id,tensors,digest,critic_steps) VALUES(1,?,?,?)',before)
++                self.journal.db.commit()
++                self._restore()
++                raise
++            n+=1
++        return n
++
++    def frontiers(self):return self.journal.frontiers()
++    def need(self,heads,limit=16):
++        if not isinstance(heads,list) or len(heads)>128:raise PatchError('malformed trajectory frontiers')
++        needed=[]
++        for item in heads:
++            if (not isinstance(item,list) or len(item)!=2 or not isinstance(item[0],str) or
++                not PEER_ID.fullmatch(item[0]) or type(item[1]) is not int or not 1<=item[1]<2**63):
++                raise PatchError('bad trajectory frontier identity')
++            origin,end=item
++            for key in self.journal.missing_range(origin,1,min(end, self.journal.db.execute(
++                'SELECT COALESCE(MAX(seq),0) FROM events WHERE origin=?',(origin,)).fetchone()[0]+64)):
++                needed.append(key)
++                if len(needed)>=limit:return needed
++        return needed
++    def close(self):self.journal.close()
+--- /dev/null
++++ b/tests/test_trajectory_gossip_v80.py
+@@ -0,0 +1,180 @@
++"""Authenticated replay, tampering, duplicate receipt, crash recovery, actor IS."""
++from types import SimpleNamespace
++from pathlib import Path
++import hashlib
++import json
++import pytest
++import torch
++from patchlib.core import PatchError
++from patchlib.mixed_learning_v65 import MixedObjectiveTrainer, spec, validate_args, MixedLearningError
++from patchlib.trajectory_gossip_v80 import TrajectoryGossip, validate_rollout, make_wire, parse_wire
++from test_mixed_learning_v65 import make_args, setup_model, write, ToyTokenizer
++
++
++def sample():
++    return {'prompt':[3,4], 'tokens':[5,6], 'behavior_logp':[-1.,-2.],
++            'reward':0.5,'reference':[5,7], 'reward_mode':'token_match'}
++
++def crypt():
++    def sign(length,digest):return 's:'+digest
++    def verify(data):
++        if data['sig']!='s:'+data['sha256']:raise PatchError('wrong signature')
++    return sign,verify
++
++
++def peers(tmp_path):
++    data=write(tmp_path,'train.jsonl',[{'prompt':'Hi','reference':'Ag'}])
++    args=make_args(tmp_path,ppo_jsonl=data,distributed_critic=True,
++                   critic_rollout_gossip=True,ppo_reward='token_match',critic_offpolicy='trajectory_is')
++    model,adapter,opt,_=setup_model()
++    mix_a=MixedObjectiveTrainer(args,ToyTokenizer())
++    model_b,adapter_b,opt_b,_=setup_model()
++    args_b=make_args(tmp_path,ppo_jsonl=data,distributed_critic=True,
++                   critic_rollout_gossip=True,ppo_reward='token_match',critic_offpolicy='trajectory_is')
++    mix_b=MixedObjectiveTrainer(args_b,ToyTokenizer())
++    sign,verify=crypt()
++    a=TrajectoryGossip(tmp_path/'a.db','a'*64,mix_a,'alpha',sign,trusted={'alpha':verify,'beta':verify},allowed_epochs={'a'*64},actor_epoch='a'*64)
++    b=TrajectoryGossip(tmp_path/'b.db','a'*64,mix_b,'beta',sign,trusted={'alpha':verify,'beta':verify},allowed_epochs={'a'*64},actor_epoch='a'*64)
++    return a,b,model,model_b,mix_a,mix_b
++
++
++def test_protocol_rejects_bad_reward_and_bad_probs():
++    bad=sample();bad['reward']=.4
++    with pytest.raises(PatchError,match='reward'):validate_rollout(bad)
++    bad=sample();bad['behavior_logp']=[0.2,-2.]
++    with pytest.raises(PatchError,match='probabilities'):validate_rollout(bad)
++
++
++def test_wire_signed_payload_and_certified_actor_epoch():
++    sign,verify=crypt();x=sample()
++    w=make_wire('alpha',1,'a'*64,'b'*64,x,sign)
++    with pytest.raises(PatchError,match='lineage'):
++        parse_wire(w,'a'*64,{'a'*64},{'alpha':verify},reward_mode='token_match')
++    assert parse_wire(w,'a'*64,{'b'*64},{'alpha':verify},reward_mode='token_match')[2]==x
++    bad=bytearray(w);bad[-1]=bad[-1]^1
++    with pytest.raises(PatchError):parse_wire(bytes(bad),'a'*64,{'b'*64},{'alpha':verify},reward_mode='token_match')
++
++
++def test_real_receiver_recomputes_actor_and_persists_exactly_once(tmp_path):
++    a,b,ma,mb,mixa,mixb=peers(tmp_path)
++    try:
++        torch.manual_seed(23)
++        actor_loss,closs,_=mixa.ppo_loss(ma,torch.device('cpu'))
++        wire=a.local(mixa.export_rollout_v80())
++        assert b.ingest(wire)
++        assert not b.ingest(wire)
++        assert b.pending() and len(b.pending())==1
++        old=[p.detach().clone() for p in mixb.critic.parameters()]
++        aparams=[p.detach().clone() for p in mb.parameters()]
++        n=b.apply_pending(mb,torch.device('cpu'))
++        assert n==1
++        assert b.apply_pending(mb,torch.device('cpu'))==0
++        assert any(not torch.equal(x,y) for x,y in zip(old,mixb.critic.parameters()))
++        assert all(torch.equal(x,y) for x,y in zip(aparams,mb.parameters()))
++        saved=[p.detach().clone() for p in mixb.critic.parameters()]
++        step=mixb.critic_steps
++        b.close()
++        torch.manual_seed(555)
++        # Simulate process death: old local objects discarded, a new
++        # Critic starts at DIFFERENT random parameters and is restored.
++        new_mixer=MixedObjectiveTrainer(mixb.args,ToyTokenizer())
++        b=TrajectoryGossip(tmp_path/'b.db','a'*64,new_mixer,'beta',crypt()[0],
++            trusted={'alpha':crypt()[1]},allowed_epochs={'a'*64},actor_epoch='a'*64)
++        assert new_mixer.critic_steps==step
++        assert all(torch.equal(x,y) for x,y in zip(saved,new_mixer.critic.parameters()))
++        assert b.apply_pending(mb,torch.device('cpu'))==0
++        new_mixer.close()
++    finally:
++        a.close();b.close();mixa.close();mixb.close()
++
++
++def test_crash_after_event_before_value_step_recovers_pending(tmp_path):
++    a,b,ma,mb,mixa,mixb=peers(tmp_path)
++    try:
++        w=a.local(sample())
++        assert b.ingest(w)
++        b.close()
++        b=TrajectoryGossip(tmp_path/'b.db','a'*64,mixb,'beta',crypt()[0],
++            trusted={'alpha':crypt()[1]},allowed_epochs={'a'*64},actor_epoch='a'*64)
++        assert len(b.pending())==1
++        b.apply_pending(mb,torch.device('cpu'))
++        assert not b.pending()
++    finally:
++        a.close();b.close();mixa.close();mixb.close()
++
++
++def test_gap_repair_and_equivocation(tmp_path):
++    a,b,ma,mb,mixa,mixb=peers(tmp_path)
++    try:
++        first=a.local(sample());second=a.local(sample())
++        b.ingest(second)
++        assert b.need(a.frontiers())==[('alpha',1)]
++        assert b.ingest(first)
++        assert b.need(a.frontiers())==[]
++        conflict=make_wire('alpha',1,a.genesis,'a'*64,
++            dict(sample(),behavior_logp=[-2.,-2.]),crypt()[0])
++        with pytest.raises(PatchError,match='equivocation'):b.ingest(conflict)
++    finally:
++        a.close();b.close();mixa.close();mixb.close()
++
++
++def test_policy_and_gui_pin_v80(tmp_path):
++    p=write(tmp_path,'ex.jsonl',[{'prompt':'abc','reference':'yes'}])
++    args=make_args(tmp_path,ppo_jsonl=p,distributed_critic=True,critic_rollout_gossip=True)
++    validate_args(args)
++    assert spec(args)['critic_distribution']=='signed-trajectory-recipient-is-v80'
++    assert spec(args)['version']=='pt-sft-clipped-ppo-v80'
++    args.ppo_reward='hf_model'
++    with pytest.raises(MixedLearningError,match='reference rewards'):validate_args(args)
++    from patchlib.mix_gui_v66 import normalize, command_options
++    data=normalize({'enabled':True,'ppo_jsonl':str(p),'distributed_critic':True,'critic_rollout_gossip':True,'sft_weight':0.0},task='causal-lm')
++    assert '--critic-rollout-gossip' in command_options(data,state_dir=tmp_path)
++
++
++def test_sqlite_failure_rolls_back_critic_and_leaves_unsigned_receipt_pending(tmp_path,monkeypatch):
++    a,b,ma,mb,mixa,mixb=peers(tmp_path)
++    try:
++        assert b.ingest(a.local(sample()))
++        weights=[p.detach().clone() for p in mixb.critic.parameters()]
++        old_persist=b.persist
++        def fail_once(receipt=None):
++            if receipt is not None:raise OSError('disk out of space')
++            return old_persist(receipt)
++        monkeypatch.setattr(b,'persist',fail_once)
++        with pytest.raises(OSError,match='disk out of space'):
++            b.apply_pending(mb,torch.device('cpu'))
++        assert b.pending()
++        assert all(torch.equal(x,y) for x,y in zip(weights,mixb.critic.parameters()))
++        monkeypatch.setattr(b,'persist',old_persist)
++        assert b.apply_pending(mb,torch.device('cpu'))==1
++        assert not b.pending()
++    finally:
++        a.close();b.close();mixa.close();mixb.close()
++
++
++def test_corrupt_checkpoint_blocks_restart(tmp_path):
++    a,b,ma,mb,mixa,mixb=peers(tmp_path)
++    try:
++        b.journal.db.execute("UPDATE trajectory_state SET digest=? WHERE id=1",('0'*64,))
++        b.journal.db.commit()
++        b.close()
++        with pytest.raises(PatchError,match='corrupt local trajectory replay checkpoint'):
++            TrajectoryGossip(tmp_path/'b.db','a'*64,mixb,'beta',crypt()[0],
++                trusted={'alpha':crypt()[1]},allowed_epochs={'a'*64},actor_epoch='a'*64)
++    finally:
++        a.close();mixa.close();mixb.close()
++
++
++def test_receiver_recomputes_probability_after_its_actor_changes(tmp_path):
++    a,b,ma,mb,mixa,mixb=peers(tmp_path)
++    try:
++        d=sample()
++        first=mixb.train_imported_rollout(mb,torch.device('cpu'),d)
++        with torch.no_grad():
++            # The source's old log probabilities remain unchanged; only the
++            # RECEIVER Actor changes. The next Critic step must see that.
++            mb.head.bias[5].add_(8.)
++        second=mixb.train_imported_rollout(mb,torch.device('cpu'),d)
++        assert abs(first['trajectory_ratio']-second['trajectory_ratio'])>1e-6
++    finally:
++        a.close();b.close();mixa.close();mixb.close()
+--- a/web/desktop_webview.html
++++ b/web/desktop_webview.html
+@@ -71,7 +71,7 @@
+       <label><span>Score index</span><input id="mixRewardIndex" type="number" value="0" min="0" max="65535"></label>
+       <label><span>Reward multiplier</span><input id="mixRewardScale" type="number" value="1" min="0.001" max="100" step="0.1"></label>
+       <label><span>Max input tokens</span><input id="mixRewardMaxLength" type="number" value="512" min="16" max="8192"></label></div></div>
+-      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Independent value estimator for PPO/GAE. Optionally share its trained value-head updates over signed P2P gossip; this is never a Reward Model.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option><option value="hf">Hugging Face · pretrained Value Critic</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Critic training</span><select id="mixDistributedCritic"><option value="off">Local only · legacy</option><option value="on">P2P distributed · signed value head</option></select></label><label><span>Off-policy value correction</span><select id="mixCriticOffpolicy"><option value="auto">Automatic · trajectory IS for P2P</option><option value="trajectory_is">Unclipped trajectory IS · target Actor</option><option value="gae">Legacy GAE · no off-policy correction</option></select></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><div class="fieldgrid" id="mixCriticHub" hidden><label class="wide"><span>Hugging Face Value Critic</span><div class="mixed-path"><input id="mixCriticHfRepo" placeholder="organization/pretrained-scalar-value-model" spellcheck="false"><button type="button" id="mixCriticSearch">おすすめから選ぶ</button></div><select hidden id="mixCriticSearchResults" aria-label="HF Critic model search"><option value="">Search Hub for a compatible scalar value model…</option></select></label><label class="wide"><span>Immutable commit SHA</span><div class="mixed-path"><input id="mixCriticHfRevision" placeholder="40 hexadecimal characters"><button type="button" id="mixCriticPin">Pin current commit</button></div></label><label><span>Critic model type</span><select id="mixCriticHfLoader"><option value="sequence_classification">Scalar sequence classification</option><option value="token_classification">Scalar token classification</option></select></label><label><span>Critic device</span><select id="mixCriticHfDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label><label><span>Maximum Critic tokens</span><input id="mixCriticHfMaxLength" type="number" value="512" min="16" max="8192"></label><p class="footnote wide">Requires a checkpoint with an already-trained scalar value head. The backbone stays frozen; the value head trains locally or through signed P2P gossip. PPO state prefixes are retokenized for this Critic. The model may be substantially slower than the small local Critic.</p></div><label id="mixCriticLocalInit"><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">P2P mode shares signed value-head parameter updates with PPO peers. Trajectory IS corrects local stale rollouts against the current Actor, without clipping; large importance weights can destabilize learning. It does NOT retroactively correct incoming parameter-only updates originating under other Actor policies. AdamW moments remain local. New rooms require v79 policies.</p></div>
++      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Independent value estimator for PPO/GAE. Optionally share its trained value-head updates over signed P2P gossip; this is never a Reward Model.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option><option value="hf">Hugging Face · pretrained Value Critic</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Critic training</span><select id="mixDistributedCritic"><option value="off">Local only · legacy</option><option value="on">P2P · signed value-head deltas (v78)</option><option value="rollout">P2P · signed trajectories / receiver-side IS (v80)</option></select></label><label><span>Off-policy value correction</span><select id="mixCriticOffpolicy"><option value="auto">Automatic · trajectory IS for P2P</option><option value="trajectory_is">Unclipped trajectory IS · target Actor</option><option value="gae">Legacy GAE · no off-policy correction</option></select></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><div class="fieldgrid" id="mixCriticHub" hidden><label class="wide"><span>Hugging Face Value Critic</span><div class="mixed-path"><input id="mixCriticHfRepo" placeholder="organization/pretrained-scalar-value-model" spellcheck="false"><button type="button" id="mixCriticSearch">おすすめから選ぶ</button></div><select hidden id="mixCriticSearchResults" aria-label="HF Critic model search"><option value="">Search Hub for a compatible scalar value model…</option></select></label><label class="wide"><span>Immutable commit SHA</span><div class="mixed-path"><input id="mixCriticHfRevision" placeholder="40 hexadecimal characters"><button type="button" id="mixCriticPin">Pin current commit</button></div></label><label><span>Critic model type</span><select id="mixCriticHfLoader"><option value="sequence_classification">Scalar sequence classification</option><option value="token_classification">Scalar token classification</option></select></label><label><span>Critic device</span><select id="mixCriticHfDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label><label><span>Maximum Critic tokens</span><input id="mixCriticHfMaxLength" type="number" value="512" min="16" max="8192"></label><p class="footnote wide">Requires a checkpoint with an already-trained scalar value head. The backbone stays frozen; the value head trains locally or through signed P2P gossip. PPO state prefixes are retokenized for this Critic. The model may be substantially slower than the small local Critic.</p></div><label id="mixCriticLocalInit"><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">P2P mode shares signed value-head parameter updates with PPO peers. Trajectory IS corrects local stale rollouts against the current Actor, without clipping; large importance weights can destabilize learning. v80 trajectory mode shares token IDs, signed behavior log-probability claims, and receiver-verifiable reference rewards. Each receiver re-evaluates its current Actor and optimizes its own Critic. Parameter-delta broadcasts are disabled in this mode. This is conditionally unbiased in expectation, not a guaranteed global convergence protocol. New rooms only. Signed trajectories expose tokenized prompts and references to other room peers; use authorized data only.</p></div>
+       <div id="mixedConfigStatus" class="footnote" role="status">These settings apply when launching a new worker; changing a room's pinned objective protocol requires a new room.</div>
+     </div>
+   </div>
+--- a/web/desktop_webview.js
++++ b/web/desktop_webview.js
+@@ -380,7 +380,8 @@
+    const raw=get(id);data[field]=mixedNumeric.has(field)?Number(raw):raw;
+    if(mixedNumeric.has(field)&&(!raw||!Number.isFinite(data[field])||(mixedInt.has(field)&&!Number.isInteger(data[field]))))throw Error('Invalid '+field);
+  }
+- data.distributed_critic=get('mixDistributedCritic')==='on';
++ data.distributed_critic=get('mixDistributedCritic')!=='off';
++ data.critic_rollout_gossip=get('mixDistributedCritic')==='rollout';
+  data.reward_model_idle_offload=get('mixRewardIdleOffload')==='on';
+  for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){if(get('mix'+tag+'Source')==='hf')data[role+'_jsonl']='';else{for(const key of Object.keys(data))if(key.startsWith(role+'_hf_'))data[key]='';}}
+  if(!data.sft_jsonl&&!data.ppo_jsonl&&!data.sft_hf_repo&&!data.ppo_hf_repo&&data.pt_weight<=0)throw Error('Select an SFT/PPO dataset or assign a positive PT weight');
+@@ -399,7 +400,7 @@
+     reward_model_output:'logits',reward_model_format:'plain',reward_model_index:0,reward_model_scale:1,reward_model_max_length:512,critic_kind:'mlp',critic_hidden:32,critic_lr:.001,critic_hf_repo:'',critic_hf_revision:'',critic_hf_loader:'sequence_classification',critic_hf_device:'cpu',critic_hf_max_length:512};
+   const hfDefaults={sft_hf_split:'train',sft_hf_prompt_column:'prompt',sft_hf_response_column:'response',ppo_hf_split:'train',ppo_hf_prompt_column:'prompt',ppo_hf_reference_column:'reference'};
+   $(id).value=value??defaults[field]??hfDefaults[field]??'';
+- }$('mixDistributedCritic').value=data?.distributed_critic?'on':'off';$('mixRewardIdleOffload').value=data?.reward_model_idle_offload?'on':'off';for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){$('mix'+tag+'Source').value=data?.[role+'_hf_repo']?'hf':data?.[role+'_jsonl']?'local':'hf';}syncMixed();}
++ }$('mixDistributedCritic').value=data?.critic_rollout_gossip?'rollout':data?.distributed_critic?'on':'off';$('mixRewardIdleOffload').value=data?.reward_model_idle_offload?'on':'off';for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){$('mix'+tag+'Source').value=data?.[role+'_hf_repo']?'hf':data?.[role+'_jsonl']?'local':'hf';}syncMixed();}
+ async function reloadMixed(room){
+  const data=await api('mixedSettings',{room});mixedPinnedPolicy=data.pinned_policy||null;
+  if(mixedPinnedPolicy&&!data.enabled){
+@@ -416,7 +417,8 @@
+      data.reward_model_output=p.reward_model.output;data.reward_model_loader=p.reward_model.loader;data.reward_model_format=p.reward_model.format;data.reward_model_index=p.reward_model.index;
+      data.reward_model_scale=p.reward_model.scale;data.reward_model_max_length=p.reward_model.max_length;
+      data.reward_model_device='cpu';}
+-   data.distributed_critic=p.critic_distribution==='signed-root-critic-gossip-v78';
++   data.distributed_critic=['signed-root-critic-gossip-v78','signed-trajectory-recipient-is-v80'].includes(p.critic_distribution);
++   data.critic_rollout_gossip=p.critic_distribution==='signed-trajectory-recipient-is-v80';
+    data.critic_offpolicy=p.critic_offpolicy==='unclipped-trajectory-is-mc-v79'?'trajectory_is':'gae';
+    if(p.critic){data.critic_kind=p.critic.kind;data.critic_hidden=p.critic.hidden;data.critic_lr=p.critic.lr; if(p.critic.hf){data.critic_hf_repo=p.critic.hf.repo;data.critic_hf_revision=p.critic.hf.revision;data.critic_hf_loader=p.critic.hf.loader;data.critic_hf_max_length=p.critic.hf.max_length;data.critic_hf_device='cpu';}}
+  }

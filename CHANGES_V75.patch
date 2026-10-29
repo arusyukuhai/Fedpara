@@ -1,0 +1,650 @@
+--- v74/patchlib/paired_checkpoint_v75.py
++++ v75/patchlib/paired_checkpoint_v75.py
+@@ -0,0 +1,259 @@
++"""Crash-atomic *local* paired Actor/AdamW/Critic/AdamW safetensors snapshot.
++
++The signed P2P journal is NOT part of the filesystem transaction. A paired
++snapshot may only be restored at its EXACT durable journal tip and genesis.
++Snapshots run on immutable CPU copies; never read live model tensors in writer.
++Disk-backed actor optimizers and non-AdamW actor optimizers are deliberately
++excluded until their moments can be captured with equivalent guarantees.
++"""
++from __future__ import annotations
++import asyncio
++import hashlib
++import json
++import os
++import time
++from pathlib import Path
++from typing import Any
++
++import torch
++from safetensors import safe_open
++from safetensors.torch import save_file
++from .core import PatchError
++from .localprogress import _tip
++
++FORMAT='kagami-paired-actor-critic-v75'
++MAX_BYTES=256 * 1024**2
++
++
++def snapshot_path(journal):
++    return Path(str(journal.path)+'.paired-v75.safetensors')
++
++
++def _params(module):
++    return list(module)
++
++
++def _copy(value):
++    if not isinstance(value,torch.Tensor):
++        raise PatchError('unsupported non-tensor optimizer moment in paired checkpoint')
++    out=value.detach().to('cpu').contiguous().clone()
++    if not bool(torch.isfinite(out).all()):
++        raise PatchError('nonfinite tensor in paired checkpoint')
++    return out
++
++
++def _record(prefix,params,optimizer,*,actor=False):
++    out={}
++    names=('step','exp_avg','exp_avg_sq')
++    for i,p in enumerate(params):
++        out[f'{prefix}.p.{i}']=_copy(p)
++        state=optimizer.state.get(p,{})
++        selected=set(state).intersection(names)
++        if selected and selected!=set(names):
++            raise PatchError('partial AdamW optimizer state in paired checkpoint')
++        # Validate a complete moment set. Unknown moment formats fail closed.
++        if set(state)-set(names):
++            raise PatchError('unsupported actor or critic optimizer state; paired checkpoint needs AdamW')
++        for key in names:
++            if key in selected:
++                val=_copy(state[key])
++                if key=='step':
++                    if val.numel()!=1 or float(val.item())<0:
++                        raise PatchError('invalid AdamW step counter')
++                elif val.shape!=p.shape or val.dtype!=p.dtype:
++                    raise PatchError('AdamW moment has wrong shape or dtype')
++                out[f'{prefix}.o.{i}.{key}']=val
++    return out
++
++
++def _critic_params(mixer):
++    c=mixer.critic
++    return list(c.trainable_parameters() if getattr(mixer.args,'critic_kind','mlp')=='hf' else c.parameters())
++
++
++def _identity(mixer):
++    kind=getattr(mixer.args,'critic_kind','mlp')
++    spec=(mixer.critic.spec if kind=='hf' else
++          {'kind':kind,'hidden':int(getattr(mixer.args,'critic_hidden',32))})
++    return {'room':mixer._critic_identity,'critic':spec}
++
++
++def capture(journal,adapter,actor_optimizer,mixer,steps,*,journal_tip=None):
++    if mixer is None or mixer.critic is None or mixer.critic_optim is None:
++        raise PatchError('PPO Critic required for paired checkpoint')
++    if getattr(actor_optimizer,'live_disk_optimizer_v59',False):
++        raise PatchError('disk optimizer requires external crash-atomic reflinks; paired v75 unsupported')
++    if type(steps) is not int or steps<0:raise PatchError('invalid paired local step')
++    # Called only at a safe optimizer boundary, by the awaited trainer loop.
++    # adapter.lock prevents concurrent actor/critic changes during CPU copy.
++    with adapter.lock, torch.no_grad():
++        actor=_params(adapter.trainable_parameters())
++        critic=_critic_params(mixer)
++        tensors={**_record('a',actor,actor_optimizer,actor=True),
++                 **_record('c',critic,mixer.critic_optim)}
++        if sum(t.numel()*t.element_size() for t in tensors.values())>MAX_BYTES:
++            raise PatchError('paired checkpoint exceeds 256MiB frozen tensor budget')
++        metadata={'format':FORMAT,'genesis':journal.genesis,
++                  'tip':journal_tip if journal_tip is not None else _tip(journal),
++                  'steps':steps,'actor':{'layout':adapter.layout,'kind':adapter.kind,
++                         'rank':adapter.rank,'alpha':adapter.alpha,'count':len(actor)},
++                  'critic':_identity(mixer),'critic_steps':mixer.critic_steps,
++                  'critic_count':len(critic)}
++    return snapshot_path(journal),tensors,metadata
++
++
++def _tensor_digest(tensors):
++    """End-to-end integrity of inert tensor bytes, computed off the trainer lock."""
++    h=hashlib.sha256()
++    for name in sorted(tensors):
++        item=tensors[name].contiguous().cpu()
++        header=json.dumps([name,str(item.dtype),list(item.shape)],separators=(',',':')).encode()
++        h.update(len(header).to_bytes(4,'big'))
++        h.update(header)
++        h.update(memoryview(item.reshape(-1).view(torch.uint8).numpy()))
++    return h.hexdigest()
++
++
++def write(captured):
++    target,tensors,metadata=captured
++    metadata=dict(metadata)
++    metadata['tensor_sha256']=_tensor_digest(tensors)
++    target.parent.mkdir(parents=True,exist_ok=True)
++    if target.is_symlink() or target.parent.is_symlink():
++        raise PatchError('unsafe paired checkpoint symlink')
++    tmp=target.with_name('.'+target.name+'.'+os.urandom(8).hex()+'.tmp')
++    try:
++        save_file(tensors,str(tmp),metadata={'paired':json.dumps(metadata,sort_keys=True,separators=(',',':'))})
++        with tmp.open('rb') as f:os.fsync(f.fileno())
++        os.replace(tmp,target)
++        dfd=os.open(target.parent,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
++        try:os.fsync(dfd)
++        finally:os.close(dfd)
++    finally:tmp.unlink(missing_ok=True)
++    return target
++
++
++def _validated_params(reader,keys,prefix,params):
++    restored=[]
++    valid=set()
++    for i,p in enumerate(params):
++        key=f'{prefix}.p.{i}';valid.add(key)
++        if key not in keys:raise PatchError(f'missing paired weight {key}')
++        weight=reader.get_tensor(key)
++        if weight.shape!=p.shape or weight.dtype!=p.dtype or not bool(torch.isfinite(weight).all()):
++            raise PatchError(f'paired weight {key} has invalid layout/values')
++        saved={}
++        present={k for k in ('step','exp_avg','exp_avg_sq') if f'{prefix}.o.{i}.{k}' in keys}
++        if present and present!={'step','exp_avg','exp_avg_sq'}:
++            raise PatchError('partial paired AdamW state')
++        for name in present:
++            key=f'{prefix}.o.{i}.{name}';valid.add(key)
++            item=reader.get_tensor(key)
++            if not bool(torch.isfinite(item).all()):raise PatchError('nonfinite paired AdamW state')
++            if name=='step':
++                if item.numel()!=1 or float(item.item())<0:raise PatchError('invalid paired optimizer step')
++            elif item.shape!=p.shape or item.dtype!=p.dtype:
++                raise PatchError('invalid paired optimizer moment layout')
++            saved[name]=item
++        restored.append((p,weight,saved))
++    return restored,valid
++
++
++def restore(journal,adapter,actor_optimizer,mixer,*,strict=True):
++    """Validate journal + ALL tensors before mutating either model. Fail closed.
++
++    Returns None when absent. Old/stale snapshots are never replayed over a
++    changed signed base. Does not roll back the signed journal.
++    """
++    target=snapshot_path(journal)
++    if not target.exists():return None
++    if target.is_symlink() or target.stat().st_size>MAX_BYTES+1024**2:
++        raise PatchError('oversized or unsafe paired checkpoint')
++    with safe_open(str(target),framework='pt',device='cpu') as reader:
++        try: meta=json.loads((reader.metadata() or {})['paired'])
++        except (KeyError,TypeError,ValueError) as exc:raise PatchError('invalid paired metadata') from exc
++        if meta.get('format')!=FORMAT or meta.get('genesis')!=journal.genesis or meta.get('tip')!=_tip(journal):
++            raise PatchError('paired checkpoint does not match signed journal; refusing mixed actor/critic recovery')
++        expected={'layout':adapter.layout,'kind':adapter.kind,'rank':adapter.rank,
++                  'alpha':adapter.alpha,'count':len(list(adapter.trainable_parameters()))}
++        if meta.get('actor')!=expected or meta.get('critic')!=_identity(mixer):
++            raise PatchError('paired checkpoint room / adapter / critic configuration mismatch')
++        # A v74 unsealed actor working snapshot might be newer than this
++        # pair. Never silently roll its optimizer moments back to older steps.
++        from .localprogress import snapshot_path as old_working_path
++        legacy=old_working_path(journal)
++        if legacy.is_file():
++            with safe_open(str(legacy),framework='pt',device='cpu') as older:
++                try:old_meta=json.loads((older.metadata() or {})['fedpara'])
++                except (KeyError,TypeError,ValueError) as exc:
++                    raise PatchError('invalid pre-existing actor working snapshot') from exc
++                if (old_meta.get('genesis')==journal.genesis and old_meta.get('tip')==meta['tip']
++                    and type(old_meta.get('steps')) is int and old_meta['steps']>meta.get('steps',-1)):
++                    raise PatchError('newer unsealed actor working state than paired snapshot; refusing rollback')
++        if type(meta.get('steps')) is not int or meta['steps']<0 or (
++             type(meta.get('critic_steps')) is not int or meta['critic_steps']<0):
++            raise PatchError('invalid paired step counters')
++        ap=list(adapter.trainable_parameters());cp=_critic_params(mixer)
++        if meta.get('critic_count')!=len(cp):raise PatchError('paired critic trainable layout mismatch')
++        keys=set(reader.keys())
++        # Verify the complete checkpoint before touching either optimizer.
++        # A safetensors header alone does not checksum tensor payload bytes.
++        if meta.get('tensor_sha256')!=_tensor_digest({key:reader.get_tensor(key) for key in keys}):
++            raise PatchError('paired checkpoint tensor digest mismatch')
++        a,ak=_validated_params(reader,keys,'a',ap)
++        c,ck=_validated_params(reader,keys,'c',cp)
++        if ak|ck!=keys:raise PatchError('unknown paired checkpoint tensor')
++        # Stage *both* device copies before mutating either model: OOM/transfer
++        # failure must not leave one model restored and the other unchanged.
++        staged=[]
++        for params,optim in ((a,actor_optimizer),(c,mixer.critic_optim)):
++            part=[]
++            for param,value,state in params:
++                placed=value.to(param.device)
++                moments={k:v.clone().to('cpu' if k=='step' else param.device)
++                         for k,v in state.items()}
++                part.append((param,placed,moments))
++            staged.append((part,optim))
++        with adapter.lock,torch.no_grad():
++            for params,optim in staged:
++                optim.state.clear()
++                for param,value,state in params:
++                    param.copy_(value)
++                    param.grad=None
++                    if state:optim.state[param]=state
++            mixer.critic_steps=meta['critic_steps']
++            mixer.cached=None
++            mixer.reuses=0
++    return meta['steps']
++
++
++class AsyncPairedSaver:
++    """At most one async writer, with immutable bounded CPU captures."""
++    def __init__(self):
++        self.task=None
++        self.skipped=0
++        self.disk_ms=0.0
++    async def checkpoint(self,journal,adapter,actor_optimizer,mixer,steps,*,journal_tip=None,force=False):
++        if self.task is not None:
++            if force:await self.task
++            elif not self.task.done():
++                self.skipped+=1
++                return False
++            else:self.task.result()
++        # SQLite connections are thread-affine. Pin the WAL tip on the event
++        # loop BEFORE worker capture; the caller holds inbound_commit_lock.
++        if journal_tip is None:
++            journal_tip=_tip(journal)
++        # Copy under lock off-loop; FS writes never hold adapter.lock.
++        captured=await asyncio.to_thread(capture,journal,adapter,actor_optimizer,mixer,
++                                         steps,journal_tip=journal_tip)
++        async def flush():
++            start=time.monotonic()
++            await asyncio.to_thread(write,captured)
++            self.disk_ms=(time.monotonic()-start)*1000
++        self.task=asyncio.create_task(flush(),name='kagami-paired-v75-writer')
++        return True
++    def check(self):
++        if self.task is not None and self.task.done():self.task.result()
++    async def drain(self):
++        if self.task is not None:await self.task
+--- v74/patchlib/elasticnet.py
++++ v75/patchlib/elasticnet.py
+@@ -1599,7 +1599,45 @@
+     optimizer=new_optimizer()
+     optimizer.zero_grad(set_to_none=True)
+     from .localprogress import restore_working, save_working, snapshot_path, AsyncWorkingSaver
+-    restored_steps=restore_working(journal,adapter,optimizer)
++    from .paired_checkpoint_v75 import AsyncPairedSaver, snapshot_path as paired_path, restore as restore_paired
++    from .hf_mixed_datasets_v68 import source_selected as _v75_has_source
++    # The paired v75 format is local-only. Non-AdamW and disk-backed actor
++    # optimizers need a separately designed atomic moment protocol.
++    _v75_paired_active=bool(_v75_has_source(args,'ppo') and
++        getattr(args,'optimizer','adamw')=='adamw' and
++        not getattr(args,'disk_optimizer_dir',None))
++    if _v75_paired_active and not getattr(args,'critic_state_dir',None):
++        # Durable local value state should not depend on the GUI having
++        # provided this optional path; CLI elastic rooms get a private one.
++        args.critic_state_dir=Path(str(journal.path)+'.critic')
++    args._v75_paired_active=_v75_paired_active
++    paired_saver=AsyncPairedSaver()
++    paired_exists=paired_path(journal).exists()
++    if paired_exists and not _v75_paired_active:
++        raise PatchError('paired v75 checkpoint exists but PPO critic or AdamW paired recovery is disabled')
++    if paired_exists:
++        # All actor + critic tensors are validated together before any apply.
++        # Never fall back to a separately saved Critic on a mismatched WAL tip.
++        from .mixed_learning_v65 import build as _v75_build_mixer
++        args._v75_skip_legacy_critic=True
++        try:
++            pair_mixer=_v75_build_mixer(args)
++            if pair_mixer is None or pair_mixer.critic is None:
++                raise PatchError('paired v75 checkpoint requires a local PPO Critic')
++            pair_mixer._v75_paired=True
++            try:
++                restored_steps=restore_paired(journal,adapter,optimizer,pair_mixer)
++            except BaseException:
++                # Even on a rejected mismatched WAL tip, release HF readers
++                # without publishing an unrelated v66/v69 legacy snapshot.
++                pair_mixer.close()
++                raise
++            args._v65_mixer=pair_mixer
++            args._v65_mixer_adapter=adapter
++        finally:
++            args._v75_skip_legacy_critic=False
++    else:
++        restored_steps=restore_working(journal,adapter,optimizer)
+     working_saver=AsyncWorkingSaver()
+     if restored_steps:
+         print(f'elastic restored unfinished local block: {restored_steps} steps and AdamW state',flush=True)
+@@ -1812,8 +1850,13 @@
+             from .localprogress import _tip
+             async with inbound_commit_lock:
+                 tip=_tip(journal)
+-                await working_saver.checkpoint(journal,adapter,optimizer,0,journal_tip=tip)
+-            last_working_save_ms=working_saver.disk_ms
++                mixer=getattr(args,'_v65_mixer',None)
++                if _v75_paired_active and mixer is not None and mixer.critic is not None:
++                    await paired_saver.checkpoint(journal,adapter,optimizer,mixer,0,journal_tip=tip)
++                    last_working_save_ms=paired_saver.disk_ms
++                else:
++                    await working_saver.checkpoint(journal,adapter,optimizer,0,journal_tip=tip)
++                    last_working_save_ms=working_saver.disk_ms
+         await fanout(wire)
+         record_telemetry(force=True)
+         print(f'elastic local event={emitted}, living={living_count()}, active={active_count()}, bytes={len(wire)}',flush=True)
+@@ -2368,6 +2411,7 @@
+         await inbound_pipeline.drain()
+         await inbound_pipeline.stop()
+         await working_saver.drain()
++        await paired_saver.drain()
+ 
+     def attest_new_epoch(new,proposal):
+         bundle=auto_epoch_candidate.get(new.genesis)
+@@ -2535,6 +2579,7 @@
+             nonlocal_optimizer[0]=optimizer
+             from .localprogress import _tip
+             await working_saver.drain()
++            await paired_saver.drain()
+             await asyncio.to_thread(save_working,journal,adapter,
+                 optimizer,0,journal_tip=_tip(journal))
+             # The verified model already covers the signed journal cut-off.
+@@ -2751,6 +2796,7 @@
+                     generation_compact_vote_task=asyncio.create_task(
+                         compact_vote_worker(*ready),name='kagami-compact-vote')
+             working_saver.check()
++            paired_saver.check()
+             inbound_pipeline.check()
+             if (generation_trainer_ledger if getattr(args,'generation_v2_trainer',False)
+                     else generation_ledger) is not None and auto_epoch_service is None:
+@@ -3294,8 +3340,13 @@
+                 save_started=time.monotonic()
+                 async with inbound_commit_lock:
+                     tip=_tip(journal)
+-                    await working_saver.checkpoint(journal,adapter,optimizer,
+-                                                   local_steps,journal_tip=tip)
++                    mixer=getattr(args,'_v65_mixer',None)
++                    if _v75_paired_active and mixer is not None and mixer.critic is not None:
++                        await paired_saver.checkpoint(journal,adapter,optimizer,mixer,
++                                                     local_steps,journal_tip=tip)
++                    else:
++                        await working_saver.checkpoint(journal,adapter,optimizer,
++                                                       local_steps,journal_tip=tip)
+                 last_working_save_ms=(time.monotonic()-save_started)*1000
+             if local_steps>=publish_target:
+                 await seal_if_needed()
+@@ -3325,8 +3376,16 @@
+         # Clean shutdown: leave a current optimizer snapshot even if the
+         # performance-oriented periodic working-save interval did not hit.
+         from .localprogress import _tip
+-        await asyncio.to_thread(save_working,journal,adapter,optimizer,0,
+-                                journal_tip=_tip(journal))
++        async with inbound_commit_lock:
++            final_tip=_tip(journal)
++            mixer=getattr(args,'_v65_mixer',None)
++            if _v75_paired_active and mixer is not None and mixer.critic is not None:
++                await paired_saver.checkpoint(journal,adapter,optimizer,mixer,0,
++                                              journal_tip=final_tip,force=True)
++                await paired_saver.drain()
++            else:
++                await asyncio.to_thread(save_working,journal,adapter,optimizer,0,
++                                        journal_tip=final_tip)
+         if args.shard_state_manifest and args.shard_store:
+             from .shards import export_state_sharded
+             print(f'CHECKPOINT SAVE START: manifest={args.shard_state_manifest} '
+@@ -3367,6 +3426,10 @@
+             await asyncio.gather(auto_epoch_prepare,return_exceptions=True)
+         if auto_epoch_service is not None:
+             await auto_epoch_service.close()
++        try:
++            await paired_saver.drain()
++        except Exception as exc:
++            log.error('paired Actor/Critic snapshot failed on shutdown: %s',exc)
+         local_critic=getattr(args,'_v65_mixer',None)
+         if local_critic is not None:
+             try:
+--- v74/patchlib/cli.py
++++ v75/patchlib/cli.py
+@@ -503,7 +503,18 @@
+             if previous is None or getattr(previous,'_closed',False) or (old_adapter is not None and old_adapter is not adapter):
+                 if previous is not None:
+                     previous.close()  # epoch switch: discard old-policy PPO rollouts
+-                args._v65_mixer=build_mixer(args)
++                # A new signed generation invalidates the old Actor/Critic
++                # pairing. Do not silently load a pre-v75 standalone Critic
++                # checkpoint (same room id, but stale Actor baseline).
++                skip_legacy=bool(getattr(args,'_v75_paired_active',False) and
++                                 old_adapter is not None and old_adapter is not adapter)
++                if skip_legacy:args._v75_skip_legacy_critic=True
++                try:
++                    args._v65_mixer=build_mixer(args)
++                finally:
++                    if skip_legacy:args._v75_skip_legacy_critic=False
++                if getattr(args,'_v75_paired_active',False) and args._v65_mixer is not None:
++                    args._v65_mixer._v75_paired=True
+             args._v65_mixer_adapter=adapter
+         mixer=getattr(args,'_v65_mixer',None) if mixed else None
+         if mixer is not None and float(args.pt_weight)==0:
+@@ -543,7 +554,7 @@
+                     raise ValueError('nonfinite PPO Critic gradient; refusing optimizer update')
+                 mixer.critic_optim.step()  # critic is local; never part of signed P2P adapter
+                 mixer.critic_steps+=1
+-                if mixer.critic_steps%10==0:
++                if mixer.critic_steps%10==0 and not getattr(mixer,'_v75_paired',False):
+                     mixer.save_critic()
+                 total+=float(ppo_actor.detach())*args.ppo_weight
+                 args._v65_ppo_metrics=metrics
+--- v74/patchlib/mixed_learning_v65.py
++++ v75/patchlib/mixed_learning_v65.py
+@@ -348,11 +348,13 @@
+                 from .hf_critic_state_v69 import snapshot_file, load
+                 if getattr(args,'critic_init',None):
+                     raise MixedLearningError('HF Critic init is the pinned Hub model, not a local v66 checkpoint')
+-                if self._critic_dir and snapshot_file(self._critic_dir).is_file():
++                if (not getattr(args,'_v75_skip_legacy_critic',False) and
++                        self._critic_dir and snapshot_file(self._critic_dir).is_file()):
+                     self.critic_steps=load(snapshot_file(self._critic_dir),self.critic,self.critic_optim,identity=self._critic_identity)
+             else:
+                 from .critic_state_v66 import snapshot_file, load
+-                if self._critic_dir and snapshot_file(self._critic_dir).is_file():
++                if (not getattr(args,'_v75_skip_legacy_critic',False) and
++                        self._critic_dir and snapshot_file(self._critic_dir).is_file()):
+                     self.critic_steps=load(snapshot_file(self._critic_dir),self.critic,self.critic_optim,
+                                            kind=kind,hidden=hidden,identity=self._critic_identity)
+                 elif getattr(args,'critic_init',None):
+@@ -524,7 +526,8 @@
+             model.train(was_training)
+ 
+     def save_critic(self):
+-        if self.critic is not None and getattr(self,'_critic_dir',None):
++        if (self.critic is not None and getattr(self,'_critic_dir',None) and
++                not getattr(self,'_v75_paired',False)):
+             if getattr(self.args,'critic_kind','mlp')=='hf':
+                 from .hf_critic_state_v69 import save
+                 save(self._critic_dir,self.critic,self.critic_optim,
+--- v74/tests/test_paired_checkpoint_v75.py
++++ v75/tests/test_paired_checkpoint_v75.py
+@@ -0,0 +1,191 @@
++"""Crash-boundary checks for v75's *local* paired Actor/Critic snapshot."""
++import asyncio
++import json
++import sqlite3
++from types import SimpleNamespace
++
++import pytest
++import torch
++from safetensors import safe_open
++from safetensors.torch import save_file
++
++from patchlib.core import PatchError
++from patchlib.cli import run_step
++from patchlib.mixed_learning_v65 import MixedObjectiveTrainer
++from patchlib.paired_checkpoint_v75 import (
++    AsyncPairedSaver, capture, restore, write, snapshot_path)
++from test_mixed_learning_v65 import make_args, setup_model, ToyTokenizer, write as jsonl
++
++
++class Journal:
++    def __init__(self,tmp_path):
++        self.path=tmp_path/'journal.sqlite3'
++        self.genesis='g'*64
++        self.db=sqlite3.connect(self.path)
++        self.db.execute('CREATE TABLE events (origin TEXT,seq INTEGER,digest TEXT)')
++        self.db.commit()
++    def count(self):return self.db.execute('SELECT count(*) FROM events').fetchone()[0]
++    def advance(self):
++        n=self.count()+1
++        self.db.execute('INSERT INTO events VALUES(?,?,?)',('peer',n,'f'*64))
++        self.db.commit()
++    def close(self):self.db.close()
++
++
++def setup(tmp_path):
++    ppo=jsonl(tmp_path,'ppo.jsonl',[{'prompt':'test','reference':'x'}])
++    args=make_args(tmp_path,ppo_jsonl=ppo,critic_state_dir=str(tmp_path/'critic'),
++                   critic_kind='mlp',critic_hidden=16)
++    model,adapter,optim,batch=setup_model()
++    mix=MixedObjectiveTrainer(args,ToyTokenizer());mix._v75_paired=True
++    args._v65_mixer=mix;args._v65_mixer_adapter=adapter
++    optim.zero_grad(set_to_none=True)
++    run_step(model,adapter,optim,batch,args)
++    optim.step();optim.zero_grad(set_to_none=True)
++    journal=Journal(tmp_path)
++    return model,adapter,optim,mix,journal
++
++
++def test_atomic_single_file_round_trip_preserves_both_optimizers(tmp_path):
++    model,a,o,m,j=setup(tmp_path)
++    before_a=[p.detach().clone() for p in a.trainable_parameters()]
++    before_c=[p.detach().clone() for p in m.critic.parameters()]
++    steps=m.critic_steps
++    try:
++        write(capture(j,a,o,m,1))
++        assert snapshot_path(j).is_file()
++        with torch.no_grad():
++            for p in a.trainable_parameters():p.zero_()
++            for p in m.critic.parameters():p.zero_()
++        o.state.clear();m.critic_optim.state.clear();m.critic_steps=0
++        assert restore(j,a,o,m)==1
++        assert m.critic_steps==steps==1
++        assert all(torch.equal(x,y) for x,y in zip(before_a,a.trainable_parameters()))
++        assert all(torch.equal(x,y) for x,y in zip(before_c,m.critic.parameters()))
++        assert len(o.state)>0 and len(m.critic_optim.state)>0
++    finally:m.close();j.close()
++
++
++def test_signed_journal_ahead_fails_closed_without_mutation(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,0))
++        j.advance()
++        saved=[p.detach().clone() for p in a.trainable_parameters()]
++        with pytest.raises(PatchError,match='does not match signed journal'):
++            restore(j,a,o,m)
++        assert all(torch.equal(x,y) for x,y in zip(saved,a.trainable_parameters()))
++    finally:m.close();j.close()
++
++
++def test_metadata_tensor_corruption_fails_before_either_model_mutates(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,0))
++        path=snapshot_path(j)
++        with safe_open(str(path),framework='pt',device='cpu') as f:
++            meta=f.metadata();data={k:f.get_tensor(k) for k in f.keys()}
++        bad=next(k for k in data if k.startswith('c.p.'))
++        data[bad]=torch.zeros(1) # wrong shape / dtype
++        save_file(data,str(path),metadata=meta)
++        a_before=[p.detach().clone() for p in a.trainable_parameters()]
++        c_before=[p.detach().clone() for p in m.critic.parameters()]
++        with pytest.raises(PatchError,match='digest mismatch|layout/values'):
++            restore(j,a,o,m)
++        assert all(torch.equal(x,y) for x,y in zip(a_before,a.trainable_parameters()))
++        assert all(torch.equal(x,y) for x,y in zip(c_before,m.critic.parameters()))
++    finally:m.close();j.close()
++
++
++def test_failed_publication_keeps_previous_pair(tmp_path,monkeypatch):
++    from patchlib import paired_checkpoint_v75 as paired
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,0));before=snapshot_path(j).read_bytes()
++        def fail(*a,**kw):raise OSError('disk full')
++        monkeypatch.setattr(paired.os,'replace',fail)
++        with pytest.raises(OSError,match='disk full'):write(capture(j,a,o,m,0))
++        assert snapshot_path(j).read_bytes()==before
++    finally:m.close();j.close()
++
++
++def test_async_writer_immutable_capture_and_bounded_tasks(tmp_path,monkeypatch):
++    import time
++    from patchlib import paired_checkpoint_v75 as paired
++    _,a,o,m,j=setup(tmp_path)
++    real=paired.write
++    def slow(cap):time.sleep(.06);return real(cap)
++    monkeypatch.setattr(paired,'write',slow)
++    async def runner():
++        saver=AsyncPairedSaver()
++        assert await saver.checkpoint(j,a,o,m,1)
++        assert not await saver.checkpoint(j,a,o,m,2)
++        # Background fsync doesn't hold a live parameter reference.
++        with torch.no_grad():
++            for p in a.trainable_parameters():p.add_(7.)
++        await saver.drain()
++        assert saver.skipped==1
++        assert snapshot_path(j).exists()
++        with safe_open(str(snapshot_path(j)),framework='pt',device='cpu') as f:
++            assert not torch.equal(f.get_tensor('a.p.0'),list(a.trainable_parameters())[0].detach().cpu())
++        assert await saver.checkpoint(j,a,o,m,3,force=True)
++        await saver.drain()
++        assert restore(j,a,o,m)==3
++    try:asyncio.run(runner())
++    finally:m.close();j.close()
++
++
++def test_genesis_and_critic_identity_and_corrupt_tip_fail_closed(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,0))
++        old=j.genesis;j.genesis='other'
++        with pytest.raises(PatchError,match='does not match signed journal'):restore(j,a,o,m)
++        j.genesis=old
++        m._critic_identity='another-room'
++        with pytest.raises(PatchError,match='configuration mismatch'):restore(j,a,o,m)
++    finally:m.close();j.close()
++
++
++def test_finite_tensor_payload_tamper_detected(tmp_path):
++    _,a,o,m,j=setup(tmp_path)
++    try:
++        write(capture(j,a,o,m,0))
++        path=snapshot_path(j)
++        with safe_open(str(path),framework='pt',device='cpu') as f:
++            meta=f.metadata();data={k:f.get_tensor(k) for k in f.keys()}
++        key=next(k for k in data if k.startswith('a.p.'))
++        data[key]=data[key]+1.0  # finite and correct shape; no header-only check catches it
++        save_file(data,str(path),metadata=meta)
++        with pytest.raises(PatchError,match='tensor digest mismatch'):
++            restore(j,a,o,m)
++    finally:m.close();j.close()
++
++
++def test_new_signed_generation_never_loads_stale_independent_critic(tmp_path,monkeypatch):
++    from patchlib import mixed_learning_v65 as mixed
++    from patchlib.critic_state_v66 import snapshot_file
++    from patchlib import cli
++    _, old_adapter, _, old_mixer, old_journal=setup(tmp_path)
++    try:
++        # An older standalone value checkpoint should never be silently loaded
++        # when a v75 paired room switches to a distinct signed generation.
++        old_mixer._v75_paired=False
++        old_mixer.save_critic()
++        old_mixer._v75_paired=True
++        assert snapshot_file(old_mixer._critic_dir).exists()
++        args=old_mixer.args
++        model,new_adapter,opt,batch=setup_model()
++        args._v75_paired_active=True
++        args._v65_mixer=old_mixer
++        args._v65_mixer_adapter=old_adapter
++        monkeypatch.setattr(mixed,'build',lambda a:MixedObjectiveTrainer(a,ToyTokenizer()))
++        cli.run_step(model,new_adapter,opt,batch,args)
++        newer=args._v65_mixer
++        assert newer is not old_mixer
++        assert newer._v75_paired
++        assert newer.critic_steps==1  # not restored old 1 and incremented to 2
++        assert not getattr(args,'_v75_skip_legacy_critic',False)
++        newer.close()
++    finally:
++        old_mixer.close();old_journal.close()

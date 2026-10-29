@@ -52,24 +52,32 @@ async def _real_tcp_sixteen_peer_join_rejoin():
             for i,peer in enumerate(peers):
                 ws=await websockets.connect(server.url)
                 clients.append(ws)
-                msg={'type':'group-join','room':room,'peer':peer}
+                msg={'type':'group-join','room':room,'peer':peer,
+                     'topology_v2':True,'topology_degree':8}
                 if i==0:msg['manifest']=mani
                 await ws.send(json.dumps(msg))
                 response=json.loads(await asyncio.wait_for(ws.recv(),3))
                 assert response['type']=='group-members'
-                assert response['peers']==peers[:i]
+                assert response['topology']=='bounded-v2'
+                assert set(response['peers'])==neighbors(peer,peers[:i+1])
                 for old in clients[:-1]:
-                    notice=json.loads(await asyncio.wait_for(old.recv(),3))
-                    assert notice=={'type':'group-peer-joined','peer':peer}
+                    old_peer=peers[clients.index(old)]
+                    if neighbors(old_peer,peers[:i])!=neighbors(old_peer,peers[:i+1]):
+                        notice=json.loads(await asyncio.wait_for(old.recv(),3))
+                        assert notice['type']=='group-neighbors'
+                        assert set(notice['peers'])==neighbors(old_peer,peers[:i+1])
             await clients[6].close()
             for i,old in enumerate(clients):
                 if i!=6:
-                    assert json.loads(await asyncio.wait_for(old.recv(),3))=={
-                        'type':'group-peer-left','peer':peers[6]}
+                    if neighbors(peers[i],peers)!=neighbors(peers[i],[p for j,p in enumerate(peers) if j!=6]):
+                        notice=json.loads(await asyncio.wait_for(old.recv(),3))
+                        assert notice['type']=='group-neighbors'
+                        assert set(notice['peers'])==neighbors(peers[i],[p for j,p in enumerate(peers) if j!=6])
             clients[6]=await websockets.connect(server.url)
-            await clients[6].send(json.dumps({'type':'group-join','room':room,'peer':peers[6]}))
+            await clients[6].send(json.dumps({'type':'group-join','room':room,'peer':peers[6],
+                      'topology_v2':True,'topology_degree':8}))
             response=json.loads(await asyncio.wait_for(clients[6].recv(),3))
-            assert set(response['peers'])==set(peers)-{peers[6]}
+            assert set(response['peers'])==neighbors(peers[6],peers)
             assert server.stats['group_joins']==17
         finally:
             for conn in clients:
@@ -84,10 +92,10 @@ def test_gui_native_emerald_caret_and_focus():
     html=compose_html()
     assert 'caret-color: #34d399 !important' in html
     assert '-webkit-text-fill-color: #ecfff3' in html
-    assert 'input:focus,textarea:focus,select:focus' in html
+    assert 'input:focus,textarea:focus,select:focus' in html.replace(' ', '')
     assert 'cursor: text' in html
     assert 'textarea::selection' in html
-    assert 'Chicago' in html and 'Courier' in html
+    assert 'Myriad' in html and 'Noto Sans JP' in html
 
 
 async def _worker_status_parser(tmp_path):

@@ -1,0 +1,699 @@
+--- a/patchlib/mixed_learning_v65.py
++++ b/patchlib/mixed_learning_v65.py
+@@ -63,6 +63,10 @@
+         generated['critic']={'kind':getattr(args,'critic_kind','mlp'),
+                              'hidden':int(getattr(args,'critic_hidden',32)),
+                              'lr':float(getattr(args,'critic_lr',1e-3))}
++        if getattr(args,'critic_kind','mlp')=='hf':
++            from .hf_value_critic_v69 import critic_spec
++            generated['version']='pt-sft-clipped-ppo-v69'
++            generated['critic']['hf']=critic_spec(args)
+     if not getattr(args,'mix_policy',None):
+         return generated
+     path=Path(args.mix_policy)
+@@ -106,8 +110,11 @@
+         reward_spec(args)
+         if getattr(args,'reward_model_device','cpu') not in ('cpu','cuda','mps'):
+             raise MixedLearningError('Invalid reward model device')
+-    if getattr(args,'critic_kind','mlp') not in ('mlp','linear'):
+-        raise MixedLearningError('critic_kind must be mlp or linear')
++    if getattr(args,'critic_kind','mlp') not in ('mlp','linear','hf'):
++        raise MixedLearningError('critic_kind must be mlp, linear or hf')
++    if getattr(args,'critic_kind','mlp')=='hf':
++        from .hf_value_critic_v69 import critic_spec
++        critic_spec(args)
+     if type(getattr(args,'critic_hidden',32)) is not int or not 8<=getattr(args,'critic_hidden',32)<=512:
+         raise MixedLearningError('critic_hidden must be 8..512')
+     value_lr=float(getattr(args,'critic_lr',1e-3))
+@@ -244,17 +251,30 @@
+         if self.ppo:
+             kind=getattr(args,'critic_kind','mlp')
+             hidden=int(getattr(args,'critic_hidden',32))
+-            self.critic=LocalValueHead(kind,hidden)
+-            self.critic_optim=torch.optim.AdamW(self.critic.parameters(),lr=float(getattr(args,'critic_lr',1e-3)))
++            if kind=='hf':
++                from .hf_value_critic_v69 import HFValueCritic
++                self.critic=HFValueCritic(args)
++                critic_params=self.critic.trainable_parameters()
++            else:
++                self.critic=LocalValueHead(kind,hidden)
++                critic_params=list(self.critic.parameters())
++            self.critic_optim=torch.optim.AdamW(critic_params,lr=float(getattr(args,'critic_lr',1e-3)))
+             self._critic_dir=getattr(args,'critic_state_dir',None)
+             self._critic_identity=str(getattr(args,'room_id',None) or getattr(args,'model','local'))
+-            from .critic_state_v66 import snapshot_file, load
+-            if self._critic_dir and snapshot_file(self._critic_dir).is_file():
+-                self.critic_steps=load(snapshot_file(self._critic_dir),self.critic,self.critic_optim,
+-                                       kind=kind,hidden=hidden,identity=self._critic_identity)
+-            elif getattr(args,'critic_init',None):
+-                load(args.critic_init,self.critic,self.critic_optim,kind=kind,hidden=hidden,
+-                     identity=self._critic_identity,allow_initial=True)
++            if kind=='hf':
++                from .hf_critic_state_v69 import snapshot_file, load
++                if getattr(args,'critic_init',None):
++                    raise MixedLearningError('HF Critic init is the pinned Hub model, not a local v66 checkpoint')
++                if self._critic_dir and snapshot_file(self._critic_dir).is_file():
++                    self.critic_steps=load(snapshot_file(self._critic_dir),self.critic,self.critic_optim,identity=self._critic_identity)
++            else:
++                from .critic_state_v66 import snapshot_file, load
++                if self._critic_dir and snapshot_file(self._critic_dir).is_file():
++                    self.critic_steps=load(snapshot_file(self._critic_dir),self.critic,self.critic_optim,
++                                           kind=kind,hidden=hidden,identity=self._critic_identity)
++                elif getattr(args,'critic_init',None):
++                    load(args.critic_init,self.critic,self.critic_optim,kind=kind,hidden=hidden,
++                         identity=self._critic_identity,allow_initial=True)
+ 
+     def sft_loss(self,model,device):
+         row=self.sft.next()
+@@ -301,21 +321,31 @@
+                     lp=F.log_softmax(final_logits[:,0],dim=-1)
+                     sample=torch.multinomial(lp.exp(),1)
+                     token=int(sample.item());chosen.append(token)
+-                    old_lp.append(lp[0,token]);features.append(_features(final_logits,offset=ids.shape[1]-1)[0,0])
++                    old_lp.append(lp[0,token])
++                    if getattr(self.args,'critic_kind','mlp')!='hf':
++                        features.append(_features(final_logits,offset=ids.shape[1]-1)[0,0])
+                     ids=torch.cat((ids,sample),dim=1)
+                     if eos is not None and token==int(eos):
+                         break
+                 if not chosen:
+                     raise MixedLearningError('PPO generation returned no tokens')
+-                feat=torch.stack(features)
+-                self.critic.to(device)
++                feat=(torch.stack(features) if features else None)
++                if getattr(self.args,'critic_kind','mlp')!='hf':
++                    self.critic.to(device)
+                 # AdamW moments restored from safe CPU checkpoint must follow
+                 # their parameter tensors when an accelerator is selected.
+                 for param,state in self.critic_optim.state.items():
+                     for key in ('exp_avg','exp_avg_sq'):
+                         if key in state:state[key]=state[key].to(param.device)
+                 self.critic_optim.zero_grad(set_to_none=True)
+-                old_values=self.critic(feat).detach()
++                prefixes=None
++                if getattr(self.args,'critic_kind','mlp')=='hf':
++                    # V(s_t) is conditioned on the prompt plus exactly t sampled tokens.
++                    # The Critic uses its own tokenizer; token IDs cannot be shared.
++                    prefixes=[self.tok.decode(prompt+chosen[:i],skip_special_tokens=False) for i in range(len(chosen))]
++                    old_values=self.critic.values(prefixes,actor_device=device).detach()
++                else:
++                    old_values=self.critic(feat).detach()
+                 # Observable, deterministic reference-based reward. Never ask
+                 # this model to grade its own response.
+                 if is_hf:
+@@ -343,7 +373,8 @@
+                 adv=adv.clamp(-10,10)
+                 return {'ids':ids.detach(),'start':len(prompt),'tokens':torch.tensor(chosen,device=device),
+                         'old_lp':torch.stack(old_lp).detach(), 'old_values':old_values.detach(),
+-                        'adv':adv.detach(),'returns':returns.detach(), 'reward':reward}
++                        'adv':adv.detach(),'returns':returns.detach(), 'reward':reward,
++                        'critic_prefixes':prefixes}
+         finally:
+             model.train(was_training)
+ 
+@@ -374,8 +405,11 @@
+             actor_loss=pg_loss+self.args.ppo_kl_coef*approx_kl
+             # A small *local-only* auxiliary value function: trained for GAE,
+             # not mixed into signatures, and not a model-as-judge.
+-            features=_features(logits,offset=start-1)[0]
+-            values=self.critic(features)
++            if getattr(self.args,'critic_kind','mlp')=='hf':
++                values=self.critic.values(rollout['critic_prefixes'],actor_device=device)
++            else:
++                features=_features(logits,offset=start-1)[0]
++                values=self.critic(features)
+             previous=rollout['old_values']
+             clipped_values=previous+(values-previous).clamp(-self.args.ppo_clip,self.args.ppo_clip)
+             value_loss=.5*torch.maximum((values-rollout['returns']).square(),
+@@ -392,11 +426,16 @@
+ 
+     def save_critic(self):
+         if self.critic is not None and getattr(self,'_critic_dir',None):
+-            from .critic_state_v66 import save
+-            save(self._critic_dir,self.critic,self.critic_optim,
+-                 kind=getattr(self.args,'critic_kind','mlp'),
+-                 hidden=int(getattr(self.args,'critic_hidden',32)),
+-                 identity=self._critic_identity,steps=self.critic_steps)
++            if getattr(self.args,'critic_kind','mlp')=='hf':
++                from .hf_critic_state_v69 import save
++                save(self._critic_dir,self.critic,self.critic_optim,
++                     identity=self._critic_identity,steps=self.critic_steps)
++            else:
++                from .critic_state_v66 import save
++                save(self._critic_dir,self.critic,self.critic_optim,
++                     kind=getattr(self.args,'critic_kind','mlp'),
++                     hidden=int(getattr(self.args,'critic_hidden',32)),
++                     identity=self._critic_identity,steps=self.critic_steps)
+ 
+     def close(self):
+         if self.critic is not None:
+--- a/patchlib/mix_gui_v66.py
++++ b/patchlib/mix_gui_v66.py
+@@ -11,8 +11,8 @@
+ from types import SimpleNamespace
+ import secrets
+ 
+-FIELDS=('sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
+-DEFAULT={'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
++FIELDS=('sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'critic_hf_repo', 'critic_hf_revision', 'critic_hf_loader', 'critic_hf_device', 'critic_hf_max_length', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
++DEFAULT={'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'critic_hf_repo': '', 'critic_hf_revision': '', 'critic_hf_loader': 'sequence_classification', 'critic_hf_device': 'cpu', 'critic_hf_max_length': 512, 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
+ 
+ 
+ def _path(value, *, ext, role=None, hf_reward=False):
+@@ -57,15 +57,19 @@
+     from .hf_mixed_datasets_v68 import source_spec, source_selected
+     source_spec(SimpleNamespace(**values),'sft');source_spec(SimpleNamespace(**values),'ppo')
+     values['critic_init']=_path(values['critic_init'],ext='.safetensors')
++    if values['critic_kind']=='hf':
++        from .hf_value_critic_v69 import critic_spec
++        critic_spec(SimpleNamespace(**values))
++        if values['critic_init']:raise ValueError('Hub Critic loads pretrained weights, not a local Critic initial file')
+     for key in ('pt_weight','sft_weight','ppo_weight','ppo_clip','ppo_kl_coef',
+                 'ppo_value_coef','ppo_gamma','ppo_gae_lambda','critic_lr','reward_model_scale'):
+         raw=values[key]
+         if type(raw) not in (int,float) or not math.isfinite(float(raw)):
+             raise ValueError(key+' must be a finite number')
+         values[key]=float(raw)
+-    for key in ('critic_hidden','ppo_max_tokens','ppo_reuse','reward_model_index','reward_model_max_length'):
++    for key in ('critic_hidden','critic_hf_max_length','ppo_max_tokens','ppo_reuse','reward_model_index','reward_model_max_length'):
+         if type(values[key]) is not int:raise ValueError(key+' must be an integer')
+-    if values['critic_kind'] not in ('mlp','linear') or values['ppo_reward'] not in ('token_match','exact','hf_model'):
++    if values['critic_kind'] not in ('mlp','linear','hf') or values['ppo_reward'] not in ('token_match','exact','hf_model'):
+         raise ValueError('Unsupported critic or PPO reward type')
+     if values['ppo_reward']=='hf_model':
+         from .reward_model_v67 import reward_spec
+@@ -104,6 +108,13 @@
+             '--critic-hidden',str(values['critic_hidden']),
+             '--critic-lr',str(values['critic_lr']),
+             '--critic-state-dir',str(state_dir)]
++    if values['critic_kind']=='hf':
++        for key,flag in (('critic_hf_repo','--critic-hf-repo'),
++                         ('critic_hf_revision','--critic-hf-revision'),
++                         ('critic_hf_loader','--critic-hf-loader'),
++                         ('critic_hf_device','--critic-hf-device'),
++                         ('critic_hf_max_length','--critic-hf-max-length')):
++            result.extend([flag,str(values[key])])
+     if values['ppo_reward']=='hf_model':
+         for key,flag in (('reward_model_id','--reward-model-id'),
+                 ('reward_model_revision','--reward-model-revision'),
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -1033,9 +1033,14 @@
+     p.add_argument('--ppo-gae-lambda',type=float,default=.95)
+     p.add_argument('--ppo-max-tokens',type=int,default=8,help='Max autoregressive PPO rollout tokens per mixed step')
+     p.add_argument('--ppo-reuse',type=int,default=2,help='Max clipped PPO updates per sampled trajectory')
+-    p.add_argument('--critic-kind',choices=('mlp','linear'),default='mlp',help='Local PPO value critic structure')
++    p.add_argument('--critic-kind',choices=('mlp','linear','hf'),default='mlp',help='PPO value critic: local MLP/Linear or pinned Hugging Face scalar value head')
+     p.add_argument('--critic-hidden',type=int,default=32,help='Local value critic hidden width (8..512)')
+     p.add_argument('--critic-lr',type=float,default=1e-3,help='Local PPO value critic learning rate')
++    p.add_argument('--critic-hf-repo',default='',help='Pinned HF scalar value-model repo (organization/name)')
++    p.add_argument('--critic-hf-revision',default='',help='Immutable 40-hex HF value critic revision')
++    p.add_argument('--critic-hf-loader',choices=('sequence_classification','token_classification'),default='sequence_classification')
++    p.add_argument('--critic-hf-device',choices=('cpu','cuda','mps'),default='cpu')
++    p.add_argument('--critic-hf-max-length',type=int,default=512)
+     p.add_argument('--critic-init',type=Path,help='Optional Kagami safetensors value-critic initial weights')
+     p.add_argument('--critic-state-dir',type=Path,help='Private local value-critic optimizer+weights directory')
+     p.add_argument('--ppo-reward',choices=('token_match','exact','hf_model'),default='token_match',
+--- a/web/desktop_webview.html
++++ b/web/desktop_webview.html
+@@ -39,7 +39,7 @@
+     <label><span>Training objectives</span><select id="mixEnabled"><option value="off">PT only (legacy)</option><option value="on">Concurrent PT / SFT / PPO</option></select></label>
+     <div id="mixFields" hidden>
+       <div class="mixed-segment"><strong>01 · PRETRAINING</strong><p class="footnote">PT uses the immutable room's attached HF datasets. Create a new room to change them.</p><div class="mixed-info" id="mixPtDataset">—</div><label><span>PT loss weight</span><input id="mixPtWeight" type="number" min="0" max="100" step="0.1" value="1"></label></div>
+-      <div class="mixed-segment"><strong>02 · SUPERVISED FINE-TUNING</strong><p class="footnote">Choose local JSONL or a pinned Hugging Face Hub dataset. Map prompt/response columns; selections stay local.</p><label><span>SFT data source</span><select id="mixSftSource"><option value="local">Local JSONL</option><option value="hf">Hugging Face Hub</option></select></label>
++      <div class="mixed-segment"><strong>02 · SUPERVISED FINE-TUNING</strong><p class="footnote">Search Hugging Face Hub and select the SFT dataset. Column mapping is available when needed. Local JSONL remains an optional fallback.</p><label><span>SFT data source</span><select id="mixSftSource"><option value="hf">Hugging Face Hub (recommended)</option><option value="local">Advanced · local JSONL</option></select></label>
+  <div id="mixSftHub" class="fieldgrid" hidden>
+  <label class="wide"><span>Hub dataset repository</span><div class="mixed-path"><input id="mixSftHfRepo" placeholder="organization/dataset" spellcheck="false"><button type="button" id="mixSftHfSearch">Search Hub</button></div><select id="mixSftHfResults"><option value="">Search to see datasets…</option></select></label>
+  <label class="wide"><span>Pinned commit SHA</span><div class="mixed-path"><input id="mixSftHfRevision" placeholder="40 hex commit SHA" spellcheck="false"><button type="button" id="mixSftHfInspect">Pin + inspect</button></div></label>
+@@ -49,7 +49,7 @@
+  <label><span>Response column</span><input id="mixSftHfOther" value="response"></label>
+  <small class="wide muted" id="mixSftHfStatus">Immutable revision required. Stream only the selected split; no full dataset staging.</small>
+  </div><label id="mixSftLocal"><span>SFT dataset (.jsonl)</span><div class="mixed-path"><input id="mixSftPath" placeholder="/path/to/sft.jsonl" spellcheck="false"><button type="button" id="pickMixSft">Browse</button></div></label><label><span>SFT loss weight</span><input id="mixSftWeight" type="number" min="0" max="100" step="0.1" value="1"></label></div>
+-      <div class="mixed-segment"><strong>03 · PPO</strong><p class="footnote">Choose local JSONL or a pinned Hub dataset. Map prompt/reference columns; reference is optional with an HF Reward Model.</p><label><span>PPO data source</span><select id="mixPpoSource"><option value="local">Local JSONL</option><option value="hf">Hugging Face Hub</option></select></label>
++      <div class="mixed-segment"><strong>03 · PPO</strong><p class="footnote">Search Hugging Face Hub and select the PPO dataset. Reference is optional with an external Reward Model.</p><label><span>PPO data source</span><select id="mixPpoSource"><option value="hf">Hugging Face Hub (recommended)</option><option value="local">Advanced · local JSONL</option></select></label>
+  <div id="mixPpoHub" class="fieldgrid" hidden>
+  <label class="wide"><span>Hub dataset repository</span><div class="mixed-path"><input id="mixPpoHfRepo" placeholder="organization/dataset" spellcheck="false"><button type="button" id="mixPpoHfSearch">Search Hub</button></div><select id="mixPpoHfResults"><option value="">Search to see datasets…</option></select></label>
+  <label class="wide"><span>Pinned commit SHA</span><div class="mixed-path"><input id="mixPpoHfRevision" placeholder="40 hex commit SHA" spellcheck="false"><button type="button" id="mixPpoHfInspect">Pin + inspect</button></div></label>
+@@ -70,7 +70,7 @@
+       <label><span>Score index</span><input id="mixRewardIndex" type="number" value="0" min="0" max="65535"></label>
+       <label><span>Reward multiplier</span><input id="mixRewardScale" type="number" value="1" min="0.001" max="100" step="0.1"></label>
+       <label><span>Max input tokens</span><input id="mixRewardMaxLength" type="number" value="512" min="16" max="8192"></label></div></div>
+-      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Separate local value estimator for PPO/GAE. This is not a reward judge or part of signed model updates.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><label><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">Critic weights and AdamW state are saved in the selected room's private local storage and reused after restart.</p></div>
++      <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Separate local value estimator for PPO/GAE. This is not a reward judge or part of signed model updates.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option><option value="hf">Hugging Face · pretrained Value Critic</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><div class="fieldgrid" id="mixCriticHub" hidden><label class="wide"><span>Hugging Face Value Critic</span><div class="mixed-path"><input id="mixCriticHfRepo" placeholder="organization/pretrained-scalar-value-model" spellcheck="false"><button type="button" id="mixCriticSearch">Search Hub</button></div><select id="mixCriticSearchResults" aria-label="HF Critic model search"><option value="">Search Hub for a compatible scalar value model…</option></select></label><label class="wide"><span>Immutable commit SHA</span><div class="mixed-path"><input id="mixCriticHfRevision" placeholder="40 hexadecimal characters"><button type="button" id="mixCriticPin">Pin current commit</button></div></label><label><span>Critic model type</span><select id="mixCriticHfLoader"><option value="sequence_classification">Scalar sequence classification</option><option value="token_classification">Scalar token classification</option></select></label><label><span>Critic device</span><select id="mixCriticHfDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label><label><span>Maximum Critic tokens</span><input id="mixCriticHfMaxLength" type="number" value="512" min="16" max="8192"></label><p class="footnote wide">Requires a checkpoint with an already-trained scalar value head. The backbone stays frozen; the value head learns locally. PPO state prefixes are retokenized for this Critic. The model may be substantially slower than the small local Critic.</p></div><label id="mixCriticLocalInit"><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">Critic weights and AdamW state are saved in the selected room's private local storage and reused after restart.</p></div>
+       <div id="mixedConfigStatus" class="footnote" role="status">These settings apply when launching a new worker; changing a room's pinned objective protocol requires a new room.</div>
+     </div>
+   </div>
+--- a/web/desktop_webview.js
++++ b/web/desktop_webview.js
+@@ -270,7 +270,7 @@
+ $('searchDatasets').addEventListener('click',safe('Datasets',searchDatasets));$('datasetQuery').addEventListener('keydown',e=>{if(e.key==='Enter')void safe('Datasets',searchDatasets)();});$('datasetPrev').addEventListener('click',()=>{datasetsPage=Math.max(0,datasetsPage-1);drawHub();});$('datasetNext').addEventListener('click',()=>{datasetsPage++;drawHub();});
+ // Local paths are per-peer and must never appear in a public room manifest.
+ let mixedPinnedPolicy=null;
+-const mixedIds={sft_hf_repo:'mixSftHfRepo',sft_hf_revision:'mixSftHfRevision',sft_hf_config:'mixSftHfConfig',sft_hf_split:'mixSftHfSplit',sft_hf_prompt_column:'mixSftHfPrompt',sft_hf_response_column:'mixSftHfOther',ppo_hf_repo:'mixPpoHfRepo',ppo_hf_revision:'mixPpoHfRevision',ppo_hf_config:'mixPpoHfConfig',ppo_hf_split:'mixPpoHfSplit',ppo_hf_prompt_column:'mixPpoHfPrompt',ppo_hf_reference_column:'mixPpoHfOther',sft_jsonl:'mixSftPath',ppo_jsonl:'mixPpoPath',critic_init:'mixCriticInit',
++const mixedIds={sft_hf_repo:'mixSftHfRepo',sft_hf_revision:'mixSftHfRevision',sft_hf_config:'mixSftHfConfig',sft_hf_split:'mixSftHfSplit',sft_hf_prompt_column:'mixSftHfPrompt',sft_hf_response_column:'mixSftHfOther',ppo_hf_repo:'mixPpoHfRepo',ppo_hf_revision:'mixPpoHfRevision',ppo_hf_config:'mixPpoHfConfig',ppo_hf_split:'mixPpoHfSplit',ppo_hf_prompt_column:'mixPpoHfPrompt',ppo_hf_reference_column:'mixPpoHfOther',sft_jsonl:'mixSftPath',ppo_jsonl:'mixPpoPath',critic_init:'mixCriticInit',critic_hf_repo:'mixCriticHfRepo',critic_hf_revision:'mixCriticHfRevision',critic_hf_loader:'mixCriticHfLoader',critic_hf_device:'mixCriticHfDevice',critic_hf_max_length:'mixCriticHfMaxLength',
+   pt_weight:'mixPtWeight',sft_weight:'mixSftWeight',ppo_weight:'mixPpoWeight',
+   ppo_clip:'mixPpoClip',ppo_kl_coef:'mixPpoKl',ppo_value_coef:'mixValueCoef',
+   ppo_gamma:'mixGamma',ppo_gae_lambda:'mixGaeLambda',ppo_max_tokens:'mixPpoTokens',
+@@ -282,9 +282,9 @@
+   critic_hidden:'mixCriticHidden',critic_lr:'mixCriticLr'};
+ const mixedNumeric=new Set(['pt_weight','sft_weight','ppo_weight','ppo_clip','ppo_kl_coef',
+   'ppo_value_coef','ppo_gamma','ppo_gae_lambda','ppo_max_tokens','ppo_reuse',
+-  'critic_hidden','critic_lr','reward_model_index','reward_model_scale','reward_model_max_length']);
+-const mixedInt=new Set(['ppo_max_tokens','ppo_reuse','critic_hidden','reward_model_index','reward_model_max_length']);
+-function syncMixed(){for(const x of ['Sft','Ppo']){const hf=get('mix'+x+'Source')==='hf';$('mix'+x+'Hub').hidden=!hf;$('mix'+x+'Local').hidden=hf;}const on=get('mixEnabled')==='on';$('mixFields').hidden=!on;const k=get('mixCriticKind');$('mixCriticHidden').disabled=k==='linear';
++  'critic_hidden','critic_lr','critic_hf_max_length','reward_model_index','reward_model_scale','reward_model_max_length']);
++const mixedInt=new Set(['ppo_max_tokens','ppo_reuse','critic_hidden','critic_hf_max_length','reward_model_index','reward_model_max_length']);
++function syncMixed(){for(const x of ['Sft','Ppo']){const hf=get('mix'+x+'Source')==='hf';$('mix'+x+'Hub').hidden=!hf;$('mix'+x+'Local').hidden=hf;}const on=get('mixEnabled')==='on';$('mixFields').hidden=!on;const k=get('mixCriticKind');$('mixCriticHidden').disabled=k!=='mlp';$('mixCriticHub').hidden=k!=='hf';$('mixCriticLocalInit').hidden=k==='hf';
+   $('mixRewardFields').hidden=get('mixPpoReward')!=='hf_model';setText('mixPtDataset',sources.map(x=>x.repo+' ['+x.split+']').join(', ')||'No PT dataset');}
+ function mixedPayload(){
+  const enabled=get('mixEnabled')==='on';if(!enabled)return {enabled:false};
+@@ -307,10 +307,10 @@
+     ppo_kl_coef:.02,ppo_value_coef:.5,ppo_gamma:.99,ppo_gae_lambda:.95,
+     ppo_max_tokens:8,ppo_reuse:2,ppo_reward:'token_match',
+     reward_model_id:'',reward_model_revision:'',reward_model_device:'cpu',reward_model_loader:'sequence_classification',
+-    reward_model_output:'logits',reward_model_format:'plain',reward_model_index:0,reward_model_scale:1,reward_model_max_length:512,critic_kind:'mlp',critic_hidden:32,critic_lr:.001};
++    reward_model_output:'logits',reward_model_format:'plain',reward_model_index:0,reward_model_scale:1,reward_model_max_length:512,critic_kind:'mlp',critic_hidden:32,critic_lr:.001,critic_hf_repo:'',critic_hf_revision:'',critic_hf_loader:'sequence_classification',critic_hf_device:'cpu',critic_hf_max_length:512};
+   const hfDefaults={sft_hf_split:'train',sft_hf_prompt_column:'prompt',sft_hf_response_column:'response',ppo_hf_split:'train',ppo_hf_prompt_column:'prompt',ppo_hf_reference_column:'reference'};
+   $(id).value=value??defaults[field]??hfDefaults[field]??'';
+- }for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){$('mix'+tag+'Source').value=data?.[role+'_hf_repo']?'hf':'local';}syncMixed();}
++ }for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){$('mix'+tag+'Source').value=data?.[role+'_hf_repo']?'hf':data?.[role+'_jsonl']?'local':'hf';}syncMixed();}
+ async function reloadMixed(room){
+  const data=await api('mixedSettings',{room});mixedPinnedPolicy=data.pinned_policy||null;
+  if(mixedPinnedPolicy&&!data.enabled){
+@@ -327,7 +327,7 @@
+      data.reward_model_output=p.reward_model.output;data.reward_model_loader=p.reward_model.loader;data.reward_model_format=p.reward_model.format;data.reward_model_index=p.reward_model.index;
+      data.reward_model_scale=p.reward_model.scale;data.reward_model_max_length=p.reward_model.max_length;
+      data.reward_model_device='cpu';}
+-   if(p.critic){data.critic_kind=p.critic.kind;data.critic_hidden=p.critic.hidden;data.critic_lr=p.critic.lr;}
++   if(p.critic){data.critic_kind=p.critic.kind;data.critic_hidden=p.critic.hidden;data.critic_lr=p.critic.lr; if(p.critic.hf){data.critic_hf_repo=p.critic.hf.repo;data.critic_hf_revision=p.critic.hf.revision;data.critic_hf_loader=p.critic.hf.loader;data.critic_hf_max_length=p.critic.hf.max_length;data.critic_hf_device='cpu';}}
+  }
+  applyMixed(data);
+ }
+@@ -354,6 +354,23 @@
+ }
+ $('mixEnabled').addEventListener('change',syncMixed);
+ $('mixCriticKind').addEventListener('change',syncMixed);
++$('mixCriticSearch').addEventListener('click',safe('Hugging Face Value Critics',async()=>{
++ const results=await api('rewardSearch',{query:get('mixCriticHfRepo')||'value model'});
++ const select=$('mixCriticSearchResults');select.replaceChildren(create('option',null,'Choose a compatible scalar value model…'));select.options[0].value='';
++ for(const item of results.models||[]){const o=create('option',null,item.id+(item.gated?' [gated]':''));o.value=item.id;o.dataset.sha=item.revision||'';select.append(o);}
++ if(select.options.length===1)throw Error('No Hub models matched; a trained scalar value head is required');
++}));
++$('mixCriticSearchResults').addEventListener('change',()=>{
++ const sel=$('mixCriticSearchResults');if(!sel.value)return;
++ $('mixCriticHfRepo').value=sel.value;const sha=sel.selectedOptions[0]?.dataset.sha||'';
++ if(/^[a-fA-F0-9]{40}$/.test(sha))$('mixCriticHfRevision').value=sha;
++});
++$('mixCriticPin').addEventListener('click',safe('Value Critic revision',async()=>{
++ const found=await api('rewardInspect',{repo:get('mixCriticHfRepo')});
++ $('mixCriticHfRevision').value=found.revision;
++ notify('Pinned Critic '+found.id+' @ '+found.revision.slice(0,12));
++}));
++
+ $('mixPpoReward').addEventListener('change',syncMixed);
+ $('mixRewardSearch').addEventListener('click',safe('Hugging Face Reward Models',async()=>{
+   const results=await api('rewardSearch',{query:get('mixRewardModelId')||'reward'});
+--- a/patchlib/hf_value_critic_v69.py
++++ b/patchlib/hf_value_critic_v69.py
+@@ -0,0 +1,134 @@
++"""Pinned HF sequence value critic for PPO, trained locally and never shared as P2P adapter.
++
++Reward Model scores finished responses. This model instead predicts per-action
++state values using *prefixes* of the generated response and is optimized by PPO
++value loss. The tokenizer can differ from the actor tokenizer. Only an already
++trained scalar HF head is used; its frozen backbone never enters the optimizer.
++"""
++from __future__ import annotations
++import math
++import re
++from pathlib import Path
++
++import torch
++from torch import nn
++
++REPO = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$')
++SHA = re.compile(r'^[a-fA-F0-9]{40}$')
++
++
++class HFValueError(ValueError):
++    pass
++
++
++def critic_spec(args):
++    if getattr(args, 'critic_kind', 'mlp') != 'hf':
++        return None
++    repo=str(getattr(args,'critic_hf_repo','') or '').strip()
++    rev=str(getattr(args,'critic_hf_revision','') or '').strip()
++    loader=str(getattr(args,'critic_hf_loader','sequence_classification'))
++    device=str(getattr(args,'critic_hf_device','cpu'))
++    limit=getattr(args,'critic_hf_max_length',512)
++    if not REPO.fullmatch(repo) or not SHA.fullmatch(rev):
++        raise HFValueError('HF Critic requires organization/model and a pinned 40-character commit SHA')
++    if loader not in ('sequence_classification','token_classification'):
++        raise HFValueError('HF Critic loader must be scalar sequence or token classification')
++    if device not in ('cpu','cuda','mps'):
++        raise HFValueError('HF Critic device must be cpu/cuda/mps')
++    if type(limit) is not int or not 16<=limit<=8192:
++        raise HFValueError('HF Critic max input must be 16..8192 tokens')
++    return {'repo':repo,'revision':rev.lower(),'loader':loader,'max_length':limit,
++            'trainable':'scalar_head_only-v1','trust_remote_code':False}
++
++
++class HFValueCritic(nn.Module):
++    def __init__(self,args,*,model=None,tokenizer=None):
++        super().__init__()
++        self.spec=critic_spec(args)
++        if self.spec is None:raise HFValueError('HF Critic not selected')
++        device=str(getattr(args,'critic_hf_device','cpu'))
++        if device=='cuda' and not torch.cuda.is_available():
++            raise HFValueError('Requested CUDA for HF Critic is unavailable')
++        if device=='mps' and not torch.backends.mps.is_available():
++            raise HFValueError('Requested MPS for HF Critic is unavailable')
++        self.device=torch.device(device)
++        if model is None or tokenizer is None:
++            try:
++                from transformers import AutoModelForSequenceClassification, AutoModelForTokenClassification, AutoTokenizer
++                kw={'revision':self.spec['revision'],'trust_remote_code':False,
++                    'use_safetensors':True,'output_loading_info':True}
++                cls=AutoModelForSequenceClassification if self.spec['loader']=='sequence_classification' else AutoModelForTokenClassification
++                if model is None:
++                    try:loaded=cls.from_pretrained(self.spec['repo'],dtype='auto',**kw)
++                    except TypeError as exc:
++                        if 'dtype' not in str(exc):raise
++                        loaded=cls.from_pretrained(self.spec['repo'],torch_dtype='auto',**kw)
++                    if not isinstance(loaded,tuple) or len(loaded)!=2:
++                        raise HFValueError('HF Critic loader did not return weight-loading diagnostics')
++                    model,info=loaded
++                    if info.get('missing_keys') or info.get('mismatched_keys'):
++                        raise HFValueError('HF Critic head/weights are missing or mismatched; refusing random initialization')
++                if tokenizer is None:
++                    tokenizer=AutoTokenizer.from_pretrained(self.spec['repo'],revision=self.spec['revision'],trust_remote_code=False)
++            except Exception as exc:
++                if isinstance(exc,HFValueError):raise
++                raise HFValueError(f'Cannot load pinned HF Critic safely: {exc}') from exc
++        if getattr(getattr(model,'config',None),'num_labels',None)!=1:
++            raise HFValueError('HF Critic must expose a PRETRAINED single scalar value head (num_labels=1)')
++        candidates=[]
++        for name,layer in model.named_modules():
++            if (isinstance(layer,nn.Linear) and layer.out_features==1 and
++                (name.split('.')[-1] in ('score','classifier','value_head','v_head','value','reward_head') or
++                 'classifier' in name.lower())):
++                candidates.append((name,layer))
++        if len(candidates)!=1:
++            raise HFValueError('Need exactly one trained scalar value head (Linear out_features=1); found '+str(len(candidates)))
++        self.head_name,self.head=candidates[0]
++        self.model=model.to(self.device)
++        for p in self.model.parameters():p.requires_grad_(False)
++        for p in self.head.parameters():p.requires_grad_(True)
++        self.model.eval()  # deterministic old/current value predictions
++        self.tok=tokenizer
++        # New completions must stay visible when the shared context exceeds
++        # the Critic's maximum input length. Its tokenizer is actor-independent.
++        if hasattr(self.tok,'truncation_side'):
++            self.tok.truncation_side='left'
++        self.calls=0
++
++    def trainable_parameters(self):
++        return list(self.head.parameters())
++
++    def values(self,prefixes,*,actor_device):
++        if not isinstance(prefixes,list) or not 1<=len(prefixes)<=128:
++            raise HFValueError('Expected 1..128 PPO state prefixes')
++        self.model.eval()
++        outputs=[]
++        for text in prefixes:
++            if not isinstance(text,str) or not text or len(text)>65536:
++                raise HFValueError('Empty/oversized PPO critic prefix')
++            batch=self.tok(text,return_tensors='pt',truncation=True,max_length=self.spec['max_length'])
++            if not isinstance(batch,dict) and not hasattr(batch,'items'):
++                raise HFValueError('HF Critic tokenizer must return a tensor mapping')
++            tensors={k:v.to(self.device) for k,v in batch.items() if k in ('input_ids','attention_mask','token_type_ids')}
++            if 'input_ids' not in tensors or tensors['input_ids'].ndim!=2 or tensors['input_ids'].shape[0]!=1 or tensors['input_ids'].shape[1]==0:
++                raise HFValueError('HF Critic tokenizer returned invalid input_ids')
++            result=self.model(**tensors)
++            logits=result.get('logits') if isinstance(result,dict) else getattr(result,'logits',None)
++            if not isinstance(logits,torch.Tensor):raise HFValueError('HF Critic must return logits tensor')
++            if self.spec['loader']=='sequence_classification':
++                if logits.shape!=(1,1):raise HFValueError('Sequence HF Critic logits must be [1,1]')
++                value=logits[0,0]
++            else:
++                if logits.ndim!=3 or logits.shape[0]!=1 or logits.shape[2]!=1 or logits.shape[1]!=tensors['input_ids'].shape[1]:
++                    raise HFValueError('Token HF Critic logits must be [1,tokens,1]')
++                if 'attention_mask' in tensors:
++                    index=int(tensors['attention_mask'][0].sum().item())-1
++                else:index=logits.shape[1]-1
++                value=logits[0,index,0]
++            if not torch.isfinite(value):raise HFValueError('HF Critic returned nonfinite state value')
++            outputs.append(value.float().to(actor_device))
++            self.calls+=1
++        return torch.stack(outputs)
++
++    def snapshot_weights(self):
++        return {name:p.detach().cpu().contiguous().clone() for name,p in self.head.named_parameters()}
+--- a/patchlib/hf_critic_state_v69.py
++++ b/patchlib/hf_critic_state_v69.py
+@@ -0,0 +1,80 @@
++"""Data-only, crash-atomic HF value-head and AdamW state; pinned HF base is reloaded from Hub."""
++from __future__ import annotations
++import json
++import os
++import secrets
++from pathlib import Path
++import torch
++from safetensors import safe_open
++from safetensors.torch import save_file,load_file
++from .hf_value_critic_v69 import HFValueError
++
++
++def snapshot_file(root):return Path(root)/'critic-hf-v69.safetensors'
++
++
++def _identity(critic,identity):
++    return json.dumps({'spec':critic.spec,'head':critic.head_name,'room':str(identity)},sort_keys=True,separators=(',',':'))
++
++
++def save(root,critic,optimizer,*,identity,steps):
++    folder=Path(root).expanduser()
++    if folder.is_symlink():raise HFValueError('Symlink Critic directory forbidden')
++    folder.mkdir(parents=True,exist_ok=True,mode=0o700)
++    target=snapshot_file(folder)
++    tensors={'h.'+k:v for k,v in critic.snapshot_weights().items()}
++    params=critic.trainable_parameters()
++    for i,p in enumerate(params):
++        state=optimizer.state.get(p,{})
++        for k in ('step','exp_avg','exp_avg_sq'):
++            if isinstance(state.get(k),torch.Tensor):tensors[f'o.{i}.{k}']=state[k].detach().cpu().contiguous().clone()
++    if not tensors or any(not torch.isfinite(v).all() for v in tensors.values()):
++        raise HFValueError('Invalid HF Critic checkpoint tensors')
++    if sum(x.numel()*x.element_size() for x in tensors.values())>128*1024**2:
++        raise HFValueError('HF Critic head+optimizer exceeds 128MiB; reduce head size')
++    tmp=folder/('.hf-critic-'+secrets.token_hex(10)+'.tmp')
++    try:
++        save_file(tensors,str(tmp),metadata={'format':'kagami-hf-value-head-v69','identity':_identity(critic,identity),'steps':str(steps)})
++        with tmp.open('rb') as f:os.fsync(f.fileno())
++        os.replace(tmp,target)
++        d=os.open(folder,os.O_RDONLY)
++        try:os.fsync(d)
++        finally:os.close(d)
++    finally:tmp.unlink(missing_ok=True)
++
++
++def load(path,critic,optimizer,*,identity):
++    path=Path(path)
++    if not path.is_file() or path.stat().st_size>129*1024**2:
++        raise HFValueError('HF Critic checkpoint missing or oversized')
++    with safe_open(str(path),framework='pt',device='cpu') as f:meta=f.metadata() or {}
++    if meta.get('format')!='kagami-hf-value-head-v69' or meta.get('identity')!=_identity(critic,identity):
++        raise HFValueError('HF Critic checkpoint base revision/head/room mismatch')
++    weights=load_file(str(path),device='cpu')
++    expected={'h.'+k:v for k,v in critic.snapshot_weights().items()}
++    params=critic.trainable_parameters()
++    allowed=set(expected)
++    for key,v in expected.items():
++        if key not in weights or weights[key].shape!=v.shape or weights[key].dtype!=v.dtype:
++            raise HFValueError('HF Critic head state mismatch')
++    for i,p in enumerate(params):
++        present={k for k in ('step','exp_avg','exp_avg_sq') if f'o.{i}.{k}' in weights}
++        if present and present!={'step','exp_avg','exp_avg_sq'}:
++            raise HFValueError('Incomplete HF Critic AdamW state')
++        for k in present:
++            key=f'o.{i}.{k}';v=weights[key];allowed.add(key)
++            if k=='step':
++                if v.numel()!=1 or float(v.item())<0:raise HFValueError('Invalid AdamW step')
++            elif v.shape!=p.shape or v.dtype!=p.dtype:raise HFValueError('HF Critic optimizer layout mismatch')
++    if allowed!=set(weights) or any(not torch.isfinite(v).all() for v in weights.values()):
++        raise HFValueError('Unexpected or nonfinite HF Critic state')
++    steps=int(meta['steps'])
++    if not 0<=steps<2**63:raise HFValueError('Invalid HF Critic checkpoint steps')
++    # Validation is complete; mutate only trainable head and optimizer.
++    with torch.no_grad():
++        for k,p in critic.head.named_parameters():p.copy_(weights['h.'+k].to(p.device))
++    optimizer.state.clear()
++    for i,p in enumerate(params):
++        state={k:weights[f'o.{i}.{k}'].clone().to(p.device) for k in ('step','exp_avg','exp_avg_sq') if f'o.{i}.{k}' in weights}
++        if state:optimizer.state[p]=state
++    return steps
+--- a/tests/test_hf_value_critic_v69.py
++++ b/tests/test_hf_value_critic_v69.py
+@@ -0,0 +1,161 @@
++"""v69: real PPO value regression on separate Hugging Face-pinned critic."""
++import json
++import sys
++import types
++from types import SimpleNamespace
++
++import pytest
++import torch
++from torch import nn
++from patchlib.hf_value_critic_v69 import HFValueCritic, HFValueError, critic_spec
++from patchlib.hf_critic_state_v69 import save, load, snapshot_file
++from patchlib.mix_gui_v66 import DEFAULT,normalize,command_options,objective_policy
++from patchlib.mixed_learning_v65 import MixedObjectiveTrainer
++
++SHA='b'*40
++
++
++class Tokenizer:
++    eos_token_id=1
++    def encode(self,text,add_special_tokens=False):return [max(2,ord(c)%19) for c in text]
++    def decode(self,ids,skip_special_tokens=False):return ''.join(chr(65+int(x)%26) for x in ids)
++    def __call__(self,text,**kw):
++        ids=self.encode(text)[-kw.get('max_length',32):]
++        return {'input_ids':torch.tensor([ids]),'attention_mask':torch.ones(1,len(ids),dtype=torch.long)}
++
++
++class ValueModel(nn.Module):
++    def __init__(self,num_labels=1):
++        super().__init__()
++        self.config=SimpleNamespace(num_labels=num_labels)
++        self.body=nn.Linear(1,4)
++        self.score=nn.Linear(4,1)
++    def forward(self,input_ids,attention_mask=None):
++        x=input_ids.float().mean(dim=1,keepdim=True)*.01
++        return SimpleNamespace(logits=self.score(torch.tanh(self.body(x))))
++
++
++class Actor(nn.Module):
++    def __init__(self):
++        super().__init__();self.e=nn.Embedding(24,6);self.l=nn.Linear(6,24)
++    def forward(self,input_ids,attention_mask=None):return {'logits':self.l(self.e(input_ids))}
++
++
++def settings(tmp_path,**extra):
++    data=dict(critic_kind='hf',critic_hf_repo='Org/critic',critic_hf_revision=SHA,
++              critic_hf_loader='sequence_classification',critic_hf_device='cpu',critic_hf_max_length=64,
++              critic_hidden=32,critic_lr=.003,critic_state_dir=tmp_path/'checkpoint',
++              ppo_jsonl=tmp_path/'ppo.jsonl',sft_jsonl=None,ppo_reward='token_match',
++              pt_weight=1.,sft_weight=0.,ppo_weight=.1,ppo_clip=.2,ppo_kl_coef=.02,
++              ppo_value_coef=.5,ppo_gamma=.99,ppo_gae_lambda=.95,ppo_max_tokens=3,
++              ppo_reuse=2,max_length=32,hf_task='causal-lm',loss_policy='auto',model='actor')
++    data.update(extra)
++    return SimpleNamespace(**data)
++
++
++def hf_mock(monkeypatch,missing=None):
++    def construct(*args,**kw):
++        assert kw['revision']==SHA and kw['trust_remote_code'] is False
++        assert kw['use_safetensors'] is True and kw['output_loading_info'] is True
++        return ValueModel(),{'missing_keys':missing or []}
++    class Auto:
++        from_pretrained=staticmethod(construct)
++    class AutoTokenizer:
++        @staticmethod
++        def from_pretrained(*args,**kw):return Tokenizer()
++    monkeypatch.setitem(sys.modules,'transformers',SimpleNamespace(
++        AutoModelForSequenceClassification=Auto,AutoModelForTokenClassification=Auto,AutoTokenizer=AutoTokenizer))
++
++
++def test_hf_critic_load_and_head_only_training(monkeypatch,tmp_path):
++    hf_mock(monkeypatch)
++    arg=settings(tmp_path)
++    c=HFValueCritic(arg)
++    assert all(not p.requires_grad for p in c.model.body.parameters())
++    assert all(p.requires_grad for p in c.head.parameters())
++    old_body=c.model.body.weight.detach().clone()
++    old_head=c.head.weight.detach().clone()
++    optim=torch.optim.AdamW(c.trainable_parameters(),lr=.03)
++    losses=c.values(['hello','hello there'],actor_device=torch.device('cpu'))
++    assert losses.shape==(2,) and losses.requires_grad
++    losses.square().sum().backward();optim.step()
++    assert torch.equal(c.model.body.weight,old_body)
++    assert not torch.equal(c.head.weight,old_head)
++    save(arg.critic_state_dir,c,optim,identity='room',steps=1)
++    restored=HFValueCritic(arg); opt2=torch.optim.AdamW(restored.trainable_parameters())
++    assert load(snapshot_file(arg.critic_state_dir),restored,opt2,identity='room')==1
++    for a,b in zip(c.head.parameters(),restored.head.parameters()):assert torch.equal(a,b)
++    with pytest.raises(HFValueError,match='mismatch'):load(snapshot_file(arg.critic_state_dir),restored,opt2,identity='other-room')
++    with pytest.raises(HFValueError,match='mismatch'):
++        alt=HFValueCritic(settings(tmp_path,critic_hf_revision='c'*40),model=ValueModel(),tokenizer=Tokenizer())
++        load(snapshot_file(arg.critic_state_dir),alt,torch.optim.AdamW(alt.trainable_parameters()),identity='room')
++
++
++def test_hf_ppo_actual_rollout_critic_and_restart(monkeypatch,tmp_path):
++    hf_mock(monkeypatch)
++    (tmp_path/'ppo.jsonl').write_text('{"prompt":"abc","reference":"abcd"}\n')
++    arg=settings(tmp_path)
++    torch.manual_seed(66)
++    train=MixedObjectiveTrainer(arg,Tokenizer());actor=Actor()
++    actor_loss,value_loss,metrics=train.ppo_loss(actor,torch.device('cpu'))
++    assert actor_loss.requires_grad and value_loss.requires_grad
++    assert len(train.cached['critic_prefixes'])==train.cached['tokens'].numel()
++    (actor_loss+value_loss).backward()
++    assert train.critic.head.weight.grad is not None
++    assert all(p.grad is None for p in train.critic.model.body.parameters())
++    train.critic_optim.step();train.critic_steps+=1
++    orig=train.critic.snapshot_weights();train.close()
++    new=MixedObjectiveTrainer(arg,Tokenizer())
++    assert new.critic_steps==1
++    for key,val in new.critic.snapshot_weights().items():assert torch.equal(val,orig[key])
++    new.close()
++
++
++def test_hf_value_guardrails_and_missing_head(monkeypatch,tmp_path):
++    arg=settings(tmp_path)
++    for kw in (dict(critic_hf_revision='main'),dict(critic_hf_repo='../bad'),
++               dict(critic_hf_loader='unknown'),dict(critic_hf_max_length=2)):
++        with pytest.raises(HFValueError):critic_spec(settings(tmp_path,**kw))
++    hf_mock(monkeypatch,missing=['score.weight'])
++    with pytest.raises(HFValueError,match='missing'):HFValueCritic(arg)
++    with pytest.raises(HFValueError,match='single scalar'):HFValueCritic(arg,model=ValueModel(2),tokenizer=Tokenizer())
++    c=HFValueCritic(arg,model=ValueModel(),tokenizer=Tokenizer())
++    c.model.forward=lambda **kwargs:SimpleNamespace(logits=torch.tensor([[float('nan')]]))
++    with pytest.raises(HFValueError,match='nonfinite'):c.values(['hello'],actor_device=torch.device('cpu'))
++
++
++def test_gui_hf_critic_cli_pins_policy_and_keeps_local_source(tmp_path):
++    row=tmp_path/'a.jsonl';row.write_text('{"prompt":"a","reference":"b"}\n')
++    values=normalize({**DEFAULT,'enabled':True,'ppo_jsonl':str(row),'sft_weight':0.,
++                      'critic_kind':'hf','critic_hf_repo':'Org/critic','critic_hf_revision':SHA,
++                      'critic_hf_max_length':128},task='causal-lm')
++    opts=command_options(values,state_dir=tmp_path/'state')
++    assert opts[opts.index('--critic-hf-repo')+1]=='Org/critic'
++    assert opts[opts.index('--critic-hf-loader')+1]=='sequence_classification'
++    policy=objective_policy(values)
++    assert policy['critic']['hf']['revision']==SHA
++    assert 'critic_hf_device' not in json.dumps(policy)
++    assert str(row) not in json.dumps(policy)
++    from patchlib.webview_gui import compose_html
++    html=compose_html()
++    for key in ('mixCriticHfRepo','mixCriticHfRevision','mixCriticSearch','mixCriticPin','mixCriticHub'):
++        assert key in html
++
++
++def test_hf_token_critic_prefix_values_are_differentiable(tmp_path):
++    class Tokens(ValueModel):
++        def forward(self,input_ids,attention_mask=None):
++            hidden=torch.tanh(self.body(input_ids.float().unsqueeze(-1)*.01))
++            return SimpleNamespace(logits=self.score(hidden))
++    cfg=settings(tmp_path,critic_hf_loader='token_classification',critic_hf_max_length=16)
++    tok=Tokenizer();tok.truncation_side='right'
++    critic=HFValueCritic(cfg,model=Tokens(),tokenizer=tok)
++    assert critic.tok.truncation_side=='left'
++    values=critic.values(['first','first second'],actor_device=torch.device('cpu'))
++    assert values.shape==(2,)
++    values.mean().backward()
++    assert critic.head.weight.grad is not None
++    assert critic.model.body.weight.grad is None
++    critic.model.forward=lambda **kw:SimpleNamespace(logits=torch.zeros(1,1))
++    with pytest.raises(HFValueError,match='Token HF Critic'):
++        critic.values(['something'],actor_device=torch.device('cpu'))

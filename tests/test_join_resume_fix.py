@@ -35,8 +35,10 @@ def test_two_gui_instances_get_distinct_reusable_identity_and_journal(tmp_path,m
     # Both identities show up as peers in a room membership exchange.
     disc_a=RoomDiscovery('ws://127.0.0.1:8080/ws',room,aid)
     disc_b=RoomDiscovery('ws://127.0.0.1:8080/ws',room,bid)
-    disc_a.accept({'type':'group-members','peers':[bid]})
-    disc_b.accept({'type':'group-members','peers':[aid]})
+    disc_a.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+                   'revision':2,'online':2,'peers':[bid]})
+    disc_b.accept({'type':'group-members','topology':'bounded-v2','degree':8,
+                   'revision':2,'online':2,'peers':[aid]})
     assert len(disc_a.members)==len(disc_b.members)==1
     a.close();b.close()
     c=WebviewController(tmp_path);monkeypatch.setattr(c.train,'start',lambda cmd,log: 12345)

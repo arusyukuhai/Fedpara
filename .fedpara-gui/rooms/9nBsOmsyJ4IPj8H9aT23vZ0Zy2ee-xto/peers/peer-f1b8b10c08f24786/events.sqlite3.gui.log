@@ -1,0 +1,202 @@
+adaptive local policy: {"device": "mps", "batch_size": 1, "grad_accum": 4, "gradient_checkpointing": true, "wire_dtype": "float16", "local_steps": 4, "preferred_neighbors": 2, "memory_fraction": 0.35}
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-28 17:26:44,898 huggingface_hub.utils._http Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Traceback (most recent call last):
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_http.py", line 836, in hf_raise_for_status
+    response.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://huggingface.co/EleutherAI/gpt-neo-125m/resolve/77f1b168e219585646439073245fe87e56b3023e/config.json'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/hf_config_v83.py", line 146, in load_hf_config
+    data = _read_checkpoint_config(str(model_id), str(revision),
+                                   local_files_only=local_files_only)
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/hf_config_v83.py", line 114, in _read_checkpoint_config
+    path = Path(hf_hub_download(model_id, 'config.json', revision=revision,
+                ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                local_files_only=local_files_only))
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_validators.py", line 91, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_http.py", line 266, in _inner
+    return fn(*args, **kwargs)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/file_download.py", line 1043, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+        # Destination
+    ...<15 lines>...
+        dry_run=dry_run,
+    )
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/file_download.py", line 1113, in _hf_hub_download_to_cache_dir
+    (url_to_download, etag, commit_hash, expected_size, xet_file_data, head_call_error) = _get_metadata_or_catch_error(
+                                                                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        repo_id=repo_id,
+        ^^^^^^^^^^^^^^^^
+    ...<10 lines>...
+        tree_cache_folder=storage_folder,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/file_download.py", line 1758, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+        url=url,
+    ...<4 lines>...
+        retry_on_errors=retry_on_errors,
+    )
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_validators.py", line 91, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/file_download.py", line 1665, in get_hf_file_metadata
+    response = _httpx_follow_hub_redirects_with_backoff(
+        method="HEAD", url=url, headers=hf_headers, timeout=timeout, retry_on_errors=retry_on_errors
+    )
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_http.py", line 761, in _httpx_follow_hub_redirects_with_backoff
+    hf_raise_for_status(response)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_http.py", line 856, in hf_raise_for_status
+    raise _format(RemoteEntryNotFoundError, message, response, repo_type=repo_type, repo_id=repo_id) from e
+huggingface_hub.errors.RemoteEntryNotFoundError: 404 Client Error. (Request ID: Root=1-6ae1b1c4-23bb75c82878d4e2496f55e4;7ca9fcea-0cab-4e54-842b-9f665dbffa08)
+
+Entry Not Found for url: https://huggingface.co/EleutherAI/gpt-neo-125m/resolve/77f1b168e219585646439073245fe87e56b3023e/config.json.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 1651, in <module>
+    main()
+    ~~~~^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 1548, in main
+    asyncio.run(train_elastic(args,load_model=load,training_batches=training_batches,run_step=run_step))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/asyncio/runners.py", line 196, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/asyncio/runners.py", line 119, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/asyncio/base_events.py", line 726, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/elasticnet.py", line 1292, in train_elastic
+    model,adapter=load_model(args)
+                  ~~~~~~~~~~^^^^^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 398, in load
+    return load_model(args,use_adapter=True)
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 192, in load_model
+    cfg=load_hf_config(args.model,revision=args.revision,
+               trust_remote_code=custom,local_files_only=custom)
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/hf_config_v83.py", line 151, in load_hf_config
+    return AutoConfig.from_pretrained(model_id, revision=revision,
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        trust_remote_code=False, local_files_only=local_files_only)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/transformers/models/auto/configuration_auto.py", line 442, in from_pretrained
+    raise ValueError(
+    ...<2 lines>...
+    )
+ValueError: Unrecognized model in EleutherAI/gpt-neo-125m. Should have a `model_type` key in its config.json.
+adaptive local policy: {"device": "mps", "batch_size": 1, "grad_accum": 4, "gradient_checkpointing": true, "wire_dtype": "float16", "local_steps": 4, "preferred_neighbors": 2, "memory_fraction": 0.35}
+Traceback (most recent call last):
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_http.py", line 836, in hf_raise_for_status
+    response.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/httpx/_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://huggingface.co/EleutherAI/gpt-neo-125m/resolve/77f1b168e219585646439073245fe87e56b3023e/config.json'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/hf_config_v83.py", line 146, in load_hf_config
+    data = _read_checkpoint_config(str(model_id), str(revision),
+                                   local_files_only=local_files_only)
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/hf_config_v83.py", line 114, in _read_checkpoint_config
+    path = Path(hf_hub_download(model_id, 'config.json', revision=revision,
+                ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                local_files_only=local_files_only))
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_validators.py", line 91, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_http.py", line 266, in _inner
+    return fn(*args, **kwargs)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/file_download.py", line 1043, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+        # Destination
+    ...<15 lines>...
+        dry_run=dry_run,
+    )
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/file_download.py", line 1113, in _hf_hub_download_to_cache_dir
+    (url_to_download, etag, commit_hash, expected_size, xet_file_data, head_call_error) = _get_metadata_or_catch_error(
+                                                                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        repo_id=repo_id,
+        ^^^^^^^^^^^^^^^^
+    ...<10 lines>...
+        tree_cache_folder=storage_folder,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/file_download.py", line 1758, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+        url=url,
+    ...<4 lines>...
+        retry_on_errors=retry_on_errors,
+    )
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_validators.py", line 91, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/file_download.py", line 1665, in get_hf_file_metadata
+    response = _httpx_follow_hub_redirects_with_backoff(
+        method="HEAD", url=url, headers=hf_headers, timeout=timeout, retry_on_errors=retry_on_errors
+    )
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_http.py", line 761, in _httpx_follow_hub_redirects_with_backoff
+    hf_raise_for_status(response)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/huggingface_hub/utils/_http.py", line 856, in hf_raise_for_status
+    raise _format(RemoteEntryNotFoundError, message, response, repo_type=repo_type, repo_id=repo_id) from e
+huggingface_hub.errors.RemoteEntryNotFoundError: 404 Client Error. (Request ID: Root=1-6ae1ba3a-59eeada200744e9c39b80234;78cf294d-fa60-462d-9a55-9a5ec0565269)
+
+Entry Not Found for url: https://huggingface.co/EleutherAI/gpt-neo-125m/resolve/77f1b168e219585646439073245fe87e56b3023e/config.json.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 1651, in <module>
+    main()
+    ~~~~^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 1548, in main
+    asyncio.run(train_elastic(args,load_model=load,training_batches=training_batches,run_step=run_step))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/asyncio/runners.py", line 196, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/asyncio/runners.py", line 119, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/asyncio/base_events.py", line 726, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/elasticnet.py", line 1292, in train_elastic
+    model,adapter=load_model(args)
+                  ~~~~~~~~~~^^^^^^
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 398, in load
+    return load_model(args,use_adapter=True)
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/cli.py", line 192, in load_model
+    cfg=load_hf_config(args.model,revision=args.revision,
+               trust_remote_code=custom,local_files_only=custom)
+  File "/Users/al/Documents/GitHub/Fedpara/patchlib/hf_config_v83.py", line 151, in load_hf_config
+    return AutoConfig.from_pretrained(model_id, revision=revision,
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        trust_remote_code=False, local_files_only=local_files_only)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/al/.pyenv/versions/3.13.15/lib/python3.13/site-packages/transformers/models/auto/configuration_auto.py", line 442, in from_pretrained
+    raise ValueError(
+    ...<2 lines>...
+    )
+ValueError: Unrecognized model in EleutherAI/gpt-neo-125m. Should have a `model_type` key in its config.json.

@@ -1,0 +1,497 @@
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=*.log' '--exclude=*STATUS.md' '--exclude=VALIDATION*.md' '--exclude=CHANGES*.patch' '--exclude=BENCHMARK*.json' kagami-v71/patchlib/cli.py kagami-v72/patchlib/cli.py
+--- kagami-v71/patchlib/cli.py	2026-10-27 10:21:38.000000000 +0000
++++ kagami-v72/patchlib/cli.py	2026-10-27 14:55:53.610118738 +0000
+@@ -1033,6 +1033,8 @@
+     p.add_argument('--ppo-gae-lambda',type=float,default=.95)
+     p.add_argument('--ppo-max-tokens',type=int,default=8,help='Max autoregressive PPO rollout tokens per mixed step')
+     p.add_argument('--ppo-reuse',type=int,default=2,help='Max clipped PPO updates per sampled trajectory')
++    p.add_argument('--ppo-kv-cache',choices=('auto','off'),default='auto',
++                   help='Use causal KV cache during no-gradient PPO rollout if forward explicitly supports it; never for PPO gradients')
+     p.add_argument('--critic-kind',choices=('mlp','linear','hf'),default='mlp',help='PPO value critic: local MLP/Linear or pinned Hugging Face scalar value head')
+     p.add_argument('--critic-hidden',type=int,default=32,help='Local value critic hidden width (8..512)')
+     p.add_argument('--critic-lr',type=float,default=1e-3,help='Local PPO value critic learning rate')
+@@ -1048,6 +1050,8 @@
+     p.add_argument('--reward-model-id',default='',help='Hugging Face scalar sequence-classification Reward Model repo')
+     p.add_argument('--reward-model-revision',default='',help='Pinned 40-hex commit SHA of Reward Model')
+     p.add_argument('--reward-model-device',choices=('cpu','cuda','mps'),default='cpu',help='Inference device, independent from actor')
++    p.add_argument('--reward-model-idle-offload',action='store_true',
++                   help='Opt-in move frozen HF Reward Model from accelerator to CPU between PPO scoring calls (saves resident VRAM, transfer overhead)')
+     p.add_argument('--reward-model-loader',choices=('sequence_classification','auto_model'),default='sequence_classification')
+     p.add_argument('--reward-model-format',choices=('plain','chat'),default='plain')
+     p.add_argument('--reward-model-output',choices=('logits','score','end_scores','rewards'),default='logits')
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=*.log' '--exclude=*STATUS.md' '--exclude=VALIDATION*.md' '--exclude=CHANGES*.patch' '--exclude=BENCHMARK*.json' kagami-v71/patchlib/mix_gui_v66.py kagami-v72/patchlib/mix_gui_v66.py
+--- kagami-v71/patchlib/mix_gui_v66.py	2026-10-27 10:21:38.000000000 +0000
++++ kagami-v72/patchlib/mix_gui_v66.py	2026-10-27 14:58:15.619519277 +0000
+@@ -11,8 +11,8 @@
+ from types import SimpleNamespace
+ import secrets
+ 
+-FIELDS=('sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'critic_hf_repo', 'critic_hf_revision', 'critic_hf_loader', 'critic_hf_device', 'critic_hf_max_length', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
+-DEFAULT={'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'critic_hf_repo': '', 'critic_hf_revision': '', 'critic_hf_loader': 'sequence_classification', 'critic_hf_device': 'cpu', 'critic_hf_max_length': 512, 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
++FIELDS=('sft_hf_revision', 'sft_hf_repo', 'enabled', 'sft_jsonl', 'ppo_jsonl', 'pt_weight', 'sft_weight', 'ppo_weight', 'ppo_clip', 'ppo_kl_coef', 'ppo_value_coef', 'ppo_gamma', 'ppo_gae_lambda', 'ppo_max_tokens', 'ppo_reuse', 'ppo_reward', 'critic_kind', 'critic_hidden', 'critic_lr', 'critic_init', 'critic_hf_repo', 'critic_hf_revision', 'critic_hf_loader', 'critic_hf_device', 'critic_hf_max_length', 'reward_model_id', 'reward_model_revision', 'reward_model_device', 'reward_model_idle_offload', 'reward_model_loader', 'reward_model_output', 'reward_model_format', 'reward_model_index', 'reward_model_scale', 'reward_model_max_length', 'sft_hf_config', 'sft_hf_split', 'sft_hf_prompt_column', 'sft_hf_response_column', 'ppo_hf_repo', 'ppo_hf_revision', 'ppo_hf_config', 'ppo_hf_split', 'ppo_hf_prompt_column', 'ppo_hf_reference_column')
++DEFAULT={'sft_hf_repo': '', 'sft_hf_revision': '', 'sft_hf_config': '', 'sft_hf_split': 'train', 'sft_hf_prompt_column': 'prompt', 'sft_hf_response_column': 'response', 'ppo_hf_repo': '', 'ppo_hf_revision': '', 'ppo_hf_config': '', 'ppo_hf_split': 'train', 'ppo_hf_prompt_column': 'prompt', 'ppo_hf_reference_column': 'reference', 'enabled': False, 'sft_jsonl': '', 'ppo_jsonl': '', 'pt_weight': 1.0, 'sft_weight': 1.0, 'ppo_weight': 0.2, 'ppo_clip': 0.2, 'ppo_kl_coef': 0.02, 'ppo_value_coef': 0.5, 'ppo_gamma': 0.99, 'ppo_gae_lambda': 0.95, 'ppo_max_tokens': 8, 'ppo_reuse': 2, 'ppo_reward': 'token_match', 'critic_kind': 'mlp', 'critic_hidden': 32, 'critic_lr': 0.001, 'critic_init': '', 'critic_hf_repo': '', 'critic_hf_revision': '', 'critic_hf_loader': 'sequence_classification', 'critic_hf_device': 'cpu', 'critic_hf_max_length': 512, 'reward_model_id': '', 'reward_model_revision': '', 'reward_model_device': 'cpu', 'reward_model_idle_offload': False, 'reward_model_loader': 'sequence_classification', 'reward_model_output': 'logits', 'reward_model_format': 'plain', 'reward_model_index': 0, 'reward_model_scale': 1.0, 'reward_model_max_length': 512}
+ 
+ 
+ def _path(value, *, ext, role=None, hf_reward=False):
+@@ -71,6 +71,8 @@
+         if type(values[key]) is not int:raise ValueError(key+' must be an integer')
+     if values['critic_kind'] not in ('mlp','linear','hf') or values['ppo_reward'] not in ('token_match','exact','hf_model'):
+         raise ValueError('Unsupported critic or PPO reward type')
++    if type(values['reward_model_idle_offload']) is not bool:
++        raise ValueError('Reward idle offload must be a boolean')
+     if values['ppo_reward']=='hf_model':
+         from .reward_model_v67 import reward_spec
+         reward_spec(SimpleNamespace(**values))
+@@ -126,6 +128,8 @@
+                 ('reward_model_scale','--reward-model-scale'),
+                 ('reward_model_max_length','--reward-model-max-length')):
+             result.extend([flag,str(values[key])])
++        if values['reward_model_idle_offload']:
++            result.append('--reward-model-idle-offload')
+     for role in ('sft','ppo'):
+         if values.get(role+'_hf_repo'):
+             for suffix in ('repo','revision','config','split','prompt_column',('response' if role=='sft' else 'reference')+'_column'):
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=*.log' '--exclude=*STATUS.md' '--exclude=VALIDATION*.md' '--exclude=CHANGES*.patch' '--exclude=BENCHMARK*.json' kagami-v71/patchlib/mixed_learning_v65.py kagami-v72/patchlib/mixed_learning_v65.py
+--- kagami-v71/patchlib/mixed_learning_v65.py	2026-10-27 14:32:39.896777628 +0000
++++ kagami-v72/patchlib/mixed_learning_v65.py	2026-10-27 15:07:20.100364040 +0000
+@@ -11,6 +11,7 @@
+ import hashlib
+ import json
+ import math
++import inspect
+ from pathlib import Path
+ 
+ import torch
+@@ -19,6 +20,7 @@
+ 
+ from .model_contract_v64 import invoke_model, training_loss, _loss_or_logits
+ from .hf_mixed_datasets_v68 import source_selected, source_spec, HFRowCycle
++from .ppo_pipeline_v72 import PrefetchedRows
+ 
+ 
+ class MixedLearningError(ValueError):
+@@ -95,6 +97,8 @@
+ def validate_args(args):
+     if not enabled(args) and not getattr(args,'mix_policy',None):
+         return
++    if getattr(args,'ppo_kv_cache','auto') not in ('auto','off'):
++        raise MixedLearningError('ppo_kv_cache must be auto or off')
+     if getattr(args,'hf_task','causal-lm') != 'causal-lm':
+         raise MixedLearningError('PT/SFT/PPO mixture currently requires --hf-task causal-lm')
+     if getattr(args,'loss_policy','auto') not in ('auto','causal'):
+@@ -211,6 +215,53 @@
+     return logits.float()
+ 
+ 
++def _cached_step_logits(model, ids, args, cache_state):
++    """Optional causal KV-cache fast path; never changes the PPO update graph.
++
++    A generic PyTorch LM may not implement caching. Cache activation requires
++    an explicit forward contract, a real returned cache and no custom input
++    remapping. All logits used for actor gradients are still recomputed without
++    cache during ppo_loss. We never share caches across policy updates.
++    """
++    if cache_state['active'] is False:
++        return _logits(model, ids, args, start=ids.shape[1]-1, length=1)
++    if cache_state['active'] is None:
++        if getattr(args,'ppo_kv_cache','auto')=='off' or getattr(args,'input_map',''):
++            cache_state['active']=False
++            return _logits(model, ids, args, start=ids.shape[1]-1, length=1)
++        try:
++            params=inspect.signature(model.forward).parameters
++        except (ValueError,TypeError):
++            params={}
++        # Explicit cache ABI, never guess from **kwargs alone.
++        if not {'past_key_values','use_cache'}.issubset(params):
++            cache_state['active']=False
++            return _logits(model, ids, args, start=ids.shape[1]-1, length=1)
++        data={'input_ids':ids,'attention_mask':torch.ones_like(ids),'use_cache':True}
++    else:
++        data={'input_ids':ids[:,-1:],
++              'attention_mask':torch.ones_like(ids),
++              'past_key_values':cache_state['past'], 'use_cache':True}
++    result=model(**data)
++    _,logits=_loss_or_logits(result)
++    if (not isinstance(logits,torch.Tensor) or logits.ndim!=3 or
++            logits.shape[0]!=1 or logits.shape[-1]<2 or logits.shape[1]!=data['input_ids'].shape[1]):
++        raise MixedLearningError('PPO cached actor returned invalid logits')
++    past=(result.get('past_key_values') if isinstance(result,dict)
++          else getattr(result,'past_key_values',None))
++    if past is None:
++        if cache_state['active']:
++            raise MixedLearningError('PPO actor stopped returning a live KV cache')
++        cache_state['active']=False
++    else:
++        cache_state['active']=True
++        cache_state['past']=past
++    last=logits[:,-1:,:]
++    if not bool(torch.isfinite(last).all()):
++        raise MixedLearningError('nonfinite PPO generation logits')
++    return last.float()
++
++
+ def _features(logits, *, offset):
+     """Small bounded, detached critic features: no unbounded vocab-size head."""
+     detached=logits.detach().float()
+@@ -241,9 +292,9 @@
+         validate_args(args)
+         self.args=args
+         self.tok=tokenizer
+-        self.sft=(HFRowCycle(source_spec(args,'sft'),'sft') if getattr(args,'sft_hf_repo','') else
++        self.sft=(PrefetchedRows(HFRowCycle(source_spec(args,'sft'),'sft')) if getattr(args,'sft_hf_repo','') else
+                   JsonlCycle(args.sft_jsonl) if getattr(args,'sft_jsonl',None) else None)
+-        self.ppo=(HFRowCycle(source_spec(args,'ppo'),'ppo') if getattr(args,'ppo_hf_repo','') else
++        self.ppo=(PrefetchedRows(HFRowCycle(source_spec(args,'ppo'),'ppo')) if getattr(args,'ppo_hf_repo','') else
+                   JsonlCycle(args.ppo_jsonl) if getattr(args,'ppo_jsonl',None) else None)
+         self.reward_scorer=None
+         if self.ppo and getattr(args,'ppo_reward','token_match')=='hf_model':
+@@ -322,9 +373,10 @@
+             with torch.no_grad():
+                 ids=torch.tensor([prompt],dtype=torch.long,device=device)
+                 chosen=[];old_lp=[];features=[]
++                cache_state={'active':None,'past':None}
+                 eos=getattr(self.tok,'eos_token_id',None)
+                 for _ in range(max_new):
+-                    final_logits=_logits(model,ids,self.args,start=ids.shape[1]-1,length=1)
++                    final_logits=_cached_step_logits(model,ids,self.args,cache_state)
+                     lp=F.log_softmax(final_logits[:,0],dim=-1)
+                     sample=torch.multinomial(lp.exp(),1)
+                     token=int(sample.item());chosen.append(token)
+@@ -447,6 +499,9 @@
+     def close(self):
+         if self.critic is not None:
+             self.save_critic()
++        if self.reward_scorer is not None:
++            close=getattr(self.reward_scorer,'close',None)
++            if callable(close):close()
+         for x in (self.sft,self.ppo):
+             if x:x.close()
+ 
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=*.log' '--exclude=*STATUS.md' '--exclude=VALIDATION*.md' '--exclude=CHANGES*.patch' '--exclude=BENCHMARK*.json' kagami-v71/patchlib/ppo_pipeline_v72.py kagami-v72/patchlib/ppo_pipeline_v72.py
+--- kagami-v71/patchlib/ppo_pipeline_v72.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v72/patchlib/ppo_pipeline_v72.py	2026-10-27 15:07:20.100207093 +0000
+@@ -0,0 +1,71 @@
++"""Bounded and ordered CPU/network input pipeline for HF PPO/SFT rows.
++
++Prefetches *data only*. Never evaluates or samples the actor outside the adapter
++lock: old policy log-probabilities cannot become stale before the step starts.
++"""
++from __future__ import annotations
++
++import queue
++import threading
++
++
++class PrefetchedRows:
++    """Single daemon producer, max two validated rows, ordered error delivery.
++
++    The Hub iterator is owned exclusively by the producer. A blocked upstream
++    network request may survive close until the transport times out; close must
++    not block local trainer shutdown or issue an unsafe cross-thread iterator
++    mutation. Exceptions propagate on the same next() they would without
++    prefetch, preserving fail-closed training behavior.
++    """
++    def __init__(self, source, *, capacity=2, read_timeout=120.0):
++        if type(capacity) is not int or not 1<=capacity<=8:
++            raise ValueError('prefetch capacity must be 1..8')
++        if not isinstance(read_timeout,(int,float)) or not 0.01<=read_timeout<=3600:
++            raise ValueError('prefetch read timeout must be .01..3600 seconds')
++        self.read_timeout=float(read_timeout)
++        self.source=source
++        self.queue=queue.Queue(maxsize=capacity)
++        self.stop=threading.Event()
++        self.closed=False
++        self.worker=threading.Thread(target=self._produce,name='kagami-hub-prefetch',daemon=True)
++        self.worker.start()
++
++    def _produce(self):
++        try:
++            while not self.stop.is_set():
++                try:
++                    item=(True,self.source.next())
++                except Exception as exc:
++                    item=(False,exc)
++                while not self.stop.is_set():
++                    try:
++                        self.queue.put(item,timeout=.1)
++                        break
++                    except queue.Full:
++                        pass
++                if not item[0]:
++                    break
++        finally:
++            # Keep one owning thread for dataset.close even under failure.
++            try:self.source.close()
++            except Exception:pass
++
++    def next(self):
++        if self.closed:
++            raise RuntimeError('Dataset prefetcher was closed')
++        try:
++            valid,result=self.queue.get(timeout=self.read_timeout)
++        except queue.Empty as exc:
++            self.close()
++            raise TimeoutError('Hub dataset prefetch stalled; check network, resume the trainer from its last durable checkpoint') from exc
++        if not valid:
++            self.close()
++            raise result
++        return result
++
++    def close(self):
++        self.closed=True
++        self.stop.set()
++        # Do not block on a hung remote dataset read during shutdown.
++        self.worker.join(timeout=.05)
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=*.log' '--exclude=*STATUS.md' '--exclude=VALIDATION*.md' '--exclude=CHANGES*.patch' '--exclude=BENCHMARK*.json' kagami-v71/patchlib/reward_model_v67.py kagami-v72/patchlib/reward_model_v67.py
+--- kagami-v71/patchlib/reward_model_v67.py	2026-10-27 09:45:16.000000000 +0000
++++ kagami-v72/patchlib/reward_model_v67.py	2026-10-27 14:55:53.609802431 +0000
+@@ -84,6 +84,7 @@
+         if device=='mps' and not torch.backends.mps.is_available():
+             raise RewardModelError('Reward Model MPS device was requested but unavailable')
+         self.device=torch.device(device)
++        self.idle_offload=bool(getattr(args,'reward_model_idle_offload',False)) and device!='cpu'
+         if model is None or tokenizer is None:
+             try:
+                 from transformers import AutoModelForSequenceClassification, AutoModel, AutoTokenizer
+@@ -109,7 +110,7 @@
+                                                           trust_remote_code=False)
+             except Exception as exc:
+                 raise RewardModelError('Cannot load Hugging Face reward checkpoint/tokenizer (must have supported scalar sequence classification head and trusted built-in architecture): '+str(exc)) from exc
+-        self.model=model.to(self.device).eval()
++        self.model=model.to('cpu' if self.idle_offload else self.device).eval()
+         self.tok=tokenizer
+         for parameter in self.model.parameters():
+             parameter.requires_grad_(False)
+@@ -120,8 +121,24 @@
+             raise RewardModelError('Reward label index is not valid for the model classification head')
+         self.calls=0
+ 
++    def close(self):
++        """Release an optional GPU resident copy without modifying frozen weights."""
++        if self.idle_offload:
++            self.model.to('cpu')
++
+     @torch.inference_mode()
+     def score(self, prompt: str, completion: str) -> float:
++        if self.idle_offload:
++            self.model.to(self.device)
++        try:
++            return self._score_active(prompt,completion)
++        finally:
++            if self.idle_offload:
++                # Scorer is frozen; no autograd graph/optimizer may retain the GPU copy.
++                self.model.to('cpu')
++
++    @torch.inference_mode()
++    def _score_active(self, prompt: str, completion: str) -> float:
+         if not isinstance(prompt,str) or not isinstance(completion,str) or not prompt or not completion:
+             raise RewardModelError('Reward scoring requires nonempty prompt and generated completion')
+         try:
+diff -ruN '--exclude=*.pyc' kagami-v71/web/desktop_webview.html kagami-v72/web/desktop_webview.html
+--- kagami-v71/web/desktop_webview.html	2026-10-27 14:13:13.405368974 +0000
++++ kagami-v72/web/desktop_webview.html	2026-10-27 14:58:15.619787992 +0000
+@@ -64,6 +64,7 @@
+       <div class="fieldgrid"><label class="wide"><span>HF model ID</span><div class="mixed-path"><input id="mixRewardModelId" placeholder="organization/reward-model" spellcheck="false"><button type="button" id="mixRewardSearch">おすすめから選ぶ</button></div><select hidden id="mixRewardSearchResults" aria-label="Hugging Face Reward Model search results"><option value="">Search to see models…</option></select></label>
+       <label class="wide"><span>Immutable revision (40-digit SHA)</span><div class="mixed-path"><input id="mixRewardRevision" placeholder="commit SHA (40 hex characters)" spellcheck="false"><button type="button" id="mixRewardPin">Pin current commit</button></div></label>
+       <label><span>Inference device</span><select id="mixRewardDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label>
++      <label><span>Memory mode</span><select id="mixRewardIdleOffload"><option value="off">Keep on selected device (faster)</option><option value="on">CPU offload between scores (lower idle VRAM)</option></select></label>
+       <label><span>Loader</span><select id="mixRewardLoader"><option value="sequence_classification">Sequence classification scorer</option><option value="auto_model">Generic AutoModel (must expose scalar output)</option></select></label>
+       <label><span>Prompt format</span><select id="mixRewardFormat"><option value="plain">Plain prompt + completion</option><option value="chat">Tokenizer chat template</option></select></label>
+       <label><span>Score tensor field</span><select id="mixRewardOutput"><option value="logits">logits</option><option value="score">score</option><option value="end_scores">end_scores</option><option value="rewards">rewards</option></select></label>
+diff -ruN '--exclude=*.pyc' kagami-v71/web/desktop_webview.js kagami-v72/web/desktop_webview.js
+--- kagami-v71/web/desktop_webview.js	2026-10-27 14:34:58.941768066 +0000
++++ kagami-v72/web/desktop_webview.js	2026-10-27 14:58:15.620147194 +0000
+@@ -380,6 +380,7 @@
+    const raw=get(id);data[field]=mixedNumeric.has(field)?Number(raw):raw;
+    if(mixedNumeric.has(field)&&(!raw||!Number.isFinite(data[field])||(mixedInt.has(field)&&!Number.isInteger(data[field]))))throw Error('Invalid '+field);
+  }
++ data.reward_model_idle_offload=get('mixRewardIdleOffload')==='on';
+  for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){if(get('mix'+tag+'Source')==='hf')data[role+'_jsonl']='';else{for(const key of Object.keys(data))if(key.startsWith(role+'_hf_'))data[key]='';}}
+  if(!data.sft_jsonl&&!data.ppo_jsonl&&!data.sft_hf_repo&&!data.ppo_hf_repo&&data.pt_weight<=0)throw Error('Select an SFT/PPO dataset or assign a positive PT weight');
+  if(!mixedPinnedPolicy){
+@@ -397,7 +398,7 @@
+     reward_model_output:'logits',reward_model_format:'plain',reward_model_index:0,reward_model_scale:1,reward_model_max_length:512,critic_kind:'mlp',critic_hidden:32,critic_lr:.001,critic_hf_repo:'',critic_hf_revision:'',critic_hf_loader:'sequence_classification',critic_hf_device:'cpu',critic_hf_max_length:512};
+   const hfDefaults={sft_hf_split:'train',sft_hf_prompt_column:'prompt',sft_hf_response_column:'response',ppo_hf_split:'train',ppo_hf_prompt_column:'prompt',ppo_hf_reference_column:'reference'};
+   $(id).value=value??defaults[field]??hfDefaults[field]??'';
+- }for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){$('mix'+tag+'Source').value=data?.[role+'_hf_repo']?'hf':data?.[role+'_jsonl']?'local':'hf';}syncMixed();}
++ }$('mixRewardIdleOffload').value=data?.reward_model_idle_offload?'on':'off';for(const [role,tag] of [['sft','Sft'],['ppo','Ppo']]){$('mix'+tag+'Source').value=data?.[role+'_hf_repo']?'hf':data?.[role+'_jsonl']?'local':'hf';}syncMixed();}
+ async function reloadMixed(room){
+  const data=await api('mixedSettings',{room});mixedPinnedPolicy=data.pinned_policy||null;
+  if(mixedPinnedPolicy&&!data.enabled){
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' kagami-v71/tests/test_ppo_pipeline_v72.py kagami-v72/tests/test_ppo_pipeline_v72.py
+--- kagami-v71/tests/test_ppo_pipeline_v72.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v72/tests/test_ppo_pipeline_v72.py	2026-10-27 15:07:20.100602780 +0000
+@@ -0,0 +1,173 @@
++"""Safety/performance regressions for opt-in PPO actor cache and auxiliary CPU offload."""
++import json
++import threading
++import time
++from types import SimpleNamespace
++
++import pytest
++import torch
++from torch import nn
++
++from patchlib.mixed_learning_v65 import MixedObjectiveTrainer
++from patchlib.ppo_pipeline_v72 import PrefetchedRows
++from patchlib.reward_model_v67 import HFRewardScorer
++from patchlib.mix_gui_v66 import DEFAULT,normalize,command_options
++
++
++class SmallTokenizer:
++    eos_token_id=None
++    def encode(self,s,add_special_tokens=False):return [2+(ord(ch)%10) for ch in s]
++    def decode(self,ids,skip_special_tokens=False):return ''.join(chr(65+int(v)%26) for v in ids)
++
++
++class CacheLM(nn.Module):
++    """Deterministic causal LM, supports incremental cache with exact full-prefix parity."""
++    def __init__(self):
++        super().__init__()
++        self.emb=nn.Embedding(20,8)
++        self.head=nn.Linear(8,20)
++        self.lengths=[]
++    def forward(self,input_ids,attention_mask=None,past_key_values=None,use_cache=False):
++        self.lengths.append(input_ids.shape[1])
++        tokens=(torch.cat((past_key_values,input_ids),dim=1)
++                if past_key_values is not None else input_ids)
++        hidden=self.emb(tokens).cumsum(dim=1)
++        return {'logits':self.head(hidden[:,-input_ids.shape[1]:]),
++                'past_key_values':tokens.detach() if use_cache else None}
++
++
++def args(tmp_path,**kw):
++    path=tmp_path/'ppo.jsonl'
++    path.write_text(json.dumps({'prompt':'good','reference':'right'})+'\n')
++    d=dict(ppo_jsonl=path,sft_jsonl=None,ppo_reward='token_match',
++           max_length=36,ppo_max_tokens=6,ppo_reuse=2,
++           ppo_clip=.2,ppo_kl_coef=.02,ppo_value_coef=.5,ppo_gamma=.99,
++           ppo_gae_lambda=.95,ppo_kv_cache='auto',pt_weight=0.,
++           sft_weight=0.,ppo_weight=1.,hf_task='causal-lm',loss_policy='auto',
++           critic_kind='mlp',critic_hidden=12,critic_lr=.003,model='unit')
++    d.update(kw)
++    return SimpleNamespace(**d)
++
++
++def test_kv_cache_old_probs_match_full_recompute(tmp_path):
++    torch.manual_seed(333)
++    cache_model=CacheLM()
++    plain_model=CacheLM();plain_model.load_state_dict(cache_model.state_dict())
++    cache=MixedObjectiveTrainer(args(tmp_path),SmallTokenizer())
++    plain=MixedObjectiveTrainer(args(tmp_path,ppo_kv_cache='off'),SmallTokenizer())
++    try:
++        torch.manual_seed(902)
++        loss1,critic1,_=cache.ppo_loss(cache_model,torch.device('cpu'))
++        torch.manual_seed(902)
++        loss2,critic2,_=plain.ppo_loss(plain_model,torch.device('cpu'))
++        assert cache.cached['tokens'].tolist()==plain.cached['tokens'].tolist()
++        assert torch.allclose(cache.cached['old_lp'],plain.cached['old_lp'],atol=1e-6)
++        assert torch.allclose(loss1,loss2,atol=1e-6)
++        assert cache_model.lengths[0]==4  # actor prefill + later 1-token steps
++        assert cache_model.lengths[1:len(cache.cached['tokens'])]==[1]*(len(cache.cached['tokens'])-1)
++        assert any(n>1 for n in plain_model.lengths[1:len(plain.cached['tokens'])])
++        (loss1+critic1).backward()
++        assert cache_model.head.weight.grad is not None
++        assert torch.isfinite(cache_model.head.weight.grad).all()
++        # The PPO actor optimization is always a full differentiable forward.
++        assert cache_model.lengths[-1]==cache.cached['ids'].shape[1]
++    finally:
++        cache.close();plain.close()
++
++
++def test_kv_cache_falls_back_if_model_never_returns_cache(tmp_path):
++    class NoCache(CacheLM):
++        def forward(self,input_ids,attention_mask=None,past_key_values=None,use_cache=False):
++            result=super().forward(input_ids,attention_mask,past_key_values,use_cache=False)
++            result['past_key_values']=None
++            return result
++    m=NoCache();tr=MixedObjectiveTrainer(args(tmp_path),SmallTokenizer())
++    try:
++        tr.ppo_loss(m,torch.device('cpu'))
++        assert m.lengths[0]==4
++        assert m.lengths[1]>1
++    finally:tr.close()
++
++
++def test_hub_prefetch_delivers_in_order_and_propagates_error():
++    class Source:
++        def __init__(self):self.n=0;self.closed=False
++        def next(self):
++            self.n+=1
++            if self.n==4:raise RuntimeError('Hub connection failed')
++            return {'prompt':str(self.n)}
++        def close(self):self.closed=True
++    src=Source();prefetch=PrefetchedRows(src,capacity=2)
++    assert [prefetch.next()['prompt'] for _ in range(3)]==['1','2','3']
++    with pytest.raises(RuntimeError,match='Hub connection failed'):prefetch.next()
++    assert prefetch.closed
++    prefetch.worker.join(timeout=1)
++    assert src.closed
++
++
++def test_prefetch_close_does_not_wait_on_hung_network():
++    event=threading.Event();started=threading.Event()
++    class Source:
++        def next(self):started.set();event.wait(5);return {'prompt':'late'}
++        def close(self):pass
++    r=PrefetchedRows(Source())
++    try:
++        assert started.wait(1)
++        begin=time.perf_counter();r.close();assert time.perf_counter()-begin<.4
++    finally:
++        event.set();r.worker.join(timeout=1)
++
++
++def test_reward_idle_cpu_offload_returns_after_failure(monkeypatch):
++    # Device travel can be tested without a GPU: a frozen module records .to().
++    monkeypatch.setattr(torch.cuda,'is_available',lambda:True)
++    class FakeModel(nn.Module):
++        def __init__(self):
++            super().__init__();self.weight=nn.Parameter(torch.ones(1));self.config=SimpleNamespace(num_labels=1)
++            self.moves=[]
++        def to(self,device):self.moves.append(str(device));return self
++    config=SimpleNamespace(ppo_reward='hf_model',reward_model_id='Org/test',
++          reward_model_revision='a'*40,reward_model_loader='sequence_classification',
++          reward_model_output='logits',reward_model_index=0,reward_model_scale=1.,
++          reward_model_format='plain',reward_model_max_length=128,
++          reward_model_device='cuda',reward_model_idle_offload=True)
++    model=FakeModel()
++    r=HFRewardScorer(config,model=model,tokenizer=object())
++    assert model.moves==['cpu']
++    monkeypatch.setattr(r,'_score_active',lambda a,b:2.5)
++    assert r.score('foo','bar')==2.5
++    assert model.moves[-2:]==['cuda','cpu']
++    def fail(a,b):raise ValueError('bad score')
++    monkeypatch.setattr(r,'_score_active',fail)
++    with pytest.raises(ValueError,match='bad score'):r.score('foo','bar')
++    assert model.moves[-1]=='cpu'
++
++
++def test_gui_offload_local_only_and_cli(tmp_path):
++    args={**DEFAULT,'enabled':True,'sft_weight':0.,'ppo_weight':1.,
++          'ppo_jsonl':str(tmp_path/'rows.jsonl'),
++          'ppo_reward':'hf_model','reward_model_id':'Org/reward',
++          'reward_model_revision':'a'*40,'reward_model_idle_offload':True}
++    (tmp_path/'rows.jsonl').write_text('{"prompt":"hello"}\n')
++    v=normalize(args,task='causal-lm')
++    cli=command_options(v,state_dir=tmp_path/'critic')
++    assert '--reward-model-idle-offload' in cli
++    from patchlib.mix_gui_v66 import objective_policy
++    assert 'reward_model_idle_offload' not in json.dumps(objective_policy(v))
++    with pytest.raises(ValueError,match='boolean'):
++        normalize({**args,'reward_model_idle_offload':'yes'},task='causal-lm')
++
++
++def test_hub_prefetch_timeout_fails_closed():
++    event=threading.Event();started=threading.Event()
++    class Stalled:
++        def next(self):started.set();event.wait(1);return {'prompt':'eventually'}
++        def close(self):pass
++    data=PrefetchedRows(Stalled(),read_timeout=.03)
++    try:
++        assert started.wait(.5)
++        with pytest.raises(TimeoutError,match='Hub dataset prefetch stalled'):
++            data.next()
++        assert data.closed
++    finally:
++        event.set();data.worker.join(timeout=1)

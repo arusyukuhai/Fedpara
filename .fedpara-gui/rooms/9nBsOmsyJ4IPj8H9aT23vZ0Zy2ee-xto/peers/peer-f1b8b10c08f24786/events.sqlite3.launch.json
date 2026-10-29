@@ -1,0 +1,1 @@
+{"auto_state": false, "base": null, "initialization": "pretrained", "manifest_digest": "644deeae5a6dcff65ec8d9c2242471f0b871201add95a793fa7b785e6c29795f", "optimizer": "adamw", "reinit_every": 20, "streaming_base": true, "version": 1}

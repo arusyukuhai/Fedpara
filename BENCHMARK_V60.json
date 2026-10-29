@@ -1,0 +1,13 @@
+{
+  "disclaimer": "local CPU synthetic startup only; does not cover 300B, P2P, GPU, or full optimizer",
+  "width": 1536,
+  "layers": 4,
+  "base_size_bytes": 37749096,
+  "eager_startup_s": 0.0159,
+  "eager_initial_mutable_scratch_bytes": 37748736,
+  "lazy_startup_and_adapter_s": 0.003383,
+  "lazy_initial_mutable_scratch_bytes": 0,
+  "lazy_first_tensor_materialization_s": 0.004312,
+  "lazy_first_tensor_materialized_bytes": 9437184,
+  "note": "Times not apples-to-apples: lazy path includes adapter construction; first mutation cost is deferred."
+}

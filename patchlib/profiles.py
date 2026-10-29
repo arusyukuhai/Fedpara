@@ -61,6 +61,19 @@ def allocate_profile(room_dir: Path) -> PeerProfile:
     for directory in sorted(profiles.iterdir()):
         if directory.is_dir() and not directory.is_symlink() and directory.name.startswith('peer-'):
             candidates.append((directory.name, directory / 'events.sqlite3', directory / 'active.lock'))
+    # Reclaim the profile carrying the most durable history first. Earlier
+    # alphabetical order often selected an empty peer-* directory after a
+    # crash/upgrade, making the trained model appear reset on restart.
+    def history_score(item):
+        _, journal, _ = item
+        archive = Path(str(journal) + '.fplog')
+        try:
+            return (archive.stat().st_size if archive.is_file() else 0,
+                    journal.stat().st_size if journal.is_file() else 0,
+                    journal.stat().st_mtime_ns if journal.is_file() else 0)
+        except OSError:
+            return (0, 0, 0)
+    candidates.sort(key=history_score, reverse=True)
     for name, journal, lock in candidates:
         fd = _acquire(lock)
         if fd is not None:

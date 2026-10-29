@@ -1,0 +1,637 @@
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -2516,6 +2516,7 @@
+             optimizer=new_optimizer();optimizer.zero_grad(set_to_none=True)
+             nonlocal_optimizer[0]=optimizer
+             from .localprogress import _tip
++            await working_saver.drain()
+             await asyncio.to_thread(save_working,journal,adapter,
+                 optimizer,0,journal_tip=_tip(journal))
+             # The verified model already covers the signed journal cut-off.
+@@ -2550,11 +2551,34 @@
+         return await asyncio.to_thread(worker)
+ 
+     compact_last_export=0
+-    compact_export_busy=False
++    compact_export_task=None
+     async def maybe_propose_compact_epoch():
+-        nonlocal compact_last_export,compact_export_busy
++        nonlocal compact_last_export,compact_export_task
++        import sqlite3
+         frequency=getattr(args,'generation_v2_propose_every',0)
+-        if not frequency or compact_export_busy or not initial_complete:
++        if not frequency or not initial_complete:
++            return
++        # The expensive model+shard I/O runs concurrently with new training
++        # steps. Only the short low-rank factor+cut capture needs ingress and
++        # optimizer admission locked at a sealed step boundary.
++        if compact_export_task is not None:
++            if not compact_export_task.done():
++                return
++            completed=compact_export_task
++            compact_export_task=None
++            try:
++                epoch_at_capture,parent_at_capture,p,pages,receipt=completed.result()
++                if (trainer_router.current.epoch!=epoch_at_capture-1 or
++                        generation_compact_ledger.head()!=parent_at_capture):
++                    log.warning('obsolete compact snapshot ignored after epoch switch')
++                else:
++                    generation_compact_control.receive_export_receipt(receipt,p)
++                    generation_compact_control.offer(p,pages)
++                    print(f'COMPACT EPOCH CANDIDATE epoch={p["epoch"]} '
++                          f'origins={p["frontier_header"]["total"]} '
++                          f'pages={len(pages)} manifest={p["manifest"][:16]}',flush=True)
++            except (PatchError,OSError,sqlite3.Error,ValueError) as exc:
++                log.warning('background compact checkpoint export failed: %s',exc)
+             return
+         if (generation_compact_control is None or generation_trainer_ledger is None or
+                 args.peer_id!=min(generation_committee) or
+@@ -2563,44 +2587,66 @@
+         latest=generation_compact_ledger.latest()
+         if latest is not None and latest['proposal']['epoch']>trainer_router.current.epoch:
+             return
++        target_epoch=trainer_router.current.epoch+1
++        parent=generation_compact_ledger.head()
+         if generation_compact_control.db.execute(
+                 'SELECT 1 FROM proposals WHERE epoch=? LIMIT 1',
+-                (trainer_router.current.epoch+1,)).fetchone():
++                (target_epoch,)).fetchone():
+             return
++        from types import SimpleNamespace
+         from .epoch_export_v57 import export_at_step_boundary
+-        import sqlite3
+-        compact_export_busy=True
++        from .epoch_frozen_export_v58 import (capture as freeze_export,
++                                                     finish_deferred_frontier)
++        compact_last_export=emitted
+         try:
+             await seal_if_needed()
+             async with inbound_commit_lock:
+-                def export_worker():
+-                    with sqlite3.connect(journal.path,timeout=30) as db:
++                def capture_worker():
++                    # Read-only WAL snapshot is pinned BEFORE factors are
++                    # captured, while the trainer and ingress are fenced.
++                    # The O(history) prefix scan runs only after release.
++                    db=sqlite3.connect(journal.path,timeout=30,
++                                       check_same_thread=False)
++                    try:
+                         db.execute('PRAGMA query_only=ON')
+-                        class CutView:
+-                            pass
+-                        view=CutView();view.db=db
+-                        view.count=lambda:db.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+-                        return export_at_step_boundary(
+-                            journal=view,model=model,adapter=adapter,
+-                            store=snapshot_store,incoming=snapshot_recv,
+-                            room=args.room_id,epoch=trainer_router.current.epoch+1,
+-                            parent=generation_compact_ledger.head(),
+-                            replicas=list(generation_compact_ledger.committee),
+-                            signer=signer,peer=args.peer_id,
+-                            max_state_bytes=args.max_state_gb*1024**3,
+-                            shard_bytes=args.shard_mb*1024**2)
+-                p,pages,receipt=await asyncio.to_thread(export_worker)
+-                generation_compact_control.receive_export_receipt(receipt,p)
+-                generation_compact_control.offer(p,pages)
+-                compact_last_export=emitted
+-                print(f'COMPACT EPOCH CANDIDATE epoch={p["epoch"]} '
+-                      f'origins={p["frontier_header"]["total"]} '
+-                      f'pages={len(pages)} manifest={p["manifest"][:16]}',flush=True)
++                        db.execute('BEGIN')
++                        db.execute('SELECT COALESCE(MAX(rowid),0) FROM events').fetchone()
++                        frozen=freeze_export(journal=SimpleNamespace(db=db),
++                            model=model,adapter=adapter,defer_frontier=True,
++                            max_factor_bytes=min(256*1024**2,
++                                                 args.max_state_gb*1024**3))
++                        return frozen,db
++                    except BaseException:
++                        db.close()
++                        raise
++                frozen,snapshot_db=await asyncio.to_thread(capture_worker)
++            captured_model=model
++            captured_adapter=adapter
++            captured_journal_path=journal.path
++            def export_worker():
++                try:
++                    completed=finish_deferred_frontier(frozen,snapshot_db)
++                finally:
++                    # Never hold a WAL read transaction while writing a large
++                    # checkpoint: it would indefinitely pin the growing WAL.
++                    snapshot_db.close()
++                with sqlite3.connect(captured_journal_path,timeout=30) as db:
++                    db.execute('PRAGMA query_only=ON')
++                    view=SimpleNamespace(db=db,count=lambda:db.execute(
++                        'SELECT COUNT(*) FROM events').fetchone()[0])
++                    p,pages,receipt=export_at_step_boundary(
++                        journal=view,model=captured_model,adapter=captured_adapter,
++                        store=snapshot_store,incoming=snapshot_recv,
++                        room=args.room_id,epoch=target_epoch,parent=parent,
++                        replicas=list(generation_compact_ledger.committee),
++                        signer=signer,peer=args.peer_id,
++                        max_state_bytes=args.max_state_gb*1024**3,
++                        shard_bytes=args.shard_mb*1024**2,frozen=completed)
++                    return target_epoch,parent,p,pages,receipt
++            compact_export_task=asyncio.create_task(
++                asyncio.to_thread(export_worker),name='kagami-v58-cow-shard-export')
+         except (PatchError,OSError,sqlite3.Error,ValueError) as exc:
+-            compact_last_export=emitted
+-            log.warning('fenced compact checkpoint export deferred: %s',exc)
+-        finally:
+-            compact_export_busy=False
++            log.warning('frozen compact checkpoint capture deferred: %s',exc)
+ 
+     async def maybe_checkpoint():
+         nonlocal next_checkpoint,optimizer
+@@ -3230,8 +3276,8 @@
+                 save_started=time.monotonic()
+                 async with inbound_commit_lock:
+                     tip=_tip(journal)
+-                    await asyncio.to_thread(save_working,journal,adapter,optimizer,
+-                                            local_steps,journal_tip=tip)
++                    await working_saver.checkpoint(journal,adapter,optimizer,
++                                                   local_steps,journal_tip=tip)
+                 last_working_save_ms=(time.monotonic()-save_started)*1000
+             if local_steps>=publish_target:
+                 await seal_if_needed()
+@@ -3288,6 +3334,16 @@
+                 revision=adapter.revision,peer_id=args.peer_id,seq=journal.count(),
+                 adapter=adapter,max_bytes=args.max_state_gb*1024**3)
+     finally:
++        # A cancelled to_thread wrapper does not stop its OS worker. Drain the
++        # exporter before releasing journals, signer and shard-store resources.
++        if compact_export_task is not None:
++            try:
++                await asyncio.shield(compact_export_task)
++                # Publish an already completed signed candidate while the
++                # journal and compact ledger are still open on clean exit.
++                await maybe_propose_compact_epoch()
++            except Exception as exc:
++                log.warning('outstanding background export failed on shutdown: %s',exc)
+         if auto_epoch_prepare is not None:
+             auto_epoch_prepare.cancel()
+             await asyncio.gather(auto_epoch_prepare,return_exceptions=True)
+--- a/patchlib/epoch_export_v57.py
++++ b/patchlib/epoch_export_v57.py
+@@ -54,7 +54,7 @@
+ 
+ def export_at_step_boundary(*, journal, model, adapter, store, incoming, room, epoch,
+                             parent, replicas, signer, peer, max_state_bytes,
+-                            shard_bytes=4*1024**2):
++                            shard_bytes=4*1024**2, frozen=None):
+     """Synchronous under a caller-owned TRAINER writer fence/ingress lock.
+ 
+     Must not be called from an arbitrary network callback; no concurrent
+@@ -63,7 +63,19 @@
+     """
+     if peer not in replicas or not callable(signer):
+         raise PatchError('exporter must be pinned committee replica')
+-    frontier, inventory=_indexed_frontier(journal)
++    if frozen is None:
++        frontier, inventory=_indexed_frontier(journal)
++        effective_adapter=adapter
++        export_seq=journal.count()
++    else:
++        if frozen.frontier is None or frozen.inventory is None:
++            raise PatchError('unfinalized frozen checkpoint frontier')
++        # A frozen, immutable low-rank view can be serialized while the owner
++        # continues training. Recheck its shared base before and after export.
++        frozen.assert_immutable_base()
++        frontier, inventory=frozen.frontier, frozen.inventory
++        effective_adapter=frozen.adapter
++        export_seq=frozen.event_count
+     header,pages=build_frontier_pages(frontier)
+     incoming=Path(incoming);store=Path(store)
+     if incoming.is_symlink() or store.is_symlink():
+@@ -78,7 +90,7 @@
+     try:
+         meta=export_state_sharded(model,store,temp,
+             model_id=adapter.model_id,revision=adapter.revision,peer_id=peer,
+-            seq=journal.count(),adapter=adapter,shard_bytes=shard_bytes,
++            seq=export_seq,adapter=effective_adapter,shard_bytes=shard_bytes,
+             max_state_bytes=max_state_bytes)
+         # Harden the content-addressed blobs against a sudden power failure.
+         # The regular streaming exporter omits per-shard fsync for throughput;
+@@ -96,8 +108,14 @@
+             finally:os.close(fd)
+         # A full indexed cut is checked again after export, preventing any
+         # accidentally unfenced DB mutation from silently becoming certified.
+-        if _indexed_frontier(journal)!=(frontier,inventory):
+-            raise PatchError('signed journal changed during snapshot export')
++        if frozen is None:
++            if _indexed_frontier(journal)!=(frontier,inventory):
++                raise PatchError('signed journal changed during snapshot export')
++        else:
++            frozen.assert_immutable_base()
++            # Suffix events are allowed: verify exactly the captured *prefix*
++            # against the durable journal rather than requiring a frozen DB.
++            verify_certified_cut(journal,frontier,inventory)
+         with temp.open('rb') as fp:
+             manifest_hash=hashlib.file_digest(fp,'sha256').hexdigest()
+         p=proposal_v2(room=room,epoch=epoch,parent=parent,
+--- a/patchlib/epoch_frozen_export_v58.py
++++ b/patchlib/epoch_frozen_export_v58.py
+@@ -0,0 +1,122 @@
++"""Bounded-factor, asynchronous effective-weight snapshots for Kagami.
++
++Only call capture() at a *sealed* trainer step boundary while serialized with
++all incoming signed model mutations. Frozen low-rank factors are independent
++CPU copies; the immutable BASE tensor storage is shared, not cloned. The
++original tensor versions/storage are checked before and after streaming.
++
++This is NOT a generic concurrent checkpoint of arbitrary mutable PyTorch
++models. Any base mutation, opaque .data write or uncoordinated module change
++invalidates the immutable-base contract; the trusted trainer must serialize
++such changes and reject an unrecognised mutation. Dense fallback LoHA factors
++are subject to a strict capture byte budget.
++"""
++from __future__ import annotations
++from dataclasses import dataclass, replace
++from types import SimpleNamespace
++from pathlib import Path
++import threading
++import torch
++from .core import PatchError
++from .shard_runtime import effective_state_sources
++from .epoch_export_v57 import _indexed_frontier
++
++
++class _ImmutableFactor:
++    def __init__(self, source, budget):
++        for name in ('kind', 'rank', 'alpha', 'dense', 'shape'):
++            setattr(self, name, getattr(source, name))
++        parts = source.parts if hasattr(source, 'parts') else [getattr(source, f'part{i}') for i in range(source.nparts)]
++        self.parts = []
++        for part in parts:
++            size = part.numel() * part.element_size()
++            budget[0] += size
++            if budget[0] > budget[1]:
++                raise PatchError('frozen factor snapshot exceeds memory budget')
++            # Offload the *low-rank* factors, not full model tensors.
++            self.parts.append(part.detach().to('cpu', copy=True).contiguous())
++
++
++class _ImmutableOverlay:
++    def __init__(self, source, budget):
++        self.local = _ImmutableFactor(source.local, budget)
++        if hasattr(source, 'anchor'):
++            self.anchor = _ImmutableFactor(source.anchor, budget)
++        self.remotes = {name: _ImmutableFactor(value, budget)
++                        for name, value in source.remotes.items()}
++
++
++@dataclass(frozen=True)
++class FrozenExport:
++    adapter: object
++    sources: tuple
++    frontier: dict
++    inventory: str
++    event_count: int
++    factor_bytes: int
++    model: object
++
++    def assert_immutable_base(self):
++        """Fail closed on normal PyTorch in-place/storage/base replacements."""
++        now = effective_state_sources(self.model, self.adapter)
++        if set(now) != {x[0] for x in self.sources}:
++            raise PatchError('model topology changed during frozen export')
++        for name, ident, version, ptr, offset, shape, dtype in self.sources:
++            tensor = now[name][0]
++            if (id(tensor) != ident or tensor._version != version or
++                    tensor.untyped_storage().data_ptr() != ptr or
++                    tensor.storage_offset() != offset or
++                    tuple(tensor.shape) != shape or str(tensor.dtype) != dtype):
++                raise PatchError('base tensor changed during frozen export')
++
++
++def capture(*, journal, model, adapter, max_factor_bytes=256 * 1024**2,
++            defer_frontier=False):
++    """Capture at one fenced optimizer step boundary, not from P2P callbacks.
++
++    The caller owns `inbound_commit_lock`; optimizer and model installation may
++    not run concurrently with this function. Factor copies and the indexed cut
++    are made while the trainer is quiescent. Disk serialization happens later.
++    """
++    if type(max_factor_bytes) is not int or max_factor_bytes <= 0:
++        raise ValueError('invalid frozen factor budget')
++    with adapter.lock, torch.no_grad():
++        sources = effective_state_sources(model, adapter)
++        base_info = []
++        for name, (tensor, _) in sorted(sources.items()):
++            base_info.append((name, id(tensor), tensor._version,
++                 tensor.untyped_storage().data_ptr(), tensor.storage_offset(),
++                 tuple(tensor.shape), str(tensor.dtype)))
++        budget = [0, max_factor_bytes]
++        groups = [SimpleNamespace(aliases=tuple(group.aliases),
++                   overlay=_ImmutableOverlay(group.overlay, budget))
++                  for group in adapter.groups]
++        frozen = SimpleNamespace(model_id=adapter.model_id,
++            revision=adapter.revision, groups=groups, lock=threading.RLock())
++        if defer_frontier:
++            # The caller must have pinned a SQLite WAL reader snapshot under
++            # the same optimizer+ingress fence BEFORE copying these factors.
++            # Its indexed scan can then run after the fence is released.
++            frontier, inventory = None, None
++        else:
++            frontier, inventory = _indexed_frontier(journal)
++        result = FrozenExport(frozen, tuple(base_info), frontier, inventory,
++                              sum(frontier.values()) if frontier is not None else None,
++                              budget[0], model)
++        result.assert_immutable_base()
++        return result
++
++
++def finish_deferred_frontier(frozen: FrozenExport, snapshot_db):
++    """Complete a pinned WAL read snapshot *outside* the trainer writer fence.
++
++    snapshot_db was BEGIN/read-pinned before factor capture, and must remain
++    exclusively owned by this worker until this method returns. The caller
++    closes it immediately after scanning to avoid prolonged WAL retention.
++    """
++    if frozen.frontier is not None or frozen.inventory is not None:
++        raise PatchError('snapshot frontier was already finalized')
++    frontier, inventory = _indexed_frontier(SimpleNamespace(db=snapshot_db))
++    frozen.assert_immutable_base()
++    return replace(frozen, frontier=frontier, inventory=inventory,
++                   event_count=sum(frontier.values()))
+--- a/patchlib/localprogress.py
++++ b/patchlib/localprogress.py
+@@ -66,6 +66,10 @@
+         save_file(tensors,str(name),metadata={'fedpara':json.dumps(meta,sort_keys=True)})
+         with name.open('rb') as fh: os.fsync(fh.fileno())
+         os.replace(name,target)
++        # Atomic rename alone is not a power-loss durable publication.
++        dfd=os.open(target.parent,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
++        try: os.fsync(dfd)
++        finally: os.close(dfd)
+     finally:
+         name.unlink(missing_ok=True)
+ 
+--- a/tests/test_epoch_v58_frozen_export.py
++++ b/tests/test_epoch_v58_frozen_export.py
+@@ -0,0 +1,205 @@
++"""v58: actual torch LowRank/COW export, suffix, tamper, and budget regressions."""
++from __future__ import annotations
++import asyncio
++import hashlib
++import threading
++import sqlite3
++from types import SimpleNamespace
++from pathlib import Path
++
++import pytest
++import torch
++from patchlib.core import UniversalAdapter,PatchError
++from patchlib.elastic import EventJournal
++from patchlib.epoch_frozen_export_v58 import capture
++from patchlib.epoch_export_v57 import export_at_step_boundary,verify_receipt
++from patchlib.identity import generate_keypair,signer_from_pem,verifier_from_pem
++from patchlib.shards import read_manifest,verify_shards,_blob_path
++from patchlib.shard_runtime import effective_chunks,effective_state_sources
++
++
++def setup(tmp_path):
++    model=torch.nn.Sequential(torch.nn.Linear(8,4),torch.nn.Linear(4,2))
++    adapter=UniversalAdapter(model,'frozen-tiny','r1',kind='loha',rank=2)
++    journal=EventJournal(tmp_path/'events.sqlite3','a'*64)
++    key=tmp_path/'a.key';pub=tmp_path/'a.pub'
++    generate_keypair(key,pub)
++    return model,adapter,journal,signer_from_pem(key),{'a':verifier_from_pem(pub)}
++
++
++def contents(model,adapter):
++    return {n:b''.join(effective_chunks(t,o,chunk_bytes=65536))
++            for n,(t,o) in effective_state_sources(model,adapter).items()}
++
++
++def export(tmp_path,model,adapter,journal,signer,frozen):
++    return export_at_step_boundary(journal=journal,model=model,adapter=adapter,
++        store=tmp_path/'store',incoming=tmp_path/'incoming',room='test',epoch=1,
++        parent='0'*64,replicas=['a','b'],signer=signer,peer='a',
++        max_state_bytes=1024**2,shard_bytes=65536,frozen=frozen)
++
++
++def read_payload(meta,store):
++    return {spec['name']:b''.join(_blob_path(store,c['sha256']).read_bytes()
++           for c in spec['shards']) for spec in meta['tensors']}
++
++
++def test_frozen_factors_are_independent_while_training_proceeds(tmp_path):
++    model,adapter,journal,signer,trusted=setup(tmp_path)
++    try:
++        assert journal.append('alice',1,b'old-update')
++        frozen=capture(journal=journal,model=model,adapter=adapter)
++        expected=contents(model,adapter)
++        with torch.no_grad():
++            for group in adapter.groups:
++                for part in group.overlay.local.parts:
++                    part.add_(.1)
++        assert journal.append('alice',2,b'post-capture-update')
++        assert contents(model,adapter)!=expected
++        p,pages,receipt=export(tmp_path,model,adapter,journal,signer,frozen)
++        assert verify_receipt(receipt,p,trusted=trusted,committee=['a','b'])
++        meta=read_manifest(tmp_path/'incoming'/(p['manifest']+'.fmanifest'))
++        verify_shards(meta,tmp_path/'store')
++        assert read_payload(meta,tmp_path/'store')==expected
++        assert meta['seq']==1  # not the later journal size
++        assert frozen.frontier=={'alice':1}
++        assert frozen.factor_bytes>0
++    finally:journal.close()
++
++
++def test_base_in_place_mutation_never_receives_a_signature(tmp_path):
++    model,adapter,journal,signer,_=setup(tmp_path)
++    try:
++        frozen=capture(journal=journal,model=model,adapter=adapter)
++        with torch.no_grad():
++            model[0].parametrizations.weight.original.add_(1.)
++        with pytest.raises(PatchError,match='base tensor changed'):
++            export(tmp_path,model,adapter,journal,signer,frozen)
++        assert not list((tmp_path/'incoming').glob('*.fmanifest')) if (tmp_path/'incoming').exists() else True
++    finally:journal.close()
++
++
++def test_byte_budget_rejects_full_dense_fallback(tmp_path):
++    model,adapter,journal,signer,_=setup(tmp_path)
++    try:
++        with pytest.raises(PatchError,match='memory budget'):
++            capture(journal=journal,model=model,adapter=adapter,max_factor_bytes=1)
++    finally:journal.close()
++
++
++def test_cut_mutation_during_async_export_is_rejected(tmp_path):
++    model,adapter,journal,signer,_=setup(tmp_path)
++    try:
++        assert journal.append('alice',1,b'a')
++        frozen=capture(journal=journal,model=model,adapter=adapter)
++        # Authorized append is fine; modifying a prefix is not.
++        # New journal v55 guards existing-row updates and replacements.
++        p,_,_=export(tmp_path,model,adapter,journal,signer,frozen)
++        assert p['inventory']==frozen.inventory
++        # A trusted DB writer can modify the index. It must invalidate the
++        # captured signed prefix even if the audit trigger is present.
++        journal.db.execute("UPDATE events SET digest=? WHERE origin='alice'",('f'*64,))
++        journal.db.commit()
++        with pytest.raises(PatchError,match='certified-cut'):
++            export(tmp_path,model,adapter,journal,signer,frozen)
++    finally:journal.close()
++
++
++def test_remote_overlay_install_is_frozen(tmp_path):
++    model,adapter,journal,signer,_=setup(tmp_path)
++    try:
++        first=adapter.groups[0]
++        parts=[torch.ones_like(p)*.25 for p in first.overlay.local.parts]
++        first.overlay.install('remote',parts)
++        expected=contents(model,adapter)
++        frozen=capture(journal=journal,model=model,adapter=adapter)
++        first.overlay.remove('remote')
++        first.overlay.install('other',[p*2 for p in parts])
++        p,_,_=export(tmp_path,model,adapter,journal,signer,frozen)
++        meta=read_manifest(tmp_path/'incoming'/(p['manifest']+'.fmanifest'))
++        assert read_payload(meta,tmp_path/'store')==expected
++    finally:journal.close()
++
++
++@pytest.mark.asyncio
++async def test_background_export_does_not_block_training_or_p2p_loop(tmp_path,monkeypatch):
++    from patchlib import epoch_export_v57
++    import time
++    model,adapter,journal,signer,_=setup(tmp_path)
++    try:
++        frozen=capture(journal=journal,model=model,adapter=adapter)
++        original=epoch_export_v57.export_state_sharded
++        started=threading.Event()
++        def slow(*args,**kwargs):
++            started.set()
++            time.sleep(.25)  # Simulated slow multi-shard fsync/offload
++            return original(*args,**kwargs)
++        monkeypatch.setattr(epoch_export_v57,'export_state_sharded',slow)
++        def background():
++            with sqlite3.connect(journal.path) as db:
++                view=SimpleNamespace(db=db,count=lambda: db.execute('SELECT COUNT(*) FROM events').fetchone()[0])
++                return export(tmp_path,model,adapter,view,signer,frozen)
++        task=asyncio.create_task(asyncio.to_thread(background))
++        while not started.is_set():
++            await asyncio.sleep(.005)
++        ticks=0
++        for _ in range(15):
++            with torch.no_grad():
++                for group in adapter.groups:
++                    for part in group.overlay.local.parts:
++                        part.add_(.001)
++            if ticks==0: await journal.append_async('alice',1,b'signed-post-cut-event')
++            ticks+=1
++            await asyncio.sleep(.005)
++        assert ticks==15 and not task.done()
++        p,_,_=await task
++        meta=read_manifest(tmp_path/'incoming'/(p['manifest']+'.fmanifest'))
++        assert meta['seq']==0
++    finally: journal.close()
++
++
++def test_wal_pinned_deferred_cut_never_absorbs_post_capture_events(tmp_path):
++    from patchlib.epoch_frozen_export_v58 import finish_deferred_frontier
++    model,adapter,journal,signer,trusted=setup(tmp_path)
++    db=sqlite3.connect(journal.path,check_same_thread=False)
++    try:
++        assert journal.append('alice',1,b'first')
++        db.execute('PRAGMA query_only=ON')
++        db.execute('BEGIN')
++        db.execute('SELECT COALESCE(MAX(rowid),0) FROM events').fetchone()
++        frozen=capture(journal=SimpleNamespace(db=db),model=model,
++                       adapter=adapter,defer_frontier=True)
++        with pytest.raises(PatchError,match='unfinalized'):
++            export(tmp_path,model,adapter,journal,signer,frozen)
++        assert journal.append('alice',2,b'after-first-cut')
++        final=finish_deferred_frontier(frozen,db)
++        assert final.frontier=={'alice':1}
++        assert final.event_count==1
++        db.close()
++        p,_,receipt=export(tmp_path,model,adapter,journal,signer,final)
++        assert verify_receipt(receipt,p,trusted=trusted,committee=['a','b'])
++        meta=read_manifest(tmp_path/'incoming'/(p['manifest']+'.fmanifest'))
++        assert meta['seq']==1
++    finally:
++        db.close()
++        journal.close()
++
++
++def test_deferred_cut_keeps_origin_gap_validation(tmp_path):
++    from patchlib.epoch_frozen_export_v58 import finish_deferred_frontier
++    model,adapter,journal,_,_=setup(tmp_path)
++    db=sqlite3.connect(journal.path,check_same_thread=False)
++    try:
++        # Simulate an impossible gap in a damaged local journal.
++        journal.db.execute('INSERT INTO events(origin,seq,digest,wire,wire_len) VALUES(?,?,?,?,?)',
++                           ('alice',2,'a'*64,b'x',1))
++        journal.db.commit()
++        db.execute('BEGIN')
++        db.execute('SELECT COALESCE(MAX(rowid),0) FROM events').fetchone()
++        frozen=capture(journal=SimpleNamespace(db=db),model=model,adapter=adapter,
++                       defer_frontier=True)
++        with pytest.raises(PatchError,match='noncontiguous'):
++            finish_deferred_frontier(frozen,db)
++    finally:
++        db.close()
++        journal.close()
+--- a/tools/benchmark_epoch_v58.py
++++ b/tools/benchmark_epoch_v58.py
+@@ -0,0 +1,58 @@
++"""Synthetic single-host fence benchmark; not a 4096-device WAN benchmark."""
++import argparse
++import hashlib
++import json
++import sqlite3
++import tempfile
++import time
++from pathlib import Path
++from types import SimpleNamespace
++
++import torch
++from patchlib.core import UniversalAdapter
++from patchlib.epoch_frozen_export_v58 import capture,finish_deferred_frontier
++
++
++def run(origins=4096,steps=5):
++    with tempfile.TemporaryDirectory(prefix='kagami-v58bench-') as temp:
++        path=Path(temp)/'index.db'
++        db=sqlite3.connect(path)
++        db.execute('PRAGMA journal_mode=WAL')
++        db.execute('CREATE TABLE events(origin TEXT,seq INTEGER,digest TEXT,PRIMARY KEY(origin,seq))')
++        rows=((f'p{i:05d}',seq,hashlib.sha256(f'{i}:{seq}'.encode()).hexdigest())
++              for i in range(origins) for seq in range(1,steps+1))
++        db.executemany('INSERT INTO events VALUES(?,?,?)',rows)
++        db.commit()
++        model=torch.nn.Linear(128,128)
++        adapter=UniversalAdapter(model,'benchmark','v58',kind='loha',rank=8)
++        clock=time.perf_counter
++        start=clock()
++        full=capture(journal=SimpleNamespace(db=db),model=model,adapter=adapter)
++        full_ms=(clock()-start)*1000
++        frozen_db=sqlite3.connect(path,check_same_thread=False)
++        try:
++            frozen_db.execute('BEGIN')
++            frozen_db.execute('SELECT COALESCE(MAX(rowid),0) FROM events').fetchone()
++            start=clock()
++            fast=capture(journal=SimpleNamespace(db=frozen_db),model=model,adapter=adapter,
++                         defer_frontier=True)
++            fence_ms=(clock()-start)*1000
++            start=clock()
++            fast=finish_deferred_frontier(fast,frozen_db)
++            scan_ms=(clock()-start)*1000
++            assert fast.inventory==full.inventory
++        finally:frozen_db.close();db.close()
++        return {'origins':origins,'indexed_events':origins*steps,
++                'legacy_fenced_capture_ms':round(full_ms,3),
++                'v58_factor_fence_ms':round(fence_ms,3),
++                'v58_background_index_ms':round(scan_ms,3),
++                'frozen_factor_bytes':fast.factor_bytes,
++                'note':'Synthetic metadata and tiny torch model; not model export or WAN throughput.'}
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser()
++    p.add_argument('--origins',type=int,default=4096)
++    p.add_argument('--steps',type=int,default=5)
++    args=p.parse_args()
++    print(json.dumps(run(args.origins,args.steps),indent=2))

@@ -147,8 +147,24 @@ def validate_manifest(data: dict) -> dict:
         raise PatchError('room manifest must be JSON object')
     if data.get('version') == 1:
         return _v1_validate_manifest(data)
-    if data.get('version') != 2 or set(data) != {'version','model','datasets','code'}:
+    if data.get('version') != 2 or not {'version','model','datasets','code'} <= set(data) or set(data) - {'version','model','datasets','code','design','adapter'}:
         raise PatchError('invalid room manifest version or fields')
+    if 'design' in data:
+        from .model_design import validate_design, DESCRIPTION
+        design=validate_design(data['design'])
+        expected=DESCRIPTION[design['mode']]
+        if data['model'].get('description') != expected:
+            raise PatchError('design/initialization fingerprint mismatch')
+        if design['mode']=='code' and not data['code'].get('sha256'):
+            raise PatchError('Python architecture requires a content hash')
+    if 'adapter' in data:
+        adapter=data['adapter']
+        if (not isinstance(adapter,dict) or set(adapter) not in ({'kind','rank','wide_lora_rank'}, {'kind','rank','wide_lora_rank','target_scope'}) or
+            ('target_scope' in adapter and adapter['target_scope'] not in ('auto','universal','linear')) or
+            adapter['kind'] not in ('loha','lora') or type(adapter['rank']) is not int or
+            adapter['rank'] not in (4,8,16,32,64) or
+            type(adapter['wide_lora_rank']) is not int or not 1 <= adapter['wide_lora_rank'] <= 16):
+            raise PatchError('invalid pinned adapter layout')
     mdl, datasets, code = data['model'], data['datasets'], data['code']
     if not isinstance(mdl, dict) or set(mdl) != {'id','revision','architecture','description'}:
         raise PatchError('invalid model descriptor')

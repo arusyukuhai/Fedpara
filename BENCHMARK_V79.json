@@ -1,0 +1,15 @@
+{
+  "kind": "exhaustive_expectation_identity_not_speed_benchmark",
+  "trajectory_steps": 2,
+  "actions_per_step": 2,
+  "trajectories_enumerated": 4,
+  "state_value_parameter_count": 3,
+  "parameters": [
+    "shared first state",
+    "second state after a0=0",
+    "second state after a0=1"
+  ],
+  "test": "tests/test_offpolicy_critic_v79.py::test_importance_weighted_critic_gradient_matches_target_exact_enumeration",
+  "result": "PASS (expected gradients equal with atol=1e-12)",
+  "note": "This is a mathematical test in a tiny enumerated environment, not a large-model speed or quality evaluation."
+}

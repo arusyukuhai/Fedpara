@@ -1,3 +1,41 @@
+> **Kagami v84 compatibility update:** see [README_V84_MODEL_TRAINABILITY.md](README_V84_MODEL_TRAINABILITY.md) for cross-model LoHA training fixes, checkpointing, EOS-label correction and real-batch preflight.
+
+> Kagami v82: LoHA behavior Actor replay and old-base CAS. See [README_V82_LOHA.md](README_V82_LOHA.md).
+
+# Kagami v81 — reproducible old-Actor checkpoint verification
+
+See [README_V81.md](README_V81.md) for the v81 implementation, mathematics, and operational limits.
+
+# Kagami v53 update
+
+See **README_V53_STATUS.md** for automatic certified-epoch trainer adoption, signed adjacent-epoch P2P update repair, verified zero-copy checkpoint views, validation and remaining limitations. This is not complete 4,096-peer automatic finalization.
+
+# Kagami v52 status
+
+**Important:** The v52 incremental live carry and restart recovery are not a fully automatic live generation migration. Read [README_V52_STATUS.md](README_V52_STATUS.md) for implemented guarantees, tests, and outstanding production integrations.
+
+> **v51修正版（限定実装）:** 無停止世代移行の本番ワーカー完全実装ではありません。まず [README_V51_STATUS.md](README_V51_STATUS.md) と [VALIDATION_V51.md](VALIDATION_V51.md) をご確認ください。
+
+> **v50変更版の状態:** 無停止世代移行の完全版ではありません。追加した転送・復旧処理、検証結果、未接続の本番経路については [README_V50_STATUS.md](README_V50_STATUS.md) を先に確認してください。
+
+**Kagami v43 safety patch:** See [README_KAGAMI_V43.md](README_KAGAMI_V43.md) for the changes and, crucially, the remaining unimplemented automatic live handoff work.
+
+# Kagami v40 — verified generation rollover
+
+A crash-safe, **offline coordinated generation rollover** is available in `patchlib/generation_rollover.py`. After a clean shutdown, Kagami signs the complete sharded checkpoint; `prepare` creates a separate room and verified new genesis, `import-gui` registers it in the GUI, and explicit `retire` can reclaim the old event archive only after migration. **This is not automatic live multi-peer consensus or online pruning.** Read [README_KAGAMI_V40.md](README_KAGAMI_V40.md) before retiring any data.
+
+# Kagami — 分散学習デスクトップアプリ
+
+**Kagami v31** は Fedpara エンジンを継承し、六つの固定タブ、多言語GUI、モデル管理、データセット検索、分離された推論、ネットワーク可視化、停止中の署名付き中継機能を備えたバージョンです。起動: `python kagami.py`。詳細・制約: [README_KAGAMI_V31.md](README_KAGAMI_V31.md)。内部モジュールおよび互換性のため一部の旧名称は維持しています。
+
+---
+
+## v30: Memory-adaptive streaming for massive models (experimental)
+
+See [README_STREAMING_MASSIVE_MODELS_V30.md](README_STREAMING_MASSIVE_MODELS_V30.md) for the opt-in HF safetensors meta loader, CPU mmap/SSD paging, automatic RAM and GPU weight-cache budgets, tiled frozen Linear kernels, lazy Embedding/LoHa kernels, safe streaming room genesis, and the new GUI mode. Compatible models only; custom fused/MoE operations and full-model finetuning are not universally supported. Existing v29 mode stays the default.
+
+**2026-10-25 v29 — 無期限のGUI学習・停止時の学習済みモデルのシャード保存・保存場所を開くボタン・大量履歴メモリ対策:** [README_UNLIMITED_PERSISTENCE_SCALE_V29.md](README_UNLIMITED_PERSISTENCE_SCALE_V29.md)
+
 **2026-10-23 LoHa rank16 audit:** [README_LOHA_RANK16_AUDIT_2026_10_23.md](README_LOHA_RANK16_AUDIT_2026_10_23.md). Balanced LoHa initialization, GPT-Neo target selection, AdamW LR schedule, baseline/training-loss diagnostics.
 
 **新機能 — 分散学習の有効性ベンチマーク（同一トークン予算、LoHa、ピア数補正時間）＋黒背景/emerald-500 GUI:** [README_EFFECTIVENESS_BENCHMARK_2026_10_23.md](README_EFFECTIVENESS_BENCHMARK_2026_10_23.md)。
@@ -155,3 +193,7 @@ See [README_ELASTIC_V2.md](README_ELASTIC_V2.md) for the new deterministic
 buffered aggregation library, signed epoch proposal codec, reproducible optimizer
 A/B, opt-in Swarm counterfactual analysis and searchable room directory.
 Live training remains on the stable V1 protocol until epoch consensus is implemented.
+
+## Latest EVAL maintenance
+
+See `README_KAGAMI_V35.md` for the v35 inference ValueError fixes, automatic precision selection, token limits, and troubleshooting.

@@ -1,0 +1,8 @@
+{
+  "synthetic_prefixes": 32,
+  "frozen_backbone_calls_per_full_evaluation": 4,
+  "cached_head_only_seconds_median": 0.000138,
+  "full_backbone_seconds_median": 0.003188,
+  "cache_feature_bytes": 32768,
+  "scope": "CPU synthetic; non-HF, not representative of real model throughput"
+}

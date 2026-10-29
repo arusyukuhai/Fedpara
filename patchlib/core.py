@@ -75,6 +75,8 @@ class FactorDelta(nn.Module):
                     # CP branch is nonzero, preventing the dead-gradient pitfall.
                     if (kind == "lora" and axis == len(shape)-1) or (kind == "loha" and group == 1 and axis == len(shape)-1):
                         nn.init.zeros_(x)
+                    elif init_style == 'balanced' and len(shape)==2 and kind=='lora':
+                        nn.init.normal_(x,mean=0,std=(1. / math.sqrt(shape[1]) if axis==0 else 1.))
                     elif init_style == 'balanced' and len(shape) == 2 and kind == 'loha':
                         # The first CP product has RMS~1; the *other* product
                         # is exactly zero at step zero but has a nonzero
@@ -165,7 +167,10 @@ class UniversalAdapter:
     def __init__(self, model: nn.Module, model_id: str, revision: str, *,
                  kind: str = 'loha', rank: int = 16, alpha: float | None = None,
                  max_peers: int = 8, target_scope: str = 'all',
-                 init_style: str = 'balanced'):
+                 init_style: str = 'balanced', wide_lora_rank: int = 4):
+        if not isinstance(wide_lora_rank,int) or not 1 <= wide_lora_rank <= 16:
+            raise ValueError('wide_lora_rank must be between 1 and 16')
+        self.wide_lora_rank=wide_lora_rank
         if rank <= 0 or max_peers < 1:
             raise ValueError('rank and max_peers must be positive')
         if kind not in ('lora', 'loha'):
@@ -173,7 +178,7 @@ class UniversalAdapter:
         self.model, self.model_id, self.revision = model, model_id, revision
         self.kind, self.rank = kind, rank
         self.alpha = float(rank if alpha is None else alpha)
-        if target_scope not in ('all','gpt_neo_linear','gpt_neo_full'):
+        if target_scope not in ('all','gpt_neo_linear','gpt_neo_full','auto','linear','universal'):
             raise ValueError('unsupported target_scope')
         self.target_scope = target_scope
         self.init_style = init_style
@@ -182,7 +187,7 @@ class UniversalAdapter:
         self.groups: list[Group] = []
         self.remote_versions: dict[str, int] = {}
         self._attach()
-        if self.target_scope in ('gpt_neo_linear','gpt_neo_full'):
+        if self.target_scope in ('gpt_neo_linear','gpt_neo_full','auto','linear','universal'):
             # Filtering adapter targets is NOT enough: excluded pretrained
             # parameters must be frozen too. Otherwise autograd still computes
             # embedding/LM head/LayerNorm gradients (and optimizer scope is
@@ -192,54 +197,148 @@ class UniversalAdapter:
                 if id(param) not in trainable_ids:
                     param.requires_grad_(False)
         if not self.groups:
-            raise ValueError('No trainable floating-point PyTorch Parameters found')
+            raise ValueError(
+                'No compatible trainable LoRA/LoHA targets for this architecture '
+                f'(scope={self.target_scope!r}, rank={self.rank}, wide_lora_rank={self.wide_lora_rank}). '
+                'For narrow matrices use a smaller SHARED --rank/--wide-lora-rank '
+                'in a NEW P2P room. For custom convolution/N-D tensors, '
+                'explicitly select --target-scope universal after a successful '
+                'training-preflight; never change a running room adapter layout.')
         self.layout = self._layout_digest()
 
     def _attach(self):
-        # Capture BEFORE parametrization; shared/tied Parameters are identified
-        # by object identity and use a single shared trainable adapter.
+        """Bind each original Parameter exactly once, including all tied aliases.
+
+        `auto` is architecture-neutral: embeddings and output heads use a small
+        LoRA, as do strongly rectangular 2-D projections; other linear/2-D
+        weights use the requested LoHa. Names and get_output_embeddings() are
+        used as hints, but rank selection is always recorded in the layout.
+        """
         owners: dict[int, list[tuple[str, nn.Module, str, nn.Parameter]]] = {}
-        for module_path, module in self.model.named_modules():
+        # Universal mode preserves names of shared module aliases. Legacy
+        # modes retain their original signed layout digests.
+        bound_fields = set()
+        iterator = (self.model.named_modules(remove_duplicate=False) if
+                    self.target_scope == 'universal' else self.model.named_modules())
+        for module_path, module in iterator:
             for pname, param in list(module.named_parameters(recurse=False)):
                 if not isinstance(param, nn.Parameter) or not param.is_floating_point() or param.is_sparse:
                     continue
-                if self.target_scope in ('gpt_neo_linear','gpt_neo_full'):
-                    # GPT-Neo selected layers. Full mode additionally includes
-                    # token/position embeddings and the LM head. Tied token
-                    # embedding + LM head are grouped by Parameter identity,
-                    # then registered with the SAME Overlay (no double update).
-                    linear = (pname == 'weight' and isinstance(module, nn.Linear)
-                              and re.fullmatch(r'transformer\.h\.\d+\.(?:attn\.attention\.(?:q_proj|k_proj|v_proj|out_proj)|mlp\.(?:c_fc|c_proj))', module_path))
-                    word_or_position = (pname == 'weight' and isinstance(module, nn.Embedding)
-                                        and module_path in ('transformer.wte','transformer.wpe'))
-                    head = (pname == 'weight' and isinstance(module, nn.Linear)
-                            and module_path == 'lm_head')
-                    selected = linear or (self.target_scope == 'gpt_neo_full'
-                                          and (word_or_position or head))
-                    if not (selected and len(param.shape) == 2 and min(param.shape) >= self.rank):
-                        continue
-                if param.device.type == 'meta':
-                    raise ValueError(f'Meta-device param {module_path}.{pname} must be materialized first')
                 fullname = (module_path + '.' + pname).lstrip('.')
                 owners.setdefault(id(param), []).append((fullname, module, pname, param))
 
-        for owner_entries in owners.values():
-            name, _, _, param = owner_entries[0]
-            aliases = tuple(item[0] for item in owner_entries)
-            # Parameters are instantiated on CPU by default; the model may already
-            # have been placed on MPS/CUDA. Keep factors in fp32, on the SAME
-            # device as the original weight (also important for tied weights).
-            overlay = Overlay(FactorDelta(tuple(param.shape), self.kind, self.rank, self.alpha,
+        output_id = None
+        get_output = getattr(self.model, 'get_output_embeddings', None)
+        if callable(get_output):
+            try:
+                output = get_output()
+                if isinstance(output, nn.Module):
+                    weight = getattr(output, 'weight', None)
+                    if isinstance(weight, nn.Parameter):
+                        output_id = id(weight)
+            except (AttributeError, NotImplementedError):
+                pass
+
+        for entries in owners.values():
+            name, _, _, param = entries[0]
+            aliases = tuple(item[0] for item in entries)
+            shape = tuple(param.shape)
+            if self.target_scope == 'universal':
+                # Any ordinary differentiable floating Parameter may be
+                # targeted, including custom MoE/router, 1-D or N-D kernels.
+                if not shape or any(dim <= 0 for dim in shape):
+                    continue
+                if param.dtype not in (torch.float16, torch.float32, torch.float64, torch.bfloat16):
+                    raise PatchError(f'{name}: unsupported floating dtype {param.dtype}; '
+                                     'dequantize with a trusted backend before attaching')
+                if (len(shape)<2 or min(shape)<self.rank) and math.prod(shape)>1_048_576:
+                    raise PatchError(f'{name}: dense adapter fallback exceeds 1,048,576 elements; '
+                                     'reduce rank or use a custom factor backend')
+                wide = False
+            elif self.target_scope in ('gpt_neo_linear', 'gpt_neo_full'):
+                linear = any(
+                    pname == 'weight' and isinstance(module, nn.Linear)
+                    and re.fullmatch(r'transformer\.h\.\d+\.(?:attn\.attention\.(?:q_proj|k_proj|v_proj|out_proj)|mlp\.(?:c_fc|c_proj))', path.rpartition('.')[0])
+                    for path, module, pname, _ in entries
+                )
+                embedding = any(
+                    pname == 'weight' and isinstance(module, nn.Embedding)
+                    and path in ('transformer.wte.weight', 'transformer.wpe.weight')
+                    for path, module, pname, _ in entries
+                )
+                head = any(path == 'lm_head.weight' and isinstance(module, nn.Linear)
+                           for path, module, pname, _ in entries)
+                if not (linear or (self.target_scope == 'gpt_neo_full' and (embedding or head))):
+                    continue
+                if len(shape) != 2 or min(shape) < self.rank:
+                    continue
+                wide = (self.target_scope == 'gpt_neo_full' and self.kind == 'loha'
+                        and (embedding or head))
+            elif self.target_scope == 'linear':
+                # Architecture-neutral LoRA-Muon / projection-only policy.
+                # Do not accidentally train LayerNorms, embeddings, heads or
+                # unused router tensors; never create a dense fallback.
+                if (len(shape)!=2 or min(shape)<self.rank or
+                    any(pname=='weight' and isinstance(module,(nn.Embedding,nn.EmbeddingBag)) for _,module,pname,_ in entries) or
+                    output_id == id(param) or
+                    not any(pname=='weight' and
+                            (isinstance(module,nn.Linear) or type(module).__name__=='Conv1D')
+                            for _,module,pname,_ in entries)):
+                    continue
+                wide=False
+            elif self.target_scope == 'auto':
+                # Skip biases, norms and arbitrary dense 1-D parameters. Pick
+                # any 2-D weight (not only GPT-Neo paths), including GPT-2's
+                # Conv1D and custom HF modules. Small matrices cannot support
+                # the requested factor rank and are skipped, not made dense.
+                if len(shape) != 2 or not any(pname == 'weight' for _, _, pname, _ in entries):
+                    continue
+                is_embedding = any(
+                    pname == 'weight' and isinstance(module, (nn.Embedding, nn.EmbeddingBag))
+                    for _, module, pname, _ in entries
+                )
+                is_output = output_id == id(param)
+                is_head = any(
+                    pname == 'weight' and path.rsplit('.', 1)[0].rsplit('.', 1)[-1].lower()
+                    in ('lm_head', 'embed_out', 'output_projection',
+                        'output_layer', 'language_model_head', 'classifier', 'score')
+                    for path, _, pname, _ in entries
+                )
+                # Linear projections whose major dimension is >=8x the minor
+                # dimension have much larger LoHa wire factors than LoRA.
+                # Even unusual dimensions (min < LoHa rank) can be LoRA if
+                # min >= low-rank LoRA size.
+                rectangular = min(shape) > 0 and max(shape) >= 8 * min(shape)
+                wide = (self.kind == 'loha' and
+                        (is_embedding or is_output or is_head or rectangular))
+                required_rank = self.wide_lora_rank if wide else self.rank
+                if min(shape) < required_rank:
+                    continue
+            else:
+                wide = False  # Explicit `all` is backward-compatible.
+            if param.device.type == 'meta':
+                raise ValueError(f'Meta-device param {name} must be materialized first')
+            group_kind = 'lora' if wide else self.kind
+            group_rank = self.wide_lora_rank if wide else self.rank
+            group_alpha = float(group_rank) if wide else self.alpha
+            overlay = Overlay(FactorDelta(shape, group_kind, group_rank, group_alpha,
                                           init_style=self.init_style)).to(device=param.device)
-            # One overlay object and one original Parameter for tied aliases.
             param.requires_grad_(False)
-            for _, module, pname, _ in owner_entries:
-                parametrize.register_parametrization(module, pname, overlay)
-            self.groups.append(Group(name, aliases, tuple(param.shape), overlay))
+            # Some weight-tied models expose the same Parameter through several
+            # modules. Register the exact same Overlay on ALL aliases.
+            for _, module, pname, _ in entries:
+                if self.target_scope == 'universal' and (id(module),pname) in bound_fields:
+                    continue
+                bound_fields.add((id(module),pname))
+                parametrize.register_parametrization(module, pname, overlay,
+                    unsafe=bool(getattr(self.model,'_fedpara_streaming_base_info',None)))
+            self.groups.append(Group(name, aliases, shape, overlay))
         self.groups.sort(key=lambda x: x.canonical)
 
     def _layout_digest(self):
-        schema = [[x.canonical, list(x.aliases), list(x.shape)] for x in self.groups]
+        schema = [[x.canonical, list(x.aliases), list(x.shape),
+                   x.overlay.local.kind, x.overlay.local.rank, x.overlay.local.alpha]
+                  for x in self.groups]
         return hashlib.sha256(_canonical_json(schema)).hexdigest()
 
     def trainable_parameters(self):
@@ -254,14 +353,18 @@ class UniversalAdapter:
         params = sum(math.prod(g.shape) for g in self.groups)
         patch = sum(sum(math.prod(shape) for shape in g.overlay.local.expected_shapes()) for g in self.groups)
         return {"original": params, "patch": patch, "groups": len(self.groups),
-                "dense_fallback": sum(g.overlay.local.dense for g in self.groups)}
+                "dense_fallback": sum(g.overlay.local.dense for g in self.groups),
+                "wide_lora_groups": sum(g.overlay.local.kind=='lora' for g in self.groups),
+                "wide_lora_rank": self.wide_lora_rank}
 
     def _metadata(self, peer_id: str, seq: int) -> dict[str, Any]:
         return {"format": 1, "model_id": self.model_id, "revision": self.revision,
                 "layout": self.layout, "kind": self.kind, "rank": self.rank,
                 "alpha": self.alpha, "peer_id": peer_id, "seq": seq,
                 "targets": [{"name": g.canonical, "aliases": list(g.aliases),
-                             "shape": list(g.shape), "dense": g.overlay.local.dense}
+                             "shape": list(g.shape), "dense": g.overlay.local.dense,
+                             "kind":g.overlay.local.kind, "rank":g.overlay.local.rank,
+                             "alpha":g.overlay.local.alpha}
                             for g in self.groups]}
 
     def export(self, peer_id: str, seq: int = 0, dtype: str = 'float32', *,

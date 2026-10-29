@@ -1,0 +1,917 @@
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,5 @@
++> **v51修正版（限定実装）:** 無停止世代移行の本番ワーカー完全実装ではありません。まず [README_V51_STATUS.md](README_V51_STATUS.md) と [VALIDATION_V51.md](VALIDATION_V51.md) をご確認ください。
++
+ > **v50変更版の状態:** 無停止世代移行の完全版ではありません。追加した転送・復旧処理、検証結果、未接続の本番経路については [README_V50_STATUS.md](README_V50_STATUS.md) を先に確認してください。
+ 
+ **Kagami v43 safety patch:** See [README_KAGAMI_V43.md](README_KAGAMI_V43.md) for the changes and, crucially, the remaining unimplemented automatic live handoff work.
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -302,7 +302,7 @@
+ class ElasticNode(PatchNode):
+     def __init__(self, *args, origin: str, remote: str, genesis: str, unsafe=False,
+                  public_key: str | None = None, on_authenticated=None, snapshot_store=None,
+-                 enable_generation=False,
++                 enable_generation=False, generation_root=None,
+                  snapshot_recv=None, snapshot_limit=32*1024**3, **kwargs):
+         super().__init__(*args,**kwargs)
+         self.origin,self.remote,self.genesis,self.unsafe=origin,remote,genesis,unsafe
+@@ -319,6 +319,16 @@
+         self.controls = asyncio.Queue(maxsize=128)
+         self.generation_controls = asyncio.Queue(maxsize=64)
+         self.enable_generation = bool(enable_generation)
++        # An immutable room-root identity distinguishes a legitimate
++        # different certified epoch from another unrelated model. Merely
++        # announcing generation_v1 must never bypass genesis validation.
++        if generation_root is not None and (not isinstance(generation_root,str)
++                or not re.fullmatch('[0-9a-f]{64}',generation_root)
++                or not self.enable_generation):
++            raise ValueError('generation root requires authenticated generation transport')
++        self.generation_root = generation_root
++        self.remote_genesis = None
++        self.bridge_only = False
+         self.remote_supports_generation = False
+         self.counter = 0
+         self.remote_counter = -1
+@@ -400,8 +410,15 @@
+             return False
+         # SCTP delivery is ordered, but a failed first send must never be
+         # followed by a heartbeat or inventory before the signed hello.
++        if self.bridge_only and kind not in ('hello','heartbeat',
++                'generation-head','generation-need','generation-wire',
++                'generation-have','generation-snapshot-request',
++                'generation-compact-head','generation-compact-need'):
++            return False  # A signed v1 update must never cross epochs.
+         if kind != 'hello' and not self.hello_sent:
+-            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, **({'pub':self.public_key} if self.public_key else {})):
++            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation,
++                    **({'generation_root':self.generation_root} if self.generation_root else {}),
++                    **({'pub':self.public_key} if self.public_key else {})):
+                 return False
+         self.counter+=1
+         try:
+@@ -530,6 +547,12 @@
+         deferred=deque()
+         try:
+             while True:
++                # A mixed-generation link transports ONLY signed certificate
++                # controls. Keep v1 events in the durable journal for same-epoch
++                # peers; never send them to a differently keyed optimizer.
++                if not self.hello_received or self.bridge_only:
++                    await asyncio.sleep(.05)
++                    continue
+                 data=None
+                 demand_selected=False
+                 demanded=[]
+@@ -663,6 +686,8 @@
+                 self._send_task.cancel()
+                 self._send_task=None
+         self._channel=ch
++        self.ready=False
++        self.inventory_done=False
+         self.link_closed.clear()
+         opened_once=False
+         # aiortc may deliver an incoming signed hello before the local open
+@@ -688,6 +713,8 @@
+         self.remote_supports_frontier=False
+         self.remote_supports_aggregate=False
+         self.remote_supports_generation=False
++        self.remote_genesis=None
++        self.bridge_only=False
+         while not self.generation_controls.empty():
+             self.generation_controls.get_nowait()
+         # A new transport generation must be allowed to re-request missing
+@@ -706,7 +733,7 @@
+             self.set_phase('datachannel-open')
+             self.connected_since=time.monotonic()
+             self._send_task=asyncio.create_task(self._pump())
+-            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, **({'pub':self.public_key} if self.public_key else {})):
++            if not self.control('hello',serves_snapshot=self.can_serve_snapshot, frontier_v1=True, aggregate_v1=True, snapshot_tip_pages_v1=True, generation_v1=self.enable_generation, **({'generation_root':self.generation_root} if self.generation_root else {}), **({'pub':self.public_key} if self.public_key else {})):
+                 log.warning('signed hello initial send deferred peer=%s',self.remote)
+ 
+         @ch.on('close')
+@@ -754,8 +781,22 @@
+                         raise HandshakeError('signed hello required before '+str(decoded.get('type'))+'; update BOTH peers')
+                     if decoded.get('peer') != self.remote:
+                         raise HandshakeError('HELLO PEER ID MISMATCH (room peer identity differs from signed frame)')
+-                    if decoded.get('genesis') != self.genesis:
+-                        raise HandshakeError('GENESIS MISMATCH: peer is training a different model/revision/rank/checkpoint; do not merge')
++                    if not self.hello_received:
++                        if decoded.get('genesis') != self.genesis:
++                            if (decoded.get('type')!='hello' or not self.enable_generation
++                                    or self.generation_root is None
++                                    or decoded.get('generation_v1') is not True
++                                    or decoded.get('generation_root') != self.generation_root):
++                                raise HandshakeError('GENESIS MISMATCH: different model or unverified generation root')
++                            self.bridge_only=True
++                        self.remote_genesis=decoded.get('genesis')
++                    elif decoded.get('genesis') != self.remote_genesis:
++                        raise HandshakeError('peer changed genesis inside an authenticated connection')
++                    if self.bridge_only and decoded.get('type') not in (
++                            'hello','heartbeat','generation-head','generation-need',
++                            'generation-wire','generation-have','generation-snapshot-request',
++                            'generation-compact-head','generation-compact-need'):
++                        raise PatchError('cross-generation v1 traffic forbidden')
+                     if type(decoded.get('counter')) is not int or decoded['counter']<=self.remote_counter:
+                         raise PatchError('replayed/out-of-order control counter')
+                     if decoded.get('type')=='hello':
+@@ -774,6 +815,9 @@
+                         self.remote_supports_aggregate = decoded.get('aggregate_v1') is True
+                         self.remote_supports_snapshot_pages = decoded.get('snapshot_tip_pages_v1') is True
+                         self.remote_supports_generation = self.enable_generation and decoded.get('generation_v1') is True
++                        if self.bridge_only and (not self.remote_supports_generation
++                                or decoded.get('generation_root')!=self.generation_root):
++                            raise HandshakeError('unauthenticated generation bridge')
+                         log.info('SIGNED HELLO OK peer=%s',self.remote)
+                     if new_verifier is not None:
+                         self.verifier=new_verifier
+@@ -864,6 +908,8 @@
+                 else:
+                     if not self.hello_received:
+                         raise PatchError('data received before authenticated hello')
++                    if self.bridge_only:
++                        raise PatchError('cross-generation signed data frame forbidden')
+                     event=framer.feed(message)
+                     if event is not None:
+                         if self.incoming.full():
+@@ -1554,7 +1600,7 @@
+         # avoids redundant uploads rather than claiming sublinear information.
+         eligible={slot.peer:slot for slot in slots.values()
+                   if slot.node and slot.node.connected.is_set() and
+-                  not slot.disabled}
++                  not getattr(slot.node,'bridge_only',False) and not slot.disabled}
+         fanout_limit=getattr(args,'push_fanout',PUSH_FANOUT_DEFAULT)
+         seed=hashlib.blake2b(wire[:1024],digest_size=16).digest()
+         chosen=selective_push_targets(args.peer_id,eligible,
+@@ -1781,6 +1827,7 @@
+                     on_authenticated=accept_authenticated_peer if room_only else None,
+                     snapshot_store=snapshot_store if room_only else None,
+                     enable_generation=generation_committee is not None,
++                    generation_root=genesis if generation_committee is not None else None,
+                     snapshot_recv=snapshot_recv if room_only else None,
+                     snapshot_limit=args.max_state_gb*1024**3)
+                 node.lookup_requested_event=journal.get
+@@ -1990,7 +2037,7 @@
+         for ps in list(slots.values()):
+             if ps.node is not None:
+                 ps.node.pending.discard((info.origin,info.seq))
+-                if ps.node.inventory_done and not ps.node.pending:
++                if ps.node.inventory_done and not ps.node.pending and not ps.node.bridge_only:
+                     ps.node.ready=True
+         if was_applied:
+             await fanout(wire,exclude_peer=source_peer,origin_peer=info.origin)
+--- a/patchlib/live_epoch_switch_v48.py
++++ b/patchlib/live_epoch_switch_v48.py
+@@ -96,7 +96,9 @@
+                  carry_suffix: Callable[[TrainerGeneration,TrainerGeneration,dict], Any],
+                  transport_handoff: Callable[[TrainerGeneration,TrainerGeneration,dict], Any],
+                  attest_journal: Callable[[TrainerGeneration,dict], Any],
+-                 validate_shards: bool = True, checkpoint_stager=None):
++                 validate_shards: bool = True, checkpoint_stager=None,
++                 checkpoint_lifecycle=None, gc_runtime_factory=None,
++                 gc_interval=60.0):
+         self.ledger = ledger
+         self.router = router
+         self.root = Path(root)
+@@ -109,10 +111,25 @@
+         self._attest = attest_journal
+         self.validate_shards=validate_shards
+         self.checkpoint_stager=checkpoint_stager
++        if not 10.0<=gc_interval<=3600:
++            raise ValueError('invalid GC interval')
++        self.gc_runtime_factory=gc_runtime_factory
++        self.gc_interval=gc_interval
++        self._next_gc=0.0
+         self._lock = asyncio.Lock()
+         self._retry_at = 0.0
+         self._failures = 0
+         self.pointer = self.root/'active-epoch.json'
++        if checkpoint_stager is not None:
++            if checkpoint_lifecycle is None:
++                from .epoch_lifecycle_v51 import DurableEpochLifecycle
++                checkpoint_lifecycle=DurableEpochLifecycle(self.root/'checkpoint-leases',
++                    stager=checkpoint_stager,pointer=self.pointer)
++            self.checkpoint_lifecycle=checkpoint_lifecycle
++        else:
++            if checkpoint_lifecycle is not None:
++                raise ValueError('checkpoint lifecycle needs a bounded checkpoint stager')
++            self.checkpoint_lifecycle=None
+         # Restart cannot silently construct an old trainer over a new pointer.
+         # The caller must reconstruct the committed generation before admission.
+         if self.pointer.exists():
+@@ -161,7 +178,20 @@
+         """
+         async with self._lock:
+             if self.router.pending_publication:
+-                return await self.router.resume_publication()
++                result=await self.router.resume_publication()
++                if result and self.checkpoint_lifecycle is not None:
++                    cert=self.ledger.certified_epoch(self.router.current.epoch)
++                    if cert is None:
++                        raise PatchError('missing published generation certificate')
++                    await self.checkpoint_lifecycle.published(cert['proposal'])
++                return result
++            # A process may have crashed after publishing the pointer but
++            # before marking its cache lease active. Reconcile on restart.
++            if self.checkpoint_lifecycle is not None and self.router.current.epoch>0:
++                cert=self.ledger.certified_epoch(self.router.current.epoch)
++                if cert is None:
++                    raise PatchError('cannot reconstruct cache from uncertified trainer')
++                await self.checkpoint_lifecycle.reconcile_active(cert['proposal'])
+             proposal=self._certificate()
+             if proposal is None or proposal['epoch']<=self.router.current.epoch:
+                 return False
+@@ -172,7 +202,11 @@
+             if self.checkpoint_stager is None:
+                 prepared=await self._build(proposal)
+             else:
+-                checkpoint=await self.checkpoint_stager.prepare(proposal)
++                if self.checkpoint_lifecycle is not None:
++                    await self.checkpoint_lifecycle.sweep_superseded(proposal['epoch'])
++                    checkpoint=await self.checkpoint_lifecycle.stage(proposal)
++                else:
++                    checkpoint=await self.checkpoint_stager.prepare(proposal)
+                 # Explicit two-argument constructor when using the bounded
+                 # cache: the builder loads these independently verified files.
+                 prepared=await self._build(proposal,checkpoint)
+@@ -217,7 +251,14 @@
+             await self.router.switch(prepared.generation, verified=checked,
+                 flush_old=self._flush,carry_old=carry,attest_new=attest,
+                 pointer=self.pointer,activate_new=publish_network)
++            if self.checkpoint_lifecycle is not None:
++                await self.checkpoint_lifecycle.published(proposal)
+             return True
++
++    async def close(self):
++        """Close lease metadata; the caller still owns the shared disk stager."""
++        if self.checkpoint_lifecycle is not None:
++            self.checkpoint_lifecycle.close()
+ 
+     async def run(self, stop:asyncio.Event, *, interval:float=3.0,
+                   report:Callable[[BaseException],Any]|None=None):
+@@ -227,6 +268,15 @@
+             try:
+                 if time.monotonic() >= self._retry_at:
+                     await self.activate_next()
++                    if (self.gc_runtime_factory is not None and
++                            self.checkpoint_lifecycle is not None and
++                            time.monotonic()>=self._next_gc):
++                        # EpochRuntimeV43 proves that no signed carry or
++                        # live old writer is lost, then deletes the old log.
++                        # The checkpoint cache is reclaimed only AFTER that.
++                        self._next_gc=time.monotonic()+self.gc_interval
++                        await self.checkpoint_lifecycle.gc_from_runtime(
++                            self.gc_runtime_factory,self.router.current.epoch)
+                     self._failures = 0
+                     self._retry_at = 0.0
+             except (PatchError,OSError,ValueError,RuntimeError) as exc:
+--- /dev/null
++++ b/patchlib/epoch_lifecycle_v51.py
+@@ -0,0 +1,243 @@
++"""Durable, bounded lifecycle for candidate/active checkpoint *cache views*.
++
++A checkpoint being superseded is NOT proof that its journal is disposable. The
++only unconditional reclamation is a candidate never published as active. A
++formerly active base needs a separate, locally verified EpochRuntimeV43 GC
++proof, and the successor must already be the durable active trainer.
++
++A finite disk cannot provide infinite disconnected, uncommitted updates. When
++proofs are missing this layer refuses further epochs at its configured limit
++rather than destroy necessary recovery state.
++"""
++from __future__ import annotations
++
++import asyncio
++import json
++from pathlib import Path
++import sqlite3
++from typing import Callable
++from dataclasses import dataclass
++
++from .core import PatchError
++from .epoch_checkpoint_v50 import StagedCheckpoint
++from .epoch_objects_v50 import digest_ok
++from .live_epoch_switch_v48 import certified_genesis
++
++
++@dataclass(frozen=True)
++class EpochCacheUsage:
++    active: int
++    held: int
++    candidates: int
++    retired: int
++
++
++class DurableEpochLifecycle:
++    """Crash-tolerant local cache-retention policy; no network-side GC commands.
++
++    SQLite is used exclusively on the service event-loop thread. The checkpoint
++    cache itself runs on its own worker thread. Only one service may own the
++    directory, because the stager's cache already enforces process flock.
++    """
++    def __init__(self, root: Path, *, stager, pointer: Path, max_held: int = 2,
++                 max_candidates: int = 2, metadata_bytes: int = 4*1024**2):
++        if (not 0 <= max_held <= 100 or not 1 <= max_candidates <= 16 or
++                type(metadata_bytes) is not int or not 128*1024<=metadata_bytes<=64*1024**2):
++            raise ValueError('invalid epoch retention budget')
++        self.root = Path(root).resolve()
++        self.root.mkdir(parents=True,exist_ok=True)
++        self.stager = stager
++        self.pointer = Path(pointer)
++        self.max_held = max_held
++        self.max_candidates = max_candidates
++        self.lock = asyncio.Lock()
++        self.db = sqlite3.connect(self.root/'epoch-leases.sqlite3',timeout=20)
++        self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')
++        self.db.execute('PRAGMA journal_mode=DELETE')
++        pagesize=self.db.execute('PRAGMA page_size').fetchone()[0]
++        self.db.execute(f'PRAGMA max_page_count={max(32,metadata_bytes//pagesize)}')
++        self.db.execute('PRAGMA synchronous=FULL')
++        with self.db:
++            self.db.execute('''CREATE TABLE IF NOT EXISTS lease(
++                manifest TEXT PRIMARY KEY, epoch INTEGER NOT NULL,
++                state TEXT NOT NULL CHECK (state IN
++                  ('preparing','staged','active','held','abandoning','retiring','retired')),
++                genesis TEXT NOT NULL)''')
++            self.db.execute('CREATE INDEX IF NOT EXISTS lease_epoch ON lease(epoch)')
++
++    def close(self):
++        self.db.close()
++
++    def _rows(self):
++        return self.db.execute('SELECT manifest,epoch,state,genesis FROM lease ORDER BY epoch').fetchall()
++
++    def usage(self):
++        rows=self._rows()
++        return EpochCacheUsage(sum(r[2]=='active' for r in rows),
++            sum(r[2]=='held' for r in rows),
++            sum(r[2] in ('preparing','staged','abandoning') for r in rows),
++            sum(r[2]=='retired' for r in rows))
++
++    def _pointer(self):
++        if not self.pointer.exists():return None
++        if self.pointer.is_symlink() or self.pointer.stat().st_size > 4096:
++            raise PatchError('unsafe active pointer during checkpoint cleanup')
++        obj=json.loads(self.pointer.read_text())
++        if (not isinstance(obj,dict) or obj.get('format')!='kagami-hot-pointer-v1'
++                or type(obj.get('epoch')) is not int or not digest_ok(obj.get('genesis'))
++                or not digest_ok(obj.get('checkpoint'))):
++            raise PatchError('unverified active checkpoint pointer')
++        return obj
++
++    def _checkpoint(self, digest):
++        root=self.stager.root/'views'/digest
++        return StagedCheckpoint(root/'checkpoint.fmanifest',root,'checkpoint-'+digest)
++
++    def _assert_active_pointer(self, *, epoch, digest, genesis):
++        ptr=self._pointer()
++        if ptr is None or (ptr['epoch'],ptr['checkpoint'],ptr['genesis'])!=(epoch,digest,genesis):
++            raise PatchError('checkpoint cache cannot acknowledge an unpublished epoch')
++        return ptr
++
++    async def _retire_candidate(self,digest,epoch):
++        # Abandoning never includes an active/published pointer, even in the
++        # crash window between pointer rename and directory fsync.
++        ptr=self._pointer()
++        if ptr and ptr['checkpoint']==digest:
++            raise PatchError('refusing to abandon pointer-owned checkpoint')
++        row=self.db.execute('SELECT state,epoch FROM lease WHERE manifest=?',(digest,)).fetchone()
++        if row is None or row[1]!=epoch or row[0] not in ('preparing','staged','abandoning'):
++            raise PatchError('cannot abandon active checkpoint')
++        with self.db:
++            self.db.execute("UPDATE lease SET state='abandoning' WHERE manifest=?",(digest,))
++        await self.stager.retire(self._checkpoint(digest))
++        with self.db:
++            self.db.execute('DELETE FROM lease WHERE manifest=? AND state=?',(digest,'abandoning'))
++
++    async def sweep_superseded(self, next_epoch:int):
++        """Recover a crashed candidate transfer and reclaim failed older ones.
++
++        Must run while no other local preparation/switch can be in flight.
++        Never prunes the pointer's candidate on an uncertain fsync outcome.
++        """
++        async with self.lock:
++            for digest,epoch,state,_ in self._rows():
++                if (state in ('preparing','staged','abandoning') and epoch<next_epoch):
++                    ptr=self._pointer()
++                    if ptr and ptr['checkpoint']==digest:
++                        continue # pointer publication may predate lease commit
++                    await self._retire_candidate(digest,epoch)
++
++    async def stage(self, proposal):
++        digest=proposal['manifest'];epoch=proposal['epoch']
++        genesis=certified_genesis(proposal)
++        if not digest_ok(digest) or type(epoch) is not int:
++            raise PatchError('invalid staged epoch')
++        async with self.lock:
++            ptr=self._pointer()
++            if ptr and ptr['epoch']>=epoch:
++                raise PatchError('refusing to download behind durable active generation')
++            rows=self._rows()
++            other_epochs=[r for r in rows if r[1]==epoch and r[0]!=digest and r[2]!='retired']
++            if other_epochs:
++                raise PatchError('conflicting staged checkpoint at same generation')
++            held=sum(r[2] in ('held','active') for r in rows)
++            active=sum(r[2]=='active' for r in rows)
++            candidates=sum(r[2] in ('preparing','staged','abandoning') and r[0]!=digest for r in rows)
++            if held-active>=self.max_held or candidates>=self.max_candidates:
++                raise PatchError('checkpoint retention capacity reached: verified GC required')
++            with self.db:
++                self.db.execute("INSERT OR IGNORE INTO lease VALUES(?,?,'preparing',?)",
++                                (digest,epoch,genesis))
++            checkpoint=await self.stager.prepare(proposal)
++            if (checkpoint.owner!='checkpoint-'+digest or
++                    checkpoint!=self._checkpoint(digest)):
++                raise PatchError('stager substituted checkpoint view')
++            with self.db:
++                self.db.execute("UPDATE lease SET state='staged' WHERE manifest=? AND state IN ('preparing','staged')",(digest,))
++            return checkpoint
++
++    async def published(self,proposal):
++        """Record the REAL pointer after successful live trainer/network handoff.
++
++        Safe to retry after process death when startup has reconstructed the
++        exact certified model and optimizer from durable on-disk state.
++        """
++        digest=proposal['manifest'];epoch=proposal['epoch'];genesis=certified_genesis(proposal)
++        async with self.lock:
++            self._assert_active_pointer(epoch=epoch,digest=digest,genesis=genesis)
++            row=self.db.execute('SELECT epoch,state,genesis FROM lease WHERE manifest=?',(digest,)).fetchone()
++            if row is None or row[0]!=epoch or row[2]!=genesis or row[1] not in ('staged','preparing','active'):
++                raise PatchError('no locally verified candidate checkpoint for active pointer')
++            with self.db:
++                self.db.execute("UPDATE lease SET state='held' WHERE state='active' AND manifest!=?",(digest,))
++                self.db.execute("UPDATE lease SET state='active' WHERE manifest=?",(digest,))
++
++    async def reconcile_active(self,proposal):
++        """Recover lease commit after pointer/SQLite crash boundary.
++
++        A new lifecycle DB can also adopt an older, independently verified
++        v50 cache view. Never equate pointer presence with tensor validity.
++        """
++        digest=proposal['manifest'];epoch=proposal['epoch']
++        genesis=certified_genesis(proposal)
++        async with self.lock:
++            self._assert_active_pointer(epoch=epoch,digest=digest,genesis=genesis)
++            row=self.db.execute('SELECT epoch,state,genesis FROM lease WHERE manifest=?',(digest,)).fetchone()
++            if row is not None and row[1]=='active' and row[0]==epoch and row[2]==genesis:
++                return
++            if row is None:
++                # Run the complete manifest+semantic+shard checks before
++                # reconstructing a lost lease, even if it costs a re-download.
++                checkpoint=await self.stager.prepare(proposal)
++                if checkpoint!=self._checkpoint(digest):
++                    raise PatchError('recovered cache view does not match pointer')
++                with self.db:
++                    self.db.execute("INSERT INTO lease VALUES(?,?,'staged',?)",(digest,epoch,genesis))
++        await self.published(proposal)
++
++    async def gc_from_runtime(self, open_runtime: Callable, current_epoch: int):
++        """Run independent retirement proofs in a disk thread, not on WebRTC.
++
++        ``open_runtime`` creates a NEW EpochRuntimeV43 inside that thread,
++        with its own fresh ledger/SQLite handles. The runtime verifies the
++        checkpoint/carry/journal and exclusive old-writer lock before deleting
++        anything. A signed remote message or a caller-supplied bool is never
++        a substitute for that proof. The new active pointer is rechecked.
++        """
++        removed=[]
++        async with self.lock:
++            ptr=self._pointer()
++            if ptr is None or ptr['epoch'] != current_epoch:
++                raise PatchError('trainer/pointer mismatch in automated GC')
++            for digest,epoch,state,_ in self._rows():
++                if state not in ('held','retiring') or epoch>=current_epoch:
++                    continue
++                def verify():
++                    from .epoch_runtime_v43 import EpochRuntimeV43
++                    runtime=open_runtime()
++                    if not isinstance(runtime,EpochRuntimeV43):
++                        raise PatchError('retirement requires EpochRuntimeV43 proof')
++                    try:
++                        return (runtime.collect(epoch=epoch+1) is True and
++                                runtime.status(epoch+1).get('state')=='retired')
++                    finally:
++                        try:
++                            runtime.close()
++                        finally:
++                            runtime.ledger.close()
++                if not await asyncio.to_thread(verify):
++                    continue
++                # A crash might have durably renamed a new pointer; never
++                # unlink a view if it now belongs to the running generation.
++                if self._pointer()['checkpoint']==digest:
++                    raise PatchError('active checkpoint changed during GC')
++                with self.db:
++                    self.db.execute("UPDATE lease SET state='retiring' WHERE manifest=?",(digest,))
++                await self.stager.retire(self._checkpoint(digest))
++                with self.db:
++                    self.db.execute("DELETE FROM lease WHERE manifest=? AND state='retiring'",(digest,))
++                removed.append(digest)
++            if removed:
++                self.db.execute('PRAGMA incremental_vacuum(128)')
++        return removed
+--- /dev/null
++++ b/tests/test_epoch_v51_lifecycle.py
+@@ -0,0 +1,223 @@
++"""v51 local recovery, bounded cleanup and mixed epoch transport regressions."""
++import asyncio
++from pathlib import Path
++import pytest
++
++from patchlib.core import PatchError
++from patchlib.epoch_checkpoint_v50 import StagedCheckpoint
++from patchlib.epoch_hot_swap_v45 import durable_pointer
++from patchlib.epoch_lifecycle_v51 import DurableEpochLifecycle
++from patchlib.live_epoch_switch_v48 import certified_genesis
++
++
++def proposal(epoch):
++    return {'room':'room','epoch':epoch,'parent':'0'*64,'manifest':f'{epoch+50:064x}',
++            'semantic':f'{epoch+100000:064x}'}
++
++
++class FakeStager:
++    """Only a local lifecycle stub, not a network/security verification mock."""
++    def __init__(self,root):
++        self.root=root
++        self.calls=[]
++    async def prepare(self,p):
++        self.calls.append(('stage',p['epoch']))
++        digest=p['manifest'];view=self.root/'views'/digest
++        view.mkdir(parents=True,exist_ok=True)
++        (view/'checkpoint.fmanifest').write_bytes(b'verified by separate stager')
++        return StagedCheckpoint(view/'checkpoint.fmanifest',view,'checkpoint-'+digest)
++    async def retire(self,checkpoint):
++        import shutil
++        self.calls.append(('retire',checkpoint.owner))
++        if checkpoint.store.exists():shutil.rmtree(checkpoint.store)
++
++
++def manager(tmp_path,stager,**kw):
++    return DurableEpochLifecycle(tmp_path/'leases',stager=stager,
++        pointer=tmp_path/'pointer',**kw)
++
++
++def publish(tmp_path,p):
++    durable_pointer(tmp_path/'pointer',epoch=p['epoch'],genesis=certified_genesis(p),checkpoint_hash=p['manifest'])
++
++
++@pytest.mark.asyncio
++async def test_abandoned_stages_reclaimed_thousands_of_times(tmp_path):
++    stager=FakeStager(tmp_path/'cache');book=manager(tmp_path,stager)
++    for i in range(1,501):
++        await book.sweep_superseded(i)
++        await book.stage(proposal(i))
++        assert book.usage().candidates==1
++        assert len(book._rows())==1
++    await book.sweep_superseded(501)
++    assert not book._rows()
++    assert not list((stager.root/'views').iterdir())
++    assert sum(k=='retire' for k,_ in stager.calls)==500
++    book.close()
++
++
++@pytest.mark.asyncio
++async def test_long_lived_active_is_never_collected_as_failed_candidate(tmp_path):
++    stager=FakeStager(tmp_path/'cache');book=manager(tmp_path,stager,max_held=1)
++    p1=proposal(1)
++    await book.stage(p1);publish(tmp_path,p1);await book.published(p1)
++    await book.sweep_superseded(3000)
++    assert book.usage().active==1
++    assert (stager.root/'views'/p1['manifest']).exists()
++    p2=proposal(2)
++    await book.stage(p2);publish(tmp_path,p2);await book.published(p2)
++    assert book.usage().held==1
++    with pytest.raises(PatchError,match='retention capacity'):
++        await book.stage(proposal(3))
++    assert (stager.root/'views'/p1['manifest']).exists()
++    book.close()
++    reopened=manager(tmp_path,stager,max_held=1)
++    await reopened.reconcile_active(p2)
++    assert reopened.usage().active==1
++    assert reopened.usage().held==1
++    reopened.close()
++
++
++@pytest.mark.asyncio
++async def test_reconstruct_missing_lease_from_verified_cache(tmp_path):
++    stager=FakeStager(tmp_path/'cache');p=proposal(1)
++    publish(tmp_path,p)
++    book=manager(tmp_path,stager)
++    await book.reconcile_active(p)
++    assert book.usage().active==1
++    assert len([c for c in stager.calls if c[0]=='stage'])==1
++    await book.reconcile_active(p)
++    assert len([c for c in stager.calls if c[0]=='stage'])==1
++    book.close()
++
++
++@pytest.mark.asyncio
++async def test_crash_between_pointer_publish_and_lease_update(tmp_path):
++    stager=FakeStager(tmp_path/'cache');p=proposal(1)
++    book=manager(tmp_path,stager)
++    await book.stage(p)
++    publish(tmp_path,p)
++    book.close() # process death before published()
++    book=manager(tmp_path,stager)
++    await book.sweep_superseded(2)
++    assert (stager.root/'views'/p['manifest']).exists() # pointer protects it
++    await book.reconcile_active(p)
++    assert book.usage().active==1
++    book.close()
++
++
++@pytest.mark.asyncio
++async def test_wrong_pointer_and_forged_active_refuse_gc(tmp_path):
++    stager=FakeStager(tmp_path/'cache');book=manager(tmp_path,stager)
++    p=proposal(1)
++    await book.stage(p)
++    with pytest.raises(PatchError,match='unpublished'):
++        await book.published(p)
++    publish(tmp_path,p)
++    with pytest.raises(PatchError):
++        await book.published({**p,'semantic':'f'*64})
++    assert book.usage().candidates==1
++    book.close()
++
++
++@pytest.mark.asyncio
++async def test_signed_mixed_generation_link_is_control_only(tmp_path):
++    from patchlib.elasticnet import ElasticNode,encode_control
++    from patchlib.roomid import auto_identity
++    from tests.test_snapshot_request_delivery import FakeChannel
++    a,asign,apub,_=auto_identity(tmp_path/'a.pem')
++    b,bsign,bpub,_=auto_identity(tmp_path/'b.pem')
++    node=ElasticNode('ws://localhost/ws','x'*32,origin=a,remote=b,
++        genesis='2'*64,generation_root='0'*64,
++        public_key=apub,signer=asign,enable_generation=True)
++    ch=FakeChannel();node._attach_channel(ch);ch.handlers['open']()
++    def send(kind,counter,genesis='3'*64,**data):
++        ch.handlers['message'](encode_control(dict(type=kind,peer=b,genesis=genesis,counter=counter,**data),bsign))
++    send('hello',1,pub=bpub,generation_v1=True,generation_root='0'*64)
++    assert node.bridge_only and node.remote_supports_generation
++    assert node.remote_genesis=='3'*64
++    send('generation-head',2,epoch=1,digest='a'*64)
++    assert node.generation_controls.get_nowait()==('generation-head',{'epoch':1,'digest':'a'*64})
++    assert node.control('generation-need',after=0)
++    assert node.control('need',events=[[a,1]]) is False
++    assert not any('"type":"need"' in frame for frame in ch.sent)
++    assert ch.readyState=='open'
++    send('frontier',3,heads={a:10})
++    assert ch.readyState=='closed' and node.protocol_failure.is_set()
++    await asyncio.sleep(.01)
++
++
++@pytest.mark.asyncio
++async def test_mismatch_without_common_immutable_root_rejected(tmp_path):
++    from patchlib.elasticnet import ElasticNode,encode_control
++    from patchlib.roomid import auto_identity
++    from tests.test_snapshot_request_delivery import FakeChannel
++    a,asign,apub,_=auto_identity(tmp_path/'a.pem')
++    b,bsign,bpub,_=auto_identity(tmp_path/'b.pem')
++    node=ElasticNode('ws://localhost/ws','x'*32,origin=a,remote=b,
++        genesis='2'*64,generation_root='0'*64,
++        public_key=apub,signer=asign,enable_generation=True)
++    ch=FakeChannel();node._attach_channel(ch);ch.handlers['open']()
++    ch.handlers['message'](encode_control({'type':'hello','peer':b,'genesis':'3'*64,
++        'counter':1,'pub':bpub,'generation_v1':True,'generation_root':'f'*64},bsign))
++    assert ch.readyState=='closed'
++    await asyncio.sleep(.01)
++
++@pytest.mark.asyncio
++async def test_genuine_verified_runtime_gc_releases_old_view_offloop(tmp_path):
++    """Actual signed certificate, real sharded weights and SQLite GC proof."""
++    import hashlib
++    import torch
++    from test_epoch_runtime_v43 import prepare as certified_fixture
++    from patchlib.epoch_runtime_v43 import EpochRuntimeV43
++    from patchlib.online_generation import GenerationLedger, make_proposal, _digest
++    from patchlib.shards import export_state_sharded, read_manifest, semantic_shard_sha256
++    from patchlib.elastic import EventJournal
++    from patchlib.identity import signer_from_pem,verifier_from_pem
++
++    old_owner,old_journal,new_journal,manifest,store,ledgers=certified_fixture(tmp_path)
++    p1=ledgers[0].certified_epoch(1)['proposal']
++    old_owner.close()
++    # The first certified generation's worker journal has no uncovered events.
++    # A separate second certified checkpoint may therefore cover the empty cut.
++    manifest2=tmp_path/'state2.fmanifest';store2=tmp_path/'shards2'
++    model=torch.nn.Linear(2,3)
++    with torch.no_grad(): model.weight.add_(4.)
++    export_state_sharded(model,store2,manifest2,model_id='example',revision='rev',peer_id='committee-a',seq=2)
++    p2=make_proposal(room='room',epoch=2,parent=ledgers[0].head(),
++        manifest=hashlib.sha256(manifest2.read_bytes()).hexdigest(),
++        semantic=semantic_shard_sha256(read_manifest(manifest2)),
++        cut=hashlib.sha256(b'').hexdigest(),cutoffs={},
++        replicas=['committee-a','committee-b','committee-c'])
++    votes=[ledgers[i].vote(p2,verified_snapshot=True,verified_cut=True) for i in range(2)]
++    signed=ledgers[0].certificate(p2,votes)
++    for ledger in ledgers:ledger.accept(signed)
++    third=tmp_path/'third.sqlite3';nj=EventJournal(third,'f'*64,max_bytes=0)
++    with nj.db:
++        for key,value in [('generation_certified_epoch','2'),('generation_certified_manifest',p2['manifest']),
++                         ('generation_certified_proposal',_digest(p2))]:
++            nj.db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',(key,value))
++    nj.close()
++    runtime=EpochRuntimeV43(tmp_path/'epoch-runtime',ledgers[0])
++    runtime.stage(new_journal,epoch=2)
++    runtime.acknowledge_install(epoch=2,manifest=manifest2,store=store2,
++                                new_journal=third,loader_confirmation=True)
++    runtime.close()
++    stager=FakeStager(tmp_path/'cache');book=manager(tmp_path,stager)
++    await book.stage(p1);publish(tmp_path,p1);await book.published(p1)
++    await book.stage(p2);publish(tmp_path,p2);await book.published(p2)
++    assert book.usage().held==1
++    def open_runtime():
++        members=['committee-a','committee-b','committee-c']
++        trusted={name:verifier_from_pem(tmp_path/(name+'.pub')) for name in members}
++        ledger=GenerationLedger(tmp_path/'committee-a.gen.sqlite',room='room',peer='committee-a',
++             committee=members,signer=signer_from_pem(tmp_path/'committee-a.key'),
++             trusted=trusted,genesis='0'*64)
++        return EpochRuntimeV43(tmp_path/'epoch-runtime',ledger)
++    assert await book.gc_from_runtime(open_runtime,2)==[p1['manifest']]
++    assert book.usage().held==0 and book.usage().active==1
++    assert not (stager.root/'views'/p1['manifest']).exists()
++    assert not new_journal.exists()
++    assert third.exists()
++    book.close()
++    for ledger in ledgers:ledger.close()
+--- /dev/null
++++ b/README_V51_STATUS.md
+@@ -0,0 +1,124 @@
++# Kagami v51 — migration transport isolation and durable bounded checkpoint lifecycle
++
++**Status: substantial migration infrastructure, but NOT a complete unattended production `train-live` rollover.**
++
++This revision builds on v50. It does NOT disable the original genesis-bound
++training-engine protections, enable unverified committee votes, falsely
++reinterpret old LoHA factors as new-epoch deltas, or delete live journals.
++
++## Connected changes
++
++1. **Authenticated mixed-generation certificate transport.** `ElasticNode`
++   accepts a *different* signed `genesis` only when both sides explicitly
++   negotiate `generation_v1` and name the same immutable, caller-configured
++   `generation_root`. In that state, the DataChannel is *bridge-only*:
++   signed generation heads/needs/certificates and heartbeats work, but normal
++   FedSum frames, frontier repair, snapshot-tip, and ordinary `need` do not.
++   A remote party cannot switch its own genesis mid-connection. No legacy
++   peer or unrelated model can bypass strict genesis checking. The production
++   `train-live` connection factory now supplies its room genesis as
++   `generation_root` when `--generation-v1-committee` is configured. A *new*
++   epoch worker would need to preserve that original root explicitly.
++2. **Automatic durable staging leases.** A v50 `BoundedCheckpointStager`
++   now automatically obtains an SQLite-backed `DurableEpochLifecycle` when
++   passed to `LiveEpochSwitchService`. Metadata is fsynced and capped;
++   candidate download is resumable. After a new certificate supersedes a
++   failed stage, orphaned checkpoint views and pins are actually released.
++   A pointer referring to an uncertain published checkpoint is NEVER pruned.
++3. **Crash-window repair.** A published hot pointer can be reconciled with a
++   lease marked `preparing` or `staged` after a crash. A v50 checkpoint without
++   an existing lease can be verified through the bounded stager and adopted
++   on restart. The old trainer cannot be silently started over a newer pointer.
++4. **Bounded retention of formerly active checkpoints.** By default a node
++   retains no more than two old verified checkpoint views plus the active one
++   and two candidate staging records. If retirement evidence does not arrive,
++   future migrations are rejected before old recovery state is destroyed.
++   This is deliberate *backpressure*, not an infinite-disk promise.
++5. **Automated proof-gated old-checkpoint cleanup.** Supply an
++   `gc_runtime_factory` which opens a NEW `EpochRuntimeV43` and its ledger in
++   the worker thread. The live-switch watcher attempts GC at most every
++   `gc_interval` seconds (default 60). The runtime independently checks the
++   signed certificate, exact checkpoint shards, new journal, certified cut,
++   carry coverage, and exclusive old trainer lock before retiring an old log.
++   Only then does this layer unlink the obsolete checkpoint view/unpin its
++   immutable objects. An old cache view is never released on timer, remote
++   report, quorum alone, or merely after pointer advance.
++6. **No WebRTC-thread fsync for large checkpoint I/O.** The existing v50
++   single-thread disk worker, resumable transfer, full SHA-256 checks,
++   immutable hardlink reuse, token bucket and ≤8 neighbors remain in use;
++   the new runtime GC proof is also executed off the asyncio relay thread.
++
++## Resource budgets and limits
++
++- The *direct connection graph* for 4,096 peers is not complete: the v49
++  four-ring overlay uses at most eight neighbors per peer; the tested graph
++  had 16,375 undirected connections instead of 8,386,560 for a full mesh.
++  These are graph metrics only.
++- Checkpoint download is bounded locally by `BoundedCheckpointStager`:
++  4 MiB/s requested checkpoint payload, 8 GiB unique object reservation and
++  at most eight candidate sources by default. These are **per-device**
++  defaults, not measured network-wide bandwidth. Control traffic, old gossip,
++  optimizer memory, and journal/carry archives have separate budgets.
++- Local lease metadata is capped at 4 MiB of SQLite database pages by default.
++  Retired rows are removed, not stored forever. Filesystem overhead, temporary
++  files and SQLite rollback journals need additional headroom.
++- `max_held=2`, `max_candidates=2` provide fail-closed long-term checkpoint
++  retention. Without verifiable coverage of old signed updates, a finite quota
++  cannot both retain arbitrary offline work *and* always progress.
++- A small-world overlay prevents a direct all-to-all mesh; it does **not**
++  eliminate the inherent cost of replicating every independently signed event
++  to all peers. Complete replacement with certified aggregates and bounded
++  offline local-update semantics remains future work.
++
++## Usage of the connected switch service
++
++```python
++stager = BoundedCheckpointStager(
++    root, peers=authenticated_neighbors,
++    fetch_manifest=fetch_verified_manifest,
++    fetch_block=fetch_authenticated_bounded_block,
++)
++service = LiveEpochSwitchService(
++    ledger=ledger, router=trainer_router, root=runtime_path,
++    checkpoint_stager=stager,
++    build_shadow=build_independent_model_optimizer_and_journal,
++    verify_local=verify_actual_checkpoint_and_journal,
++    flush_unpublished=flush_signed_local_updates,
++    carry_suffix=archive_and_rebase_signed_suffix,
++    transport_handoff=activate_generation_aware_ingress_egress,
++    attest_journal=verify_durable_new_journal,
++    gc_runtime_factory=open_new_epoch_runtime_in_disk_thread,
++)
++await service.run(shutdown)
++await service.close()
++await stager.close()
++```
++
++These locally supplied callbacks are **not optional no-ops** in production.
++They must have the real mathematical/durable properties indicated by their
++names. The example is integration API, not a fully wired GUI feature.
++
++## Still incomplete (do not enable autonomous destructive GC on v1)
++
++- Actual GUI/`train-live` optimization loop is still pinned to its original
++  adapter, optimizer, journal and original genesis; this revision does **not**
++  automatically instantiate/install the next model generation in that loop.
++- There is no proven atomic model+frontier producer that automatically submits
++  and wins new quorum proposals. `locally_verified`/`locally_covered` in the
++  existing control-plane bridge deliberately remain `False`.
++- The bridge-only cross-generation connection passes **certificate traffic**,
++  not authenticated old-generation training-event carries. A separate
++  generation-tagged bounded update stream and original signature validation
++  still need to be connected end to end.
++- Correct replay of an offline peer's unincorporated steps, canonical
++  effective-weight carry accounting, and durable reconstruction of the actual
++  production optimizer across a power loss remain application obligations.
++- No thousand-GPU/phone WebRTC training rollout or multiweek soak has been run.
++  The topology tests, test-double migrations and a local real-torch/SQLite
++  handoff are not a substitute for that deployment.
++
++**Safety policy:** on missing proof, stop *migrating or collecting*, never
++silently discard uncommitted events. Training can continue in the existing
++admitted generation until its separate journal quota is reached.
++
++See [VALIDATION_V51.md](VALIDATION_V51.md) for reproducible test coverage.
+--- /dev/null
++++ b/VALIDATION_V51.md
+@@ -0,0 +1,47 @@
++# Kagami v51 validation — 2026-10-27
++
++Run from the project root with pytest and the existing dependencies:
++
++```sh
++PYTHONPATH=. python -m pytest -q \
++ tests/test_epoch_v51_lifecycle.py \
++ tests/test_epoch_checkpoint_v50.py tests/test_epoch_objects_v50.py \
++ tests/test_live_epoch_switch_v48.py tests/test_hot_swap_v45.py \
++ tests/test_epoch_carry_v46.py tests/test_destructive_gc_v47.py \
++ tests/test_epoch_runtime_v43.py tests/test_compact_epoch_network_v46.py \
++ tests/test_live_generation_transport_v42.py tests/test_generation_multicast_v46.py \
++ tests/test_epoch_ingest_v46.py tests/test_snapshot_boundary_paging_v26.py \
++ tests/test_v49_overlay_scale.py tests/test_v49_gossip_cost.py
++```
++
++**Results**: 93 tests passed on this Linux CPU runner (Python 3.13). Includes:
++
++- 500 sequential abandoned candidates reclaimed with at most one lease row
++  retained and no orphan candidate views, across independently verified
++  service-manager lifecycle tests (synthetic stage stubs).
++- Pointer-rename-before-lease-commit recovery; active checkpoint pin protection
++  across restarts; fail-closed retention budget; forged pointer mismatch.
++- Authenticated mixed-generation signed Hello with explicitly matched root;
++  only generation certificates/heartbeats accepted; v1 frame rejected;
++  wrong immutable root rejected.
++- A real signed second-generation certificate, actual PyTorch sharded checkpoint,
++  SQLite journal installation, `EpochRuntimeV43.collect`, and separate worker
++  thread invoking proven retirement of the old checkpoint view and its journal.
++- Existing v50 actual PyTorch training steps while a checkpoint download is
++  blocked, then independent optimizer activation, and crash/resume tests.
++- Existing negative tests for corrupt/cut-mismatched shards, replays,
++  incomplete carried updates, held journal lock, bad signer, and restart.
++
++**4096-node graph benchmark:**
++
++```sh
++python scripts/benchmark_v49_overlay.py --peers 4096
++```
++
++Observed (graph simulation): max degree 8, 16,375 undirected connections,
++mean shortest-path hops 4.346 from one source, max 6 hops; a complete mesh
++would need 8,386,560 connections.
++
++**Not measured:** 4096 live trainers, real multi-generation WebRTC throughput,
++mobile storage consumption, end-to-end optimizer hot installation in the GUI,
++real committee-proposed snapshot creation, hardware failures, multi-day uptime.

@@ -1,0 +1,1029 @@
+--- /dev/null
++++ b/README_V54_STATUS.md
+@@ -0,0 +1,78 @@
++# Kagami v54 — long-running epoch repair hardening (2026-10-27)
++
++## Scope
++
++This is a **hardening revision of v53**, not a claim of a fully automatic
++4,096-origin/300B-scale system. The same certified-checkpoint prerequisites
++and v53 limitations remain. No signing checks or epoch writer fences were
++weakened to improve benchmark/test results.
++
++### Production changes
++
++1. **Constant-space authenticated carry index.** `CrossEpochCarryArchive`
++   no longer allocates an ever-growing `set((origin, seq), ...)`. Its indexed
++   durable EventJournal is the authority for deduplication, and completed
++   replays retain only a counter. Concurrent asynchronous accepts share an
++   archive-local commit lock. Any post-durable-append model-apply failure or
++   cancellation permanently poisons the in-process archive, requiring clean
++   checkpoint recovery; it cannot silently continue with partial tensors.
++2. **Non-blocking cross-generation NEED service.** `AdjacentEpochCarryGossip`
++   queues at most one bounded pending disk fetch per live neighbor. Original
++   signed updates are read with `EventJournal.get_async` on the dedicated
++   journal worker, rather than blocking WebRTC control callbacks while
++   reading and checking 16 MiB of data. The relay wrappers in `elasticnet`
++   expose the correct worker-thread method. No full mesh was introduced.
++3. **Bounded delivery under backpressure.** A verified spool is loaded only
++   once while an inbound queue is saturated, rather than reread every 3 ms.
++   Submission retries are delayed 50 ms after failure; a disconnection
++   frees spool, cached bytes, and pending requests. Temporary spool fragments
++   remain untrusted and are discarded on restart.
++4. **Asynchronous spool verification.** Finishing the last 8-KiB frame no
++   longer fsyncs and SHA256-hashes a 16-MiB temporary file in a DataChannel
++   callback. Verification is performed asynchronously before bytes can reach
++   the signed ingestion pipeline. The pipeline's EventJournal still fsyncs
++   authentic payloads before applying them; failure does not ACK data.
++5. **Atomic, resumable local checkpoint-view publication.** The certified
++   view is fully hardlinked and verified in a private `.building-*` sibling,
++   and made visible with a rename only after directory durability barriers.
++   A process-wide advisory flock serializes cooperative stagers. Abandoned
++   staging views are reclaimed after crashes; existing published corrupt or
++   legacy partial views fail closed instead of being silently rewritten.
++   Replaced O(shards) directory fsync calls with O(containing directories).
++6. **Desktop and test alignment.** UI defaults expose actual local steps
++   and maximum context length. A scoped text-caret/focus correction was
++   added for macOS WebView. Obsolete tests were updated to simulate a
++   *completed authenticated HELLO*; they no longer demand unsafe pre-auth
++   sending. Tests for an old benchmark tab and old CDN-reliant UI were
++   updated to the current bundled/local-only desktop UI.
++
++### New test scenarios
++
++`tests/test_epoch_v54_hardening.py`: inbound saturation does not reread spool;
++async worker-bound NEED reads; checksum-tampered spools fail closed; eight
++concurrent signed carries apply at most once; injected disk failure cannot
++publish a partial view and stale temporary directories are cleaned.
++
++### Explicit remaining limitations (unchanged in v54)
++
++- Autonomous global snapshot cut, certificate quorum formation and the >256
++  origin v2 cut proof are not completed. **4,096 peers cannot yet perform an
++  independently certified epoch transition end-to-end.**
++- Multi-epoch offline reconciliation, indefinitely bounded storage while
++  partitions never rejoin, production 300B out-of-core dual-model swaps,
++  and worst-case zero-pause trainer handoff remain unsupported.
++- Remote regular training and epoch-control connections have not been
++  soak-tested in a real 4,096-GPU/devices swarm. The focused micro regressions
++  demonstrate *removed redundant work*, NOT throughput acceleration in %.
++- `verify_certified_cut`, final carry inventory digest, model-shard hashing,
++  and WebRTC reconnection may still make the short final boundary expensive.
++  No unsafe shortcuts were taken through these proofs.
++
++### Operational notes
++
++Use the same commands as v53. Restart normally with the durable pointer
++checker; do not discard old signed histories unless `EpochRuntimeV43`
++proves they are safe to GC. If upgrading from v53 and a legacy incomplete
++`checkpoints/views/<manifest>` exists, quarantine/reconcile it manually; v54
++refuses to overwrite a possibly active view. A `*.building-*` temporary
++view from v54 is safe to discard when no stager holds the directory lock.
+--- /dev/null
++++ b/VALIDATION_V54.md
+@@ -0,0 +1,46 @@
++# Kagami v54 validation (2026-10-27)
++
++## All tests
++
++Run from repository root:
++
++```shell
++python -m pytest -q --tb=short
++```
++
++**680 passed, 3 skipped in 74.86s** (Python 3.13 environment, localhost
++unit/integration tests; no 4,096-peer WAN experiment).
++
++Focused epoch suite:
++
++```shell
++python -m pytest -q tests/test_epoch_* tests/test_online_generation_v41.py \
++  tests/test_live_generation_transport_v42.py \
++  tests/test_v44_low_cost_generation.py \
++  tests/test_generation_multicast_v46.py \
++  tests/test_compact_epoch_network_v46.py \
++  tests/test_live_epoch_switch_v48.py \
++  tests/test_continual_elastic.py tests/test_elastic.py
++```
++
++**125 passed in 13.69s**.
++
++The five new v54 cases in `tests/test_epoch_v54_hardening.py` cover real
++signed LoHA race and failure paths, a disk I/O delayed WebRTC repair callback,
++backpressure write amplification, spool checksum damage, and atomic local
++view publishing under injected I/O failure.
++
++## Prior failures and interpretation
++
++- v53 full-suite initially had two previous failures: GUI defaults test
++  expected absent keys, and one aggregate test transmitted without HELLO.
++- First v54 full run: 542 passed, 3 skipped, 4 failed because other tests
++  used old unauthenticated channel mocks or defunct benchmark tabs.
++- Second run: 674 passed, 3 skipped, 6 failed in similarly stale assumptions.
++- Final run: 680 passed, 3 skipped. Test fixtures now establish authenticated
++  state when testing message pump behavior; no pre-auth send gate was relaxed.
++  UI tests target bundled CSS and current desktop tabs; removed bench inputs
++  are tested via the supported backend validation separately.
++
++The 3 skipped tests are environment-dependent; this run is *not* proof of
++real-network performance or mathematically complete GC/liveness at scale.
+--- a/patchlib/elasticnet.py
++++ b/patchlib/elasticnet.py
+@@ -2132,6 +2132,7 @@
+                 genesis=carry_archive.source_genesis
+                 db=carry_archive.journal.db
+                 get=carry_archive.journal.get
++                get_async=carry_archive.journal.get_async
+                 has=carry_archive.journal.has
+             relay_source=_OldCarryView()
+             relay_genesis=carry_archive.source_genesis
+@@ -2303,6 +2304,7 @@
+                 genesis=archive.source_genesis
+                 db=archive.journal.db
+                 get=archive.journal.get
++                get_async=archive.journal.get_async
+                 has=archive.journal.has
+             carry_relay=AdjacentEpochCarryGossip(source_genesis=archive.source_genesis,
+                 source_journal=_OldCarryView53(),spool=epoch_dir/'carry-spool',
+--- a/patchlib/epoch_carry_gossip_v53.py
++++ b/patchlib/epoch_carry_gossip_v53.py
+@@ -11,6 +11,7 @@
+ """
+ from __future__ import annotations
+ 
++import asyncio
+ import base64
+ import hashlib
+ import os
+@@ -81,6 +82,9 @@
+         self.path=Path(name);self.writer=os.fdopen(fd,'wb')
+         self.peer=peer;self.ident=tuple(fields[k] for k in ('source','origin','seq','digest','length'))
+         self.next_index=0;self.started=time.monotonic()
++        self._verified_wire=None
++        self._verified=False
++        self._verify_task=None
+ 
+     def write(self,fields):
+         if tuple(fields[k] for k in ('source','origin','seq','digest','length'))!=self.ident:
+@@ -89,20 +93,32 @@
+         data=base64.b64decode(fields['data'],validate=True)
+         self.writer.write(data);self.next_index+=1
+         if self.next_index*CHUNK+0 >= self.ident[4]:
+-            self.writer.flush();os.fsync(self.writer.fileno());self.writer.close()
+-            with self.path.open('rb') as f:
+-                if hashlib.file_digest(f,'sha256').hexdigest()!=self.ident[3]:
+-                    raise PatchError('carry body SHA-256 mismatch')
++            # Temporary spool contents are untrusted and discarded on crash.
++            # The signed ingestion path fsyncs the authenticated wire *after*
++            # verification. Avoid a 16-MiB fsync + SHA read in RTC callback.
++            self.writer.close()
+             return True
+         return False
+ 
++    def verify(self):
++        if not self.writer.closed:raise PatchError('carry not complete')
++        with self.path.open('rb') as f:
++            return hashlib.file_digest(f,'sha256').hexdigest()==self.ident[3]
++
+     def read(self):
+-        if not self.writer.closed:raise PatchError('carry not complete')
+-        return self.path.read_bytes()
++        if not self.writer.closed or not self._verified:
++            raise PatchError('carry not verified')
++        # Queue backpressure can retry this submission hundreds of times;
++        # do not reread and allocate a whole multi-MiB update every 3 ms.
++        if self._verified_wire is None:
++            self._verified_wire=self.path.read_bytes()
++        return self._verified_wire
+ 
+     def close(self):
+         if not self.writer.closed:self.writer.close()
++        if self._verify_task is not None:self._verify_task.cancel()
+         self.path.unlink(missing_ok=True)
++        self._verified_wire=None
+ 
+ 
+ class AdjacentEpochCarryGossip:
+@@ -136,12 +152,21 @@
+         self._inbox={};self._completed={}
+         self._next_offer={};self._cursor={};self._sending={}
+         self._last_need={};self._recent_sent={}
++        self._send_requests={}   # one pending (origin, seq, digest) per neighbor
++        self._fetch_tasks={}     # bounded disk-worker reads, NEVER in RTC callback
++        self._submit_retry={}    # failed queue submissions are rate-limited
+         self.bytes_sent=0;self.events_received=0
++        self.bytes_read_for_delivery=0
++        self.max_cached_complete_bytes=0
+ 
+     def disconnect(self,peer):
+         self._peers.pop(peer,None);self._next_offer.pop(peer,None)
+         self._cursor.pop(peer,None);self._sending.pop(peer,None)
+         self._last_need.pop(peer,None);self._recent_sent.pop(peer,None)
++        self._send_requests.pop(peer,None);self._submit_retry.pop(peer,None)
++        task=self._fetch_tasks.pop(peer,None)
++        if task is not None:
++            task.cancel()
+         if peer in self._inbox:self._inbox.pop(peer).close()
+         if peer in self._completed:self._completed.pop(peer).close()
+ 
+@@ -178,18 +203,14 @@
+             event=self.journal.has(fields['origin'],fields['seq'])
+             if event is None or event[0]!=fields['digest']:
+                 return
+-            # One body in flight per neighbor. Fetch ONCE, not once per 8-KiB
+-            # fragment (which would multiply disk I/O by thousands).
+             key=(fields['origin'],fields['seq'],fields['digest'])
+-            # Repeated NEED frames delayed in SCTP must not cause a finished
+-            # stream to restart in the middle of an already received response.
+-            if (peer not in self._sending and
++            # Enqueue identity only; 16-MiB get()+hash MUST NOT block the
++            # WebRTC control event loop. flush_completed() resolves requests
++            # with EventJournal.get_async() on its dedicated I/O worker.
++            if (peer not in self._sending and peer not in self._fetch_tasks and
+                     not (self._recent_sent.get(peer,(None,0))[0]==key and
+                          time.monotonic()-self._recent_sent[peer][1]<20.0)):
+-                wire=self.journal.get(fields['origin'],fields['seq'])
+-                if (wire is not None and len(wire)<=self.max_event and
+-                        hashlib.sha256(wire).hexdigest()==fields['digest']):
+-                    self._sending[peer]=[fields['origin'],fields['seq'],fields['digest'],0,wire]
++                self._send_requests[peer]=key
+         elif kind=='generation-carry-chunk':
+             if self.archive is None or fields['length']>self.max_event:return
+             if not self._requestable(fields['origin'],fields['seq'],fields['digest']):return
+@@ -208,14 +229,66 @@
+                 self.disconnect(peer)
+                 raise
+ 
++    async def _fetch_wire(self,origin,seq):
++        fetch=getattr(self.journal,'get_async',None)
++        if fetch is not None:
++            return await fetch(origin,seq)
++        # Legacy wrappers must expose get_async when backed by SQLite:
++        # sqlite3 connections cannot be moved to arbitrary worker threads.
++        return self.journal.get(origin,seq)
++
+     async def flush_completed(self,submit):
+-        """Submit fully assembled wire to signed pipeline; no bypass of verification."""
++        """Pump bounded disk reads and delivered bodies outside RTC callbacks.
++
++        A pending NEED never issues an unbounded read on the control path.
++        Completed spool data is read only once, and admission retries are
++        throttled if the signed inbound pipeline is saturated.
++        """
++        for peer,key in list(self._send_requests.items()):
++            if peer not in self._fetch_tasks and peer not in self._sending:
++                origin,seq,_=key
++                self._fetch_tasks[peer]=(key,asyncio.create_task(
++                    self._fetch_wire(origin,seq),name='carry-disk-read'))
++                self._send_requests.pop(peer,None)
++        for peer,(key,task) in list(self._fetch_tasks.items()):
++            if not task.done():continue
++            self._fetch_tasks.pop(peer,None)
++            try:wire=task.result()
++            except asyncio.CancelledError:continue
++            if (wire is not None and len(wire)<=self.max_event and
++                    hashlib.sha256(wire).hexdigest()==key[2]):
++                # A completed fetch is ignored if the peer disconnected.
++                self._sending[peer]=[key[0],key[1],key[2],0,wire]
++        now=time.monotonic()
+         for peer,obj in list(self._completed.items()):
++            if not obj._verified:
++                if obj._verify_task is None:
++                    obj._verify_task=asyncio.create_task(asyncio.to_thread(obj.verify),
++                        name='carry-spool-sha256')
++                if not obj._verify_task.done():continue
++                try:
++                    valid=obj._verify_task.result()
++                except BaseException:
++                    self.disconnect(peer)
++                    raise
++                if not valid:
++                    self.disconnect(peer)
++                    raise PatchError('carry body SHA-256 mismatch')
++                obj._verified=True
++            if now<self._submit_retry.get(peer,0):continue
++            cached_before=obj._verified_wire is not None
+             wire=obj.read()
++            if not cached_before:
++                self.bytes_read_for_delivery+=len(wire)
++            self.max_cached_complete_bytes=max(self.max_cached_complete_bytes,
++                sum(len(o._verified_wire or b'') for o in self._completed.values()))
+             if submit(peer,wire):
+                 self.events_received+=1
+                 obj.close();del self._completed[peer]
++                self._submit_retry.pop(peer,None)
+                 self._peers.pop(peer,None)
++            else:
++                self._submit_retry[peer]=now+0.05
+ 
+     def tick(self,neighbors,*,now=None):
+         if now is None:now=time.monotonic()
+@@ -275,7 +348,12 @@
+                 if node.control('generation-carry-offer',source=self.source,events=offered):
+                     if old_rows:self._cursor[peer]=old_rows[-1][0]
+                     self._next_offer[peer]=now+self.interval
+-        for peer in set(self._next_offer)-active:self.disconnect(peer)
++        for peer in (set(self._next_offer)|set(self._fetch_tasks)|
++                     set(self._send_requests)|set(self._sending)|
++                     set(self._inbox)|set(self._completed))-active:
++            self.disconnect(peer)
+ 
+     def close(self):
+-        for peer in set(self._inbox)|set(self._completed):self.disconnect(peer)
++        for peer in (set(self._inbox)|set(self._completed)|
++                     set(self._fetch_tasks)|set(self._send_requests)|
++                     set(self._sending)):self.disconnect(peer)
+--- a/patchlib/epoch_carry_v46.py
++++ b/patchlib/epoch_carry_v46.py
+@@ -44,7 +44,11 @@
+                  'manifest':certified_manifest,'epoch':epoch,'cutoffs':sorted(cutoffs.items())}
+         self.genesis=hashlib.sha256(_canonical_json(context)).hexdigest()
+         self.journal=EventJournal(path,self.genesis,max_bytes=0)
+-        self._applied=set()
++        # Durable PK-index is the membership authority. A Python set of every
++        # historically applied event grew without bound on long-lived peers.
++        self._replayed_count=0
++        self._poisoned=False
++        self._async_lock=asyncio.Lock()
+         self._replayed=False
+ 
+     def _validate_engine(self,engine):
+@@ -67,28 +71,32 @@
+         if self._replayed:
+             raise PatchError('carry archive already replayed on current model')
+         self._validate_engine(engine)
++        if self._poisoned:
++            raise PatchError('poisoned carry archive requires clean base reload')
+         self._replayed=True
++        count=0
+         try:
+             for wire in self.journal.events():
+                 info,prepared=self._check(engine,wire)
+-                key=(info.origin,info.seq)
+-                if key in self._applied:
+-                    raise PatchError('duplicate stored carry')
++                # The journal's (origin, seq) PRIMARY KEY is unique. Replay
++                # always starts on a verified *clean* base, never a live model.
+                 engine._apply_checked(info,prepared)
+-                self._applied.add(key)
++                count+=1
+         except BaseException:
+-            # Caller must reload the clean certified base before retrying.
++            # An exception can leave a partially modified tensor: no further
++            # mutations to this engine until a clean checkpoint is reloaded.
+             self._replayed=False
+-            self._applied.clear()
++            self._poisoned=True
+             raise
+-        return len(self._applied)
++        self._replayed_count=count
++        return count
+ 
+     def accept(self,engine,wire:bytes):
+         """Archive before application: a crash after append is recovered by
+         rebuilding from base and replaying the entire authenticated archive.
+         Duplicate signed receipts never apply a second delta.
+         """
+-        if not self._replayed:
++        if not self._replayed or self._poisoned:
+             raise PatchError('must replay durable carries on clean base before receiving')
+         if not isinstance(wire,bytes):
+             raise PatchError('invalid signed old-generation event')
+@@ -98,41 +106,48 @@
+         if existing:
+             if existing[0]!=hashlib.sha256(wire).hexdigest():
+                 raise PatchError('conflicting carried event identity')
+-            if key not in self._applied:
+-                raise PatchError('previous archived event needs clean-base crash replay')
+             return False
+-        self.journal.append(info.origin,info.seq,wire)
+-        engine._apply_checked(info,prepared)
+-        self._applied.add(key)
++        try:
++            self.journal.append(info.origin,info.seq,wire)
++            engine._apply_checked(info,prepared)
++        except BaseException:
++            self._poisoned=True
++            raise
++        self._replayed_count+=1
+         return True
+ 
+     async def accept_prechecked(self,engine,wire,info,prepared):
+-        """Async path for the authenticated AsyncInboundPipeline ONLY.
++        """Persist authenticated bytes before applying, with O(1) RAM index.
+ 
+-        The pipeline must have called self._check() on these exact bytes in a
+-        worker thread.  Metadata is checked again before persistence; the
+-        signed original is fsynced via EventJournal's thread-owned writer.
+-        Weight application also runs off the WebRTC event loop. A failed apply
+-        requires a clean-base restart and deterministic replay.
++        Concurrent inbound consumers serialize against the archive's own lock,
++        rather than relying on the caller to supply a shared commit lock.
++        If an append or tensor update fails, the instance is permanently
++        poisoned until reconstructed from a clean checkpoint and the log.
+         """
+-        if not self._replayed:
+-            raise PatchError('carry archive not replayed')
+-        self._validate_engine(engine)
+-        if (getattr(info,'digest',None)!=hashlib.sha256(wire).hexdigest() or
+-                info.seq <= self.cutoffs.get(info.origin,0)):
+-            raise PatchError('unverified/covered cross-generation carry')
+-        key=(info.origin,info.seq)
+-        existing=self.journal.has(*key)
+-        if existing:
+-            if existing[0]!=info.digest:
+-                raise PatchError('conflicting old-generation carry')
+-            if key not in self._applied:
+-                raise PatchError('crashed unapplied carry requires clean-base replay')
+-            return False
+-        await self.journal.append_async(info.origin,info.seq,wire)
+-        await asyncio.to_thread(engine._apply_checked,info,prepared)
+-        self._applied.add(key)
+-        return True
++        async with self._async_lock:
++            if not self._replayed or self._poisoned:
++                raise PatchError('carry archive needs clean-base replay')
++            self._validate_engine(engine)
++            if (getattr(info,'digest',None)!=hashlib.sha256(wire).hexdigest() or
++                    info.seq <= self.cutoffs.get(info.origin,0)):
++                raise PatchError('unverified/covered cross-generation carry')
++            key=(info.origin,info.seq)
++            existing=self.journal.has(*key)
++            if existing:
++                if existing[0]!=info.digest:
++                    raise PatchError('conflicting old-generation carry')
++                return False
++            try:
++                # fsync+commit before mutating any tensors. Concurrent calls
++                # cannot see an unapplied durable row under this lock.
++                if not await self.journal.append_async(info.origin,info.seq,wire):
++                    raise PatchError('unexpected duplicate within carry commit lock')
++                await asyncio.to_thread(engine._apply_checked,info,prepared)
++            except BaseException:
++                self._poisoned=True
++                raise
++            self._replayed_count+=1
++            return True
+ 
+     def close(self):
+         self.journal.close()
+--- a/patchlib/epoch_local_stage_v53.py
++++ b/patchlib/epoch_local_stage_v53.py
+@@ -1,74 +1,117 @@
+-"""Materialize a locally received, verified certificate snapshot without copies.
++"""Atomic, zero-copy local view of a previously downloaded certified checkpoint.
+ 
+-This operates only on complete content-addressed local shards. Network fetches
+-are handled independently by the existing resumable snapshot transport.
+-Publishing a view never certifies a checkpoint or a journal cut by itself.
++Every model shard is validated against its content-addressed manifest before
++linking.  Publication uses a sibling directory rename after directory fsync;
++concurrent stage operations are serialized with a process-safe flock.  A crash
++cannot make a partially hardlinked view look complete.
+ """
+ from __future__ import annotations
+ 
++import fcntl
+ import hashlib
+ import os
+ from pathlib import Path
++import shutil
++import tempfile
++from types import SimpleNamespace
+ 
+ from .core import PatchError
+-from .shards import read_manifest,shard_map,semantic_shard_sha256,verify_shards,_blob_path
++from .shards import read_manifest, shard_map, semantic_shard_sha256, verify_shards, _blob_path
+ from .live_epoch_switch_v48 import verify_candidate_files
+-from types import SimpleNamespace
+ 
+ 
+ def _sync_dir(path):
+-    fd=os.open(path,os.O_DIRECTORY)
++    fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|getattr(os,'O_NOFOLLOW',0))
+     try:os.fsync(fd)
+     finally:os.close(fd)
+ 
+ 
++def _safe_dir(path):
++    if path.is_symlink() or (path.exists() and not path.is_dir()):
++        raise PatchError('unsafe checkpoint view path')
++
++
+ def stage_verified_local_view(proposal, *, root, incoming, objects,
+                               max_state_bytes=2*1024**4):
+-    """Re-use hardlinks so a cached 300B checkpoint is not copied on staging.
++    """Stage a certified view with hardlinks and an atomic publish boundary.
+ 
+-    The caller must ensure the source is a verified, content-addressed local
+-    snapshot download. Every linked shard is independently rehashed here.
++    No transfer/GC/voting is authorized by this function.  Its flock ensures
++    that only *abandoned* temporary views from a crashed process are reclaimed.
++    An already published but corrupt view is never quietly replaced.
+     """
+     from .epoch_objects_v50 import digest_ok
+     digest=proposal.get('manifest')
+     if not digest_ok(digest) or not digest_ok(proposal.get('semantic')):
+         raise PatchError('invalid certified candidate hashes')
+     root=Path(root);incoming=Path(incoming);objects=Path(objects)
+-    target=root/'checkpoints'/'views'/digest
+-    if (target.is_symlink() or incoming.is_symlink() or objects.is_symlink() or
+-            root.is_symlink()):
+-        raise PatchError('unsafe snapshot cache source')
+-    current=target/'checkpoint.fmanifest'
+-    if current.is_file():
+-        candidate=SimpleNamespace(manifest=current,store=target)
+-        verify_candidate_files(candidate,proposal,max_state_bytes=max_state_bytes)
+-        return candidate
++    views=root/'checkpoints'/'views'
++    target=views/digest
++    for directory in (root,root/'checkpoints',views,incoming,objects):
++        _safe_dir(directory)
++    # Missing input must not create an empty checkpoint cache on each retry.
+     source=incoming/(digest+'.fmanifest')
+-    if source.is_symlink() or not source.is_file():
++    if not target.exists() and (source.is_symlink() or not source.is_file()):
+         raise FileNotFoundError('certified checkpoint not locally downloaded')
+-    h=hashlib.sha256()
+-    with source.open('rb') as fp:
+-        for part in iter(lambda:fp.read(1024*1024),b''):h.update(part)
+-    if h.hexdigest()!=digest:raise PatchError('downloaded certified manifest hash mismatch')
+-    meta=read_manifest(source,max_state_bytes=max_state_bytes)
+-    if semantic_shard_sha256(meta)!=proposal['semantic']:
+-        raise PatchError('downloaded checkpoint semantic hash mismatch')
+-    verify_shards(meta,objects)
+-    target.mkdir(parents=True,exist_ok=True)
+-    if target.is_symlink():raise PatchError('unsafe checkpoint view')
+-    def link(src,dst):
+-        if src.is_symlink():raise PatchError('unsafe snapshot shard link source')
+-        dst.parent.mkdir(parents=True,exist_ok=True)
+-        if dst.is_symlink():raise PatchError('unsafe destination snapshot link')
+-        if not dst.exists():os.link(src,dst)
+-        elif not os.path.samefile(src,dst):
+-            raise PatchError('checkpoint view collision')
+-        _sync_dir(dst.parent)
+-    link(source,current)
+-    for key in shard_map(meta):
+-        link(_blob_path(objects,key),_blob_path(target,key))
+-    candidate=SimpleNamespace(manifest=current,store=target)
+-    verify_candidate_files(candidate,proposal,max_state_bytes=max_state_bytes)
+-    _sync_dir(target)
+-    _sync_dir(target.parent)
+-    return candidate
++    views.mkdir(parents=True,exist_ok=True)
++    lock_path=views/'.stage.lock'
++    if lock_path.is_symlink():raise PatchError('unsafe checkpoint lock')
++    lock_fd=os.open(lock_path,os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
++    try:
++        fcntl.flock(lock_fd,fcntl.LOCK_EX)
++        # No other local invocation can own an incomplete work directory once
++        # we hold the lock (flock is released automatically after a crash).
++        for abandoned in views.iterdir():
++            if abandoned.name.startswith('.building-'):
++                if abandoned.is_symlink() or not abandoned.is_dir():
++                    raise PatchError('unexpected checkpoint staging object')
++                shutil.rmtree(abandoned)
++        _safe_dir(target)
++        current=target/'checkpoint.fmanifest'
++        if target.exists():
++            if not current.is_file() or current.is_symlink():
++                raise PatchError('unverified legacy partial checkpoint view; isolate manually')
++            candidate=SimpleNamespace(manifest=current,store=target)
++            verify_candidate_files(candidate,proposal,max_state_bytes=max_state_bytes)
++            return candidate
++        source=incoming/(digest+'.fmanifest')
++        if source.is_symlink() or not source.is_file():
++            raise FileNotFoundError('certified checkpoint not locally downloaded')
++        h=hashlib.sha256()
++        with source.open('rb') as fp:
++            for part in iter(lambda:fp.read(1024*1024),b''):h.update(part)
++        if h.hexdigest()!=digest:
++            raise PatchError('downloaded certified manifest hash mismatch')
++        meta=read_manifest(source,max_state_bytes=max_state_bytes)
++        if semantic_shard_sha256(meta)!=proposal['semantic']:
++            raise PatchError('downloaded checkpoint semantic hash mismatch')
++        verify_shards(meta,objects)
++        building=Path(tempfile.mkdtemp(prefix='.building-',dir=views))
++        try:
++            parent_dirs=set()
++            def link(src,dst):
++                if src.is_symlink() or not src.is_file():
++                    raise PatchError('unsafe snapshot source shard')
++                dst.parent.mkdir(parents=True,exist_ok=True)
++                if dst.is_symlink() or dst.exists():
++                    raise PatchError('collision in unpublished checkpoint')
++                os.link(src,dst)
++                parent_dirs.add(dst.parent)
++            link(source,building/'checkpoint.fmanifest')
++            for key in shard_map(meta):
++                link(_blob_path(objects,key),_blob_path(building,key))
++            candidate=SimpleNamespace(manifest=building/'checkpoint.fmanifest',store=building)
++            verify_candidate_files(candidate,proposal,max_state_bytes=max_state_bytes)
++            # Link entries are durable after fsync of each containing directory.
++            # O(dirs), not one fsync syscall PER shard.
++            for directory in sorted(parent_dirs,key=lambda p:len(p.parts),reverse=True):
++                _sync_dir(directory)
++            _sync_dir(building)
++            _sync_dir(views)
++            os.rename(building,target)
++            _sync_dir(views)
++            return SimpleNamespace(manifest=current,store=target)
++        finally:
++            if building.exists():shutil.rmtree(building)
++    finally:
++        fcntl.flock(lock_fd,fcntl.LOCK_UN)
++        os.close(lock_fd)
+--- a/patchlib/webview_controller.py
++++ b/patchlib/webview_controller.py
+@@ -116,7 +116,7 @@
+         return {'last_room':self._last_room(), 'room':create_room_id(), 'model':'roneneldan/TinyStories-1M',
+                 'revision':'77f1b168e219585646439073245fe87e56b3023e', 'task':'causal-lm', 'ws':'ws://127.0.0.1:8080/ws',
+                 'seed':42,'kind':'loha','rank':16,'initialization':'random',
+-                'reinit_every':20,'lr':0.0001,
++                'reinit_every':20,'lr':0.0001,'local_steps':4,'max_length':64,
+                 'wide_lora_rank':4,'rounds':0,'push_fanout':2,
+                 'max_journal_gb':0,'streaming_base':False,'disk_cache_fraction':.6,
+                 'sources':[{'repo':'roneneldan/TinyStories','revision':'f54c09fd23315a6f9c86f9dc80f725de7d8f9c64','config':None,
+--- a/tests/test_async_mixed_v6.py
++++ b/tests/test_async_mixed_v6.py
+@@ -140,7 +140,7 @@
+     cfg=controller.settings()
+     assert cfg['kind']=='loha' and cfg['rank']==16
+     assert cfg['wide_lora_rank']==4
+-    assert cfg['local_steps']==4 and cfg['peers']==5 and cfg['rounds']==0
++    assert cfg['local_steps']==4 and cfg['rounds']==0 and 'peers' not in cfg
+     assert cfg['reinit_every']==20 and cfg['lr']==.0001
+     controller.save(cfg)
+     calls=[]
+@@ -149,7 +149,7 @@
+         controller.start({'room':cfg['room'],'ws':cfg['ws']})
+         cmd=calls[0]
+         pairs={'--local-steps':'4','--rank':'16','--wide-lora-rank':'4',
+-               '--reinit-every':'20','--expected-peers':'5',
++               '--reinit-every':'20',
+                '--rounds':'0','--lr':'0.0001'}
+         for flag,value in pairs.items():
+             assert cmd[cmd.index(flag)+1]==value, (flag,cmd)
+--- a/tests/test_cross_origin_aggregate_v19.py
++++ b/tests/test_cross_origin_aggregate_v19.py
+@@ -221,6 +221,7 @@
+     node=ElasticNode('ws://127.0.0.1:8080/ws','a'*32,
+        origin='p'+'a'*32,remote='p'+'b'*32,genesis='0'*64,unsafe=True)
+     node.remote_supports_aggregate=True
++    node.hello_received=True  # Simulate authenticated HELLO before the send pump.
+     node._channel=type('C',(),{'readyState':'open','bufferedAmount':0})()
+     sources=[b'FPEL1\0'+bytes([i])*1000 for i in range(1,4)]
+     for wire in sources:
+--- a/tests/test_epoch_carry_gossip_v53.py
++++ b/tests/test_epoch_carry_gossip_v53.py
+@@ -75,6 +75,7 @@
+         for i in range(500):
+             sender.tick([('new',sender_link)],now=float(i+1))
+             receiver.tick([('old',receiver_link)],now=float(i+1))
++            await sender.flush_completed(lambda _peer,_wire: False)
+             await receiver.flush_completed(pipeline.submit)
+             if archive.journal.count()>=2:break
+             await asyncio.sleep(.003)
+@@ -106,8 +107,10 @@
+         for n in range(3,80):
+             sender.tick([('new',l1)],now=float(n))
+             recv.tick([('old',l2)],now=float(n))
++            await sender.flush_completed(lambda peer,wire:False)
+             await recv.flush_completed(lambda peer,wire:(accepted.append(wire) or True))
+             if accepted:break
++            await asyncio.sleep(.002)
+         assert accepted==[wire]
+         assert recv.events_received==1
+     finally:
+@@ -168,8 +171,10 @@
+         for i in range(100):
+             source.tick([('new',a)],now=float(i+1))
+             receiver.tick([('old',b)],now=float(i+1))
++            await source.flush_completed(lambda peer,wire:False)
+             await receiver.flush_completed(original.submit)
+             await original.drain()
++            await asyncio.sleep(.002)
+             if archive.journal.count():break
+         assert archive.journal.count()==1
+         await original.stop()
+@@ -184,8 +189,10 @@
+         for i in range(100):
+             upstream.tick([('member',aa)],now=float(i+1))
+             downstream.tick([('member',bb)],now=float(i+1))
++            await upstream.flush_completed(lambda peer,wire:False)
+             await downstream.flush_completed(late_pipe.submit)
+             await late_pipe.drain()
++            await asyncio.sleep(.002)
+             if late_archive.journal.count():break
+         assert late_archive.journal.count()==1
+         assert late_archive.journal.get('alice',1)==archive.journal.get('alice',1)
+--- /dev/null
++++ b/tests/test_epoch_v54_hardening.py
+@@ -0,0 +1,166 @@
++"""v54 concurrency, backpressure, off-loop I/O and atomic-cache regressions."""
++import asyncio
++import base64
++import hashlib
++from pathlib import Path
++
++import pytest
++import torch
++
++from patchlib.core import PatchError
++from patchlib.epoch_carry_gossip_v53 import AdjacentEpochCarryGossip, CHUNK
++from patchlib.epoch_local_stage_v53 import stage_verified_local_view
++from patchlib.epoch_carry_v46 import CrossEpochCarryArchive
++from patchlib.elastic import EventJournal
++from test_epoch_carry_gossip_v53 import context, Link
++from test_epoch_local_stage_v53 import build
++
++
++@pytest.mark.asyncio
++async def test_recv_queue_backpressure_reads_verified_body_only_once(tmp_path):
++    src,dst,archive,sender,receiver=context(tmp_path)
++    try:
++        wire=b'test signed wire'*(CHUNK//16)
++        src.journal.append('alice',1,wire)
++        left=Link(receiver,'old');right=Link(sender,'new')
++        for n in range(80):
++            sender.tick([('new',left)],now=float(n+1))
++            receiver.tick([('old',right)],now=float(n+1))
++            await sender.flush_completed(lambda peer,data:False)
++            await receiver.flush_completed(lambda peer,data:False)
++            if receiver._completed and next(iter(receiver._completed.values()))._verified:
++                break
++            await asyncio.sleep(.003)
++        assert receiver._completed
++        # Even when the signed pipeline refuses admission, the spool body is
++        # cached instead of allocating/read()ing it at every network tick.
++        for i in range(25):
++            await receiver.flush_completed(lambda peer,data:False)
++        assert receiver.bytes_read_for_delivery == len(wire)
++        assert receiver.events_received == 0
++        await asyncio.sleep(.07)
++        received=[]
++        await receiver.flush_completed(lambda peer,data:(received.append(data) or True))
++        assert received==[wire]
++        assert receiver.bytes_read_for_delivery==len(wire)
++        assert not list((tmp_path/'receiver').glob('*.part'))
++    finally:
++        sender.close();receiver.close();archive.close();src.journal.close();dst.journal.close()
++
++
++@pytest.mark.asyncio
++async def test_need_does_not_read_large_wire_on_control_callback(tmp_path):
++    src,dst,archive,sender,receiver=context(tmp_path)
++    try:
++        wire=b'z'*CHUNK
++        src.journal.append('alice',1,wire)
++        event=asyncio.Event()
++        class SlowJournal:
++            genesis=src.genesis
++            db=src.journal.db
++            has=src.journal.has
++            def get(self,*args):
++                raise AssertionError('synchronous journal read forbidden')
++            async def get_async(self,origin,seq):
++                await event.wait()
++                return await src.journal.get_async(origin,seq)
++        sender.close()
++        sender=AdjacentEpochCarryGossip(source_genesis=src.genesis,
++            source_journal=SlowJournal(),spool=tmp_path/'sender2')
++        left=Link(receiver,'old');right=Link(sender,'new')
++        sender.tick([('new',left)],now=1.)
++        receiver.tick([('old',right)],now=1.)
++        assert sender._send_requests  # callback returned without disk I/O
++        await sender.flush_completed(lambda peer,data:False)
++        assert sender._fetch_tasks
++        sender.tick([('new',left)],now=2.)
++        assert not sender._sending
++        event.set()
++        for n in range(3,35):
++            await sender.flush_completed(lambda peer,data:False)
++            sender.tick([('new',left)],now=float(n))
++            receiver.tick([('old',right)],now=float(n))
++            await receiver.flush_completed(lambda peer,data:True)
++            if receiver.events_received:break
++            await asyncio.sleep(.003)
++        assert receiver.events_received==1
++    finally:
++        sender.close();receiver.close();archive.close();src.journal.close();dst.journal.close()
++
++
++@pytest.mark.asyncio
++async def test_corrupted_spool_fails_closed_without_submit(tmp_path):
++    src,dst,archive,sender,receiver=context(tmp_path)
++    try:
++        wire=b'k'*(CHUNK+1)
++        src.journal.append('alice',1,wire)
++        left=Link(receiver,'old');right=Link(sender,'new')
++        for n in range(50):
++            sender.tick([('new',left)],now=float(n+1))
++            receiver.tick([('old',right)],now=float(n+1))
++            await sender.flush_completed(lambda p,data:False)
++            if receiver._completed:break
++            await asyncio.sleep(.003)
++        assert receiver._completed
++        inbox=next(iter(receiver._completed.values()))
++        inbox.path.write_bytes(b'wrong body')
++        delivered=[]
++        for n in range(30):
++            try:
++                await receiver.flush_completed(lambda p,data:delivered.append(data))
++            except PatchError as exc:
++                assert 'SHA-256' in str(exc)
++                break
++            await asyncio.sleep(.002)
++        else:
++            pytest.fail('corrupted spool did not fail closed')
++        assert delivered==[]
++        assert not list((tmp_path/'receiver').glob('*.part'))
++    finally:
++        sender.close();receiver.close();archive.close();src.journal.close();dst.journal.close()
++
++
++@pytest.mark.asyncio
++async def test_concurrent_signed_carry_is_once_and_o1_index(tmp_path):
++    src,dst,archive,sender,recv=context(tmp_path)
++    try:
++        opt=torch.optim.AdamW(src.adapter.trainable_parameters(),lr=.01)
++        src.adapter.model().backward();opt.step();opt.zero_grad()
++        wire=src.seal_local(1)
++        if wire is None:
++            wire=src.journal.get('alice',1)
++        info,parts=archive._check(dst,wire)
++        results=await asyncio.gather(*(
++            archive.accept_prechecked(dst,wire,info,parts) for _ in range(8)))
++        assert results.count(True)==1 and results.count(False)==7
++        assert archive.journal.count()==1
++        assert not hasattr(archive,'_applied')
++        assert archive._replayed_count==1
++    finally:
++        sender.close();recv.close();archive.close();src.journal.close();dst.journal.close()
++
++
++def test_checkpoint_crash_stage_does_not_publish_partial(tmp_path,monkeypatch):
++    store,incoming,proposal=build(tmp_path)
++    root=tmp_path/'epoch'
++    import patchlib.epoch_local_stage_v53 as mod
++    original=mod.os.link
++    counter=0
++    def crash(src,dst):
++        nonlocal counter
++        counter+=1
++        if counter>1:raise OSError('simulated disk failure after first hardlink')
++        return original(src,dst)
++    monkeypatch.setattr(mod.os,'link',crash)
++    with pytest.raises(OSError):
++        stage_verified_local_view(proposal,root=root,incoming=incoming,objects=store)
++    target=root/'checkpoints'/'views'/proposal['manifest']
++    assert not target.exists()
++    assert not list(target.parent.glob('.building-*'))
++    monkeypatch.setattr(mod.os,'link',original)
++    orphan=target.parent/'.building-orphan-after-powerloss'
++    orphan.mkdir()
++    (orphan/'junk').write_bytes(b'x')
++    view=stage_verified_local_view(proposal,root=root,incoming=incoming,objects=store)
++    assert view.manifest.exists() and not orphan.exists()
++    assert not list(target.parent.glob('.building-*'))
+--- a/tests/test_p2p_churn_hardening_v16.py
++++ b/tests/test_p2p_churn_hardening_v16.py
+@@ -145,7 +145,7 @@
+     async def broken(*args,**kwargs):raise ConnectionError('forced disconnect')
+     monkeypatch.setattr(en,'transmit',broken)
+     async def scenario():
+-        n=node();ch=Channel();n._channel=ch
++        n=node();ch=Channel();n._channel=ch;n.hello_received=True
+         n.queue_requested_events([(B,17)])
+         n.lookup_requested_event=lambda peer,seq:b'valid-patch-for-test'
+         task=asyncio.create_task(n._pump())
+--- a/tests/test_protocol_audit_v25.py
++++ b/tests/test_protocol_audit_v25.py
+@@ -110,6 +110,7 @@
+         readyState='open';bufferedAmount=0
+     node._channel=Channel()
+     node.remote_supports_aggregate=True
++    node.hello_received=True
+     node.lookup_requested_event=lambda _origin,seq: b'FPEL1\0' + seq.to_bytes(4,'big') + b'X'*64
+     for i in range(1,65):
+         node.requested_events[('c'*32,i)]=None
+--- a/tests/test_relora_periodic_refresh.py
++++ b/tests/test_relora_periodic_refresh.py
+@@ -159,7 +159,7 @@
+     from patchlib.webview_controller import WebviewController
+     from patchlib.webview_gui import compose_html
+     html=compose_html()
+-    assert 'id="trainReinitEvery"' in html and 'id="benchReinitEvery"' in html
++    assert 'id="trainReinitEvery"' in html  # Current UI has no benchmark form.
+     ctl=WebviewController(tmp_path)
+     with pytest.raises(ValueError,match='reinit_every'):
+         ctl.start_benchmark({'reinit_every':-2})
+--- a/tests/test_scale_sim_and_batch_journal_v20.py
++++ b/tests/test_scale_sim_and_batch_journal_v20.py
+@@ -170,6 +170,7 @@
+     n=ElasticNode('ws://127.0.0.1:8080/ws','a'*32,origin='p'+'a'*32,
+                   remote='p'+'b'*32,genesis='0'*64,unsafe=True)
+     n.remote_supports_aggregate=True
++    n.hello_received=True
+     n._channel=object()
+     sources=[f'p{i:032x}' for i in range(3)]
+     requested=[(p,1) for p in sources]
+@@ -215,6 +216,7 @@
+     n=ElasticNode('ws://127.0.0.1:8080/ws','a'*32,origin='p'+'a'*32,
+                   remote='p'+'b'*32,genesis='0'*64,unsafe=True)
+     n.remote_supports_aggregate=True
++    n.hello_received=True
+     n._channel=object()
+     ids=[(f'p{i:032x}',1) for i in range(3)]
+     n.requested_events=OrderedDict((x,None) for x in ids)
+--- a/tests/test_swarm_16_caret.py
++++ b/tests/test_swarm_16_caret.py
+@@ -95,7 +95,7 @@
+     assert 'input:focus,textarea:focus,select:focus' in html.replace(' ', '')
+     assert 'cursor: text' in html
+     assert 'textarea::selection' in html
+-    assert 'Chicago' in html and 'Courier' in html
++    assert 'Myriad' in html and 'Noto Sans JP' in html
+ 
+ 
+ async def _worker_status_parser(tmp_path):
+--- a/tests/test_swarm_16_demand_recovery.py
++++ b/tests/test_swarm_16_demand_recovery.py
+@@ -42,6 +42,7 @@
+     monkeypatch.setattr('patchlib.elasticnet.transmit',fake_transmit)
+     n=node()
+     n._channel=type('Channel',(),{'readyState':'open','bufferedAmount':0})()
++    n.hello_received=True
+     n.lookup_requested_event=lambda origin,seq: b'urgent:'+str(seq).encode()
+     n.queue_requested_events([('p'+'b'*32,i) for i in range(1,21)])
+     n.outgoing.put_nowait(b'ordinary')
+@@ -68,6 +69,7 @@
+     monkeypatch.setattr('patchlib.elasticnet.transmit',fail)
+     n=node()
+     n._channel=type('Channel',(),{'readyState':'open','bufferedAmount':0})()
++    n.hello_received=True
+     n.lookup_requested_event=lambda origin,seq: b'signed'
+     n.queue_requested_events([('p'+'b'*32,1)])
+     async def main():
+--- a/tests/test_swarm_gossip_fairness.py
++++ b/tests/test_swarm_gossip_fairness.py
+@@ -65,6 +65,7 @@
+                          genesis='0'*64,unsafe=True)
+         ch=FakeChannel();node._attach_channel(ch)
+         node.hello_received=True
++        node.remote_genesis=node.genesis  # Authenticated HELLO pins this.
+         while not node.controls.full():
+             node.controls.put_nowait({'type':'inventory'})
+         node.counter=0
+--- a/tests/test_tailwind_gui.py
++++ b/tests/test_tailwind_gui.py
+@@ -11,12 +11,14 @@
+ def test_desktop_runtime_cdn_theme_and_bridge():
+     css = (WEB / 'tailwind.cdn.css').read_text(encoding='utf-8')
+     page = compose_html()
+-    assert CDN in page
+-    assert '<style type="text/tailwindcss">' in page
++    # Desktop no longer executes CDN Tailwind: only bundled CSS/JS runs in
++    # the privileged WebView, under a restrictive CSP.
++    assert CDN not in page
++    assert '<style>' in page
+     assert '--accent:#10b981' in css
+     assert '.model-card' in css
+     assert 'height:100dvh' in css
+-    assert 'connect-src https://cdn.jsdelivr.net' in page
++    assert "connect-src 'none'" in page
+     assert '<link rel="stylesheet"' not in page
+     assert 'desktop_webview.css' not in page
+     assert '<body>' in page
+--- a/tests/test_tinystories_1m_effectiveness.py
++++ b/tests/test_tinystories_1m_effectiveness.py
+@@ -130,10 +130,11 @@
+ 
+ def test_tinystories_1m_gui_defaults_and_validations(tmp_path):
+     html=compose_html()
+-    assert 'id="benchModel"' in html and 'id="benchDataset"' in html
+-    assert 'option value="tinystories-1m" selected' in html
+-    assert 'option value="tinystories" selected' in html
+-    assert 'id="benchInitialization"' in html
++    # The current desktop design has one training screen, not a standalone
++    # embedded benchmark form. Benchmark input validation remains in backend.
++    assert 'id="panel-training"' in html
++    assert 'id="model"' in html
++    assert 'id="trainReinitEvery"' in html
+     ctl=WebviewController(tmp_path)
+     try:
+         with pytest.raises(ValueError):ctl.start_benchmark({'model':'forged-model'})
+--- a/web/tailwind.cdn.css
++++ b/web/tailwind.cdn.css
+@@ -88,3 +88,10 @@
+ 
+ /* V38: compact explicit opt-in for independent duplicate experiments. */
+ .duplicate-option{display:flex;flex-direction:row;align-items:center;gap:7px;flex:0 0 auto;line-height:1.3;margin-top:2px;cursor:pointer}.duplicate-option input{width:14px!important;min-width:14px!important;min-height:14px!important;height:14px!important;flex:0 0 14px;padding:0;accent-color:#10b981}.duplicate-option span{flex:1;min-width:0}
++
++/* v54: preserve a visible native caret in desktop WebViews without replacing
++   system text editing and selection behaviour. */
++input:not([type=checkbox]):not([type=radio]),textarea{caret-color: #34d399 !important;cursor: text}
++input:focus,textarea:focus,select:focus{outline:1px solid #34d399;outline-offset:1px}
++input:not([type=checkbox]):not(:disabled),textarea:not(:disabled){-webkit-text-fill-color: #ecfff3}
++textarea::selection,input::selection{background:#246f4b;color:#ffffff}

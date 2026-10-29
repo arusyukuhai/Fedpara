@@ -1,0 +1,598 @@
+--- a/patchlib/elastic.py
++++ b/patchlib/elastic.py
+@@ -182,8 +182,9 @@
+         try:
+             self._log_fd = os.open(self.log_path, os.O_RDWR | os.O_CREAT |
+                                    getattr(os, 'O_NOFOLLOW', 0), 0o600)
+             self._committed_end = recover_tail(self.db, self._log_fd)
++            self._install_cut_audit()
+         except BaseException:
+             self.db.close()
+             self._journal_executor.shutdown(wait=True)
+             if self._log_fd is not None:
+@@ -191,8 +192,52 @@
+             if self._lock_fd is not None:
+                 os.close(self._lock_fd)
+                 self._lock_fd = None
+             raise
++
++    def _install_cut_audit(self):
++        """Track revisions of already-indexed events for fast certified-cut reuse.
++
++        INSERTs of *new* event IDs cannot affect a previously verified complete
++        per-origin prefix. UPDATE/DELETE/REPLACE of indexed rows can, and must
++        invalidate the cut witness. Triggers run in the mutating transaction,
++        including commits from the async journal worker or another SQLite
++        connection. Unlike a Python counter, this survives process crashes.
++
++        The INSERT guard prohibits SQL INSERT OR REPLACE silently overwriting
++        a previously verified event when recursive_triggers is disabled.
++        This mechanism assumes a trusted local SQLite database/DDL: it is NOT
++        an authentication scheme against an attacker with direct DB access.
++        """
++        with self.db:
++            self.db.execute("INSERT OR IGNORE INTO meta(name,value) VALUES('epoch_index_mutation', '0')")
++            self.db.execute("""CREATE TRIGGER IF NOT EXISTS epoch_no_event_replace_v55
++                BEFORE INSERT ON events
++                WHEN EXISTS (SELECT 1 FROM events
++                             WHERE origin=NEW.origin AND seq=NEW.seq)
++                BEGIN SELECT RAISE(ABORT, 'event ID replacement forbidden'); END""")
++            self.db.execute("""CREATE TRIGGER IF NOT EXISTS epoch_event_update_v55
++                AFTER UPDATE ON events BEGIN
++                UPDATE meta SET value=CAST(value AS INTEGER)+1
++                    WHERE name='epoch_index_mutation'; END""")
++            self.db.execute("""CREATE TRIGGER IF NOT EXISTS epoch_event_delete_v55
++                AFTER DELETE ON events BEGIN
++                UPDATE meta SET value=CAST(value AS INTEGER)+1
++                    WHERE name='epoch_index_mutation'; END""")
++
++    def epoch_cut_guard(self):
++        """O(1) transactional mutation witness for locally certified prefixes.
++
++        Coupled with a previously fully verified contiguous prefix, inserts
++        cannot create a new in-prefix key. A changed schema or mutation count
++        forces revalidation. The caller must still hold its writer fence at
++        final handoff: this method does not freeze concurrent training.
++        """
++        schema = self.db.execute('PRAGMA schema_version').fetchone()[0]
++        row = self.db.execute("SELECT value FROM meta WHERE name='epoch_index_mutation'").fetchone()
++        if row is None or not str(row[0]).isdigit():
++            return None
++        return schema, int(row[0])
+ 
+     def close(self):
+         # Worker connection is thread-affine, so close it on its own thread.
+         self._journal_executor.submit(self._close_worker_connection).result()
+--- a/patchlib/epoch_live_rebase_v52.py
++++ b/patchlib/epoch_live_rebase_v52.py
+@@ -109,12 +109,45 @@
+         self.carried=0
+         self.bytes_carried=0
+         self._validated=False
+         self._poisoned=False
++        self._verified_cut=None
++        self._cut_guard=None
++        self._cached_inventory=None
+ 
+     def validate_cut(self):
++        """Fully validate once, then reuse the *same certified digest* only
++        while the underlying indexed rows remain unmodified.
++
++        New rows appended after a successfully checked, gap-free per-origin
++        frontier are necessarily outside that frontier (PK + no REPLACE).
++        Ordinary post-cut gossip therefore does not cause another O(N) scan.
++        In a legacy/custom journal without a durable mutation guard, always
++        perform the original complete scan instead.
++        """
+         if self._poisoned:raise PatchError('poisoned shadow, reload clean checkpoint')
+-        result=verify_certified_cut(self.source,self.proposal['cutoffs'],self.proposal['cut'])
++        guard_fn=getattr(self.source,'epoch_cut_guard',None)
++        before=guard_fn() if callable(guard_fn) else None
++        if before is not None and self._validated and before==self._cut_guard:
++            return self._verified_cut
++        previously_validated=self._validated
++        try:
++            result=verify_certified_cut(self.source,self.proposal['cutoffs'],self.proposal['cut'])
++            after=guard_fn() if callable(guard_fn) else None
++            if before is not None and before!=after:
++                # The SQL cursor may have read a stale snapshot.
++                raise PatchError('certified-cut source mutated during validation')
++        except BaseException:
++            self._validated=False
++            self._verified_cut=None
++            self._cut_guard=None
++            if previously_validated:
++                # A proven prefix became unverifiable. Any already applied
++                # shadow deltas might have been based on a corrupted cut.
++                self._poisoned=True
++            raise
++        self._verified_cut=result
++        self._cut_guard=after
+         self._validated=True
+         return result
+ 
+     async def tick(self) -> CarryProgress:
+@@ -127,8 +160,13 @@
+         if self._poisoned:
+             raise PatchError('poisoned shadow, reload clean certified checkpoint')
+         if not self._validated:
+             raise PatchError('rebase requires a validated cut and clean shadow')
++        guard_fn=getattr(self.source,'epoch_cut_guard',None)
++        if (self._cut_guard is not None and callable(guard_fn)
++                and guard_fn()!=self._cut_guard):
++            self._poisoned=True
++            raise PatchError('certified-cut index changed during warm rebase')
+         # Query only indexed event metadata, keeping huge payloads outside SQL.
+         # A row may itself exceed the byte budget; refuse it before allocation.
+         rows = self.source.db.execute(
+             'SELECT rowid,origin,seq,wire_len,digest FROM events WHERE rowid>? '
+@@ -153,9 +191,15 @@
+                         spent+=wire_len
+                         self.cursor=rowid
+                         self.scanned+=1
+                         continue
+-                    wire=self.source.get(origin,seq)
++                    # Signed LoHA records may be several MiB. Do not block
++                    # the trainer watcher/event loop on sidecar disk reads.
++                    get_async=getattr(self.source,'get_async',None)
++                    if callable(get_async):
++                        wire=await get_async(origin,seq)
++                    else:
++                        wire=await asyncio.to_thread(self.source.get,origin,seq)
+                     if not isinstance(wire,bytes) or len(wire)!=wire_len:
+                         raise PatchError('source carry body missing')
+                     # Signature validation and expensive factor decoding can
+                     # safely run off the WebRTC event loop.
+@@ -176,17 +220,41 @@
+         consumed = self.cursor == rows[-1][0] if rows else True
+         return CarryProgress(self.scanned,self.carried,self.bytes_carried,self.cursor,
+                              consumed and len(rows)<self.batch_limit)
+ 
++    def _inventory_stamp(self):
++        """Detect all normal SQLite writes, including archive worker commits.
++
++        total_changes observes the current connection and data_version sees
++        other connections. This avoids a write-amplifying per-INSERT counter.
++        A changed stamp causes a new full digest, never a guessed digest.
++        """
++        db=self.archive.journal.db
++        return (db.total_changes,
++                db.execute('PRAGMA data_version').fetchone()[0],
++                db.execute('PRAGMA schema_version').fetchone()[0])
++
+     def archive_inventory_digest(self):
+-        """O(1) resident memory, exact authenticated archive-index commitment."""
++        """O(1) RAM, exact canonical archive-index commitment, cacheable only
++        if no SQLite writer has changed the index since that verified scan.
++        """
++        before=self._inventory_stamp()
++        cache=self._cached_inventory
++        if cache is not None and cache[2]==before:
++            return cache[:2]
+         sha=hashlib.sha256()
+         count=0
+         for origin,seq,digest in self.archive.journal.db.execute(
+                 'SELECT origin,seq,digest FROM events ORDER BY origin,seq'):
+             sha.update(_canonical_json([origin,seq,digest])+b'\n')
+             count+=1
+-        return count,sha.hexdigest()
++        after=self._inventory_stamp()
++        if before!=after:
++            self._cached_inventory=None
++            raise PatchError('carry archive changed during inventory scan')
++        result=(count,sha.hexdigest(),after)
++        self._cached_inventory=result
++        return result[:2]
+ 
+     def _receipt_path(self):
+         return Path(str(self.archive.journal.path)+'.handoff.json')
+ 
+--- a/tests/test_epoch_live_rebase_v52.py
++++ b/tests/test_epoch_live_rebase_v52.py
+@@ -274,4 +274,25 @@
+         assert carry.journal.count()==1
+         assert service.pointer.is_file()
+     finally:
+         carry.close();target.journal.close();source.journal.close()
++
++@pytest.mark.asyncio
++async def test_v55_warm_rebase_reads_large_signed_wire_off_event_loop(tmp_path,monkeypatch):
++    source,target,emit,_ = setup(tmp_path)
++    try:
++        emit()
++        p=proposal({},hashlib.sha256(b'').hexdigest())
++        archive=CrossEpochCarryArchive(tmp_path/'async-carry.db',source_genesis=source.genesis,
++            target_genesis=target.genesis,certified_manifest=p['manifest'],epoch=1,cutoffs={})
++        try:
++            archive.replay(target)
++            runner=StreamingCertifiedRebase(source.journal,archive,target,p)
++            runner.validate_cut()
++            def forbidden_blocking_get(*_):
++                raise AssertionError('blocking journal.get() ran in event loop')
++            monkeypatch.setattr(source.journal,'get',forbidden_blocking_get)
++            assert (await runner.tick()).carried == 1
++        finally:
++            archive.close()
++    finally:
++        target.journal.close();source.journal.close()
+--- /dev/null
++++ b/tests/test_epoch_v55_incremental_cut.py
+@@ -0,0 +1,221 @@
++"""Failure-injection regression for the v55 incremental certified cut witness.
++
++A first complete certified digest is indispensable. The optimization only
++avoids rehashing that SAME complete prefix while signed suffix events append.
++"""
++import hashlib
++import sqlite3
++from types import SimpleNamespace
++
++import pytest
++
++from patchlib.core import PatchError, _canonical_json
++from patchlib.elastic import EventJournal
++from patchlib.epoch_live_rebase_v52 import StreamingCertifiedRebase, verify_certified_cut
++import patchlib.epoch_live_rebase_v52 as rebase_module
++
++
++def _journal(tmp_path, stem):
++    return EventJournal(tmp_path / (stem + '.db'), 'a' * 64)
++
++
++def _digest(rows):
++    h = hashlib.sha256()
++    for origin, seq, digest in sorted(rows):
++        h.update(_canonical_json([origin, seq, digest]) + b'\n')
++    return h.hexdigest()
++
++
++def _cut_runner(journal, rows):
++    # We test the cut-proof method in isolation, without constructing a giant
++    # Tensor/LoHA shadow just to inspect local certified index metadata.
++    runner = object.__new__(StreamingCertifiedRebase)
++    runner.source = journal
++    runner.proposal = {'cutoffs': {'alice': len(rows)}, 'cut': _digest(rows)}
++    runner._poisoned = False
++    runner._validated = False
++    runner._verified_cut = None
++    runner._cut_guard = None
++    runner._cached_inventory = None
++    return runner
++
++
++def test_signed_cut_fully_checked_once_and_new_suffix_does_not_rehash(tmp_path, monkeypatch):
++    journal = _journal(tmp_path, 'cut')
++    try:
++        wires = [b'a', b'b', b'c']
++        for i, wire in enumerate(wires[:2], 1):
++            journal.append('alice', i, wire)
++        rows = [('alice', i, hashlib.sha256(w).hexdigest()) for i, w in enumerate(wires[:2], 1)]
++        runner = _cut_runner(journal, rows)
++        original = rebase_module.verify_certified_cut
++        calls = []
++        def counted(*args, **kwargs):
++            calls.append(1)
++            return original(*args, **kwargs)
++        monkeypatch.setattr(rebase_module, 'verify_certified_cut', counted)
++        assert runner.validate_cut() == (2, 2)
++        assert len(calls) == 1
++        # Appending a completely new signed suffix MUST NOT mutate an
++        # earlier complete high-water prefix, even if it came from another peer.
++        journal.append('alice', 3, wires[2])
++        journal.append('bob', 1, b'd')
++        assert runner.validate_cut() == (2, 2)
++        assert len(calls) == 1
++    finally:
++        journal.close()
++
++
++def test_old_event_tamper_fails_closed_instead_of_using_cached_cut(tmp_path):
++    journal = _journal(tmp_path, 'cut')
++    try:
++        journal.append('alice', 1, b'a')
++        runner = _cut_runner(journal, [('alice', 1, hashlib.sha256(b'a').hexdigest())])
++        runner.validate_cut()
++        with journal.db:
++            journal.db.execute('UPDATE events SET digest=? WHERE origin=? AND seq=?', ('f'*64, 'alice', 1))
++        with pytest.raises(PatchError, match='certified-cut events'):
++            runner.validate_cut()
++    finally:
++        journal.close()
++
++
++def test_external_sqlite_connection_tamper_invalidate_guard(tmp_path):
++    journal = _journal(tmp_path, 'cut')
++    try:
++        journal.append('alice', 1, b'a')
++        runner = _cut_runner(journal, [('alice', 1, hashlib.sha256(b'a').hexdigest())])
++        runner.validate_cut()
++        with sqlite3.connect(journal.path) as external:
++            external.execute("UPDATE events SET digest=? WHERE origin='alice' AND seq=1", ('f'*64,))
++        with pytest.raises(PatchError, match='certified-cut events'):
++            runner.validate_cut()
++    finally:
++        journal.close()
++
++
++def test_sql_replace_cannot_bypass_mutation_witness(tmp_path):
++    journal = _journal(tmp_path, 'cut')
++    try:
++        journal.append('alice', 1, b'a')
++        runner = _cut_runner(journal, [('alice', 1, hashlib.sha256(b'a').hexdigest())])
++        runner.validate_cut()
++        with pytest.raises(sqlite3.IntegrityError, match='replacement forbidden'):
++            with journal.db:
++                journal.db.execute("INSERT OR REPLACE INTO events "
++                                   "(origin,seq,digest,wire,wire_len) "
++                                   "VALUES ('alice',1,? ,X'61',1)", ('f'*64,))
++        assert runner.validate_cut()[0] == 1
++    finally:
++        journal.close()
++
++
++def test_schema_change_invalidates_witness_and_requires_full_recheck(tmp_path, monkeypatch):
++    journal = _journal(tmp_path, 'cut')
++    try:
++        journal.append('alice', 1, b'a')
++        runner = _cut_runner(journal, [('alice', 1, hashlib.sha256(b'a').hexdigest())])
++        runner.validate_cut()
++        # Removing the guard also changes SQLite's schema cookie, forcing the
++        # expensive safe path. Never trust a witness from an earlier schema.
++        with journal.db:
++            journal.db.execute('DROP TRIGGER epoch_event_update_v55')
++            journal.db.execute("UPDATE events SET digest=? WHERE origin='alice' AND seq=1", ('f'*64,))
++        with pytest.raises(PatchError, match='certified-cut events'):
++            runner.validate_cut()
++    finally:
++        journal.close()
++
++
++def test_legacy_source_without_guard_still_runs_full_validation(tmp_path, monkeypatch):
++    journal = _journal(tmp_path, 'cut')
++    try:
++        journal.append('alice', 1, b'a')
++        # A legacy/custom source has no epoch_cut_guard. It must not benefit
++        # from this fast path without durable audit triggers.
++        legacy = SimpleNamespace(db=journal.db)
++        runner = _cut_runner(legacy, [('alice', 1, hashlib.sha256(b'a').hexdigest())])
++        original = rebase_module.verify_certified_cut
++        calls = []
++        def counted(*args, **kwargs):
++            calls.append(1)
++            return original(*args, **kwargs)
++        monkeypatch.setattr(rebase_module, 'verify_certified_cut', counted)
++        runner.validate_cut()
++        runner.validate_cut()
++        assert len(calls) == 2
++    finally:
++        journal.close()
++
++
++@pytest.mark.asyncio
++async def test_archive_index_cached_until_worker_appends_more_events(tmp_path, monkeypatch):
++    archive = _journal(tmp_path, 'archive')
++    try:
++        archive.append('alice', 1, b'a')
++        runner = object.__new__(StreamingCertifiedRebase)
++        runner.archive = SimpleNamespace(journal=archive)
++        runner._cached_inventory = None
++        first = runner.archive_inventory_digest()
++        original_json = rebase_module._canonical_json
++        calls = []
++        def counted(*args, **kwargs):
++            calls.append(1)
++            return original_json(*args, **kwargs)
++        monkeypatch.setattr(rebase_module, '_canonical_json', counted)
++        assert runner.archive_inventory_digest() == first
++        assert not calls  # no full scan/re-hash
++        await archive.append_async('alice', 2, b'b')
++        second = runner.archive_inventory_digest()
++        assert second[0] == 2 and second[1] != first[1]
++        assert calls  # worker-side SQLite write correctly invalidated cache
++    finally:
++        archive.close()
++
++
++def test_archive_direct_index_edit_invalidates_digest_cache(tmp_path):
++    archive = _journal(tmp_path, 'archive')
++    try:
++        archive.append('alice', 1, b'a')
++        runner = object.__new__(StreamingCertifiedRebase)
++        runner.archive = SimpleNamespace(journal=archive)
++        runner._cached_inventory = None
++        old = runner.archive_inventory_digest()
++        with archive.db:
++            archive.db.execute("UPDATE events SET digest=? WHERE origin='alice'", ('f'*64,))
++        new = runner.archive_inventory_digest()
++        assert new[1] != old[1]
++    finally:
++        archive.close()
++
++@pytest.mark.asyncio
++async def test_cut_mutation_during_warm_rebase_poison_shadow(tmp_path):
++    journal = _journal(tmp_path, 'cut')
++    try:
++        journal.append('alice', 1, b'a')
++        runner = _cut_runner(journal, [('alice', 1, hashlib.sha256(b'a').hexdigest())])
++        runner.validate_cut()
++        # Even if a warm carry already passed its initial proof, tampering
++        # during subsequent training must fail *before* touching shadow.
++        with journal.db:
++            journal.db.execute('UPDATE events SET digest=? WHERE seq=1', ('f'*64,))
++        with pytest.raises(PatchError, match='index changed'):
++            await runner.tick()
++        assert runner._poisoned
++    finally:
++        journal.close()
++
++
++def test_failed_reverification_poison_previously_validated_shadow(tmp_path):
++    journal = _journal(tmp_path, 'cut')
++    try:
++        journal.append('alice', 1, b'a')
++        runner = _cut_runner(journal, [('alice', 1, hashlib.sha256(b'a').hexdigest())])
++        runner.validate_cut()
++        with journal.db:
++            journal.db.execute('UPDATE events SET digest=? WHERE seq=1', ('f'*64,))
++        with pytest.raises(PatchError):
++            runner.validate_cut()
++        assert runner._poisoned and not runner._validated
++    finally:
++        journal.close()
+--- /dev/null
++++ b/tools/benchmark_epoch_cut_v55.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python3
++"""REPRODUCIBLE LOCAL METADATA-ONLY cut/receipt CPU benchmark.
++
++No real signature verification, large tensor payload, WebRTC, or full 4k-peer
++swarm is exercised. Synthetic SQLite rows intentionally have NO valid wire
++archive; NEVER reuse the benchmark journal in production or for an epoch.
++
++Run: python tools/benchmark_epoch_cut_v55.py --events 20000 80000 --repeats 20
++"""
++import argparse
++import hashlib
++import json
++from pathlib import Path
++from statistics import median
++from tempfile import TemporaryDirectory
++from time import perf_counter_ns
++
++from patchlib.core import _canonical_json
++from patchlib.elastic import EventJournal
++from patchlib.epoch_live_rebase_v52 import StreamingCertifiedRebase, verify_certified_cut
++
++
++def bench(size, repeats, origins):
++    with TemporaryDirectory(prefix='kagami-v55-benchmark-') as root:
++        journal=EventJournal(Path(root)/'source.db','a'*64,sync='NORMAL')
++        try:
++            per_origin=size//origins
++            digest=hashlib.sha256()
++            entries=[]
++            for origin_index in range(origins):
++                origin=f'peer{origin_index:06d}'
++                for seq in range(1,per_origin+1):
++                    event_hash=hashlib.sha256(f'{origin}/{seq}'.encode()).hexdigest()
++                    digest.update(_canonical_json([origin,seq,event_hash])+b'\n')
++                    entries.append((origin,seq,event_hash,b'',1))
++            with journal.db:
++                journal.db.executemany('INSERT INTO events (origin,seq,digest,wire,wire_len) VALUES(?,?,?,?,?)',entries)
++            cutoffs={f'peer{i:06d}':per_origin for i in range(origins)}
++            runner=object.__new__(StreamingCertifiedRebase)
++            runner.source=journal
++            runner.proposal={'cutoffs':cutoffs,'cut':digest.hexdigest()}
++            runner._poisoned=False
++            runner._validated=False
++            runner._verified_cut=None
++            runner._cut_guard=None
++            runner._cached_inventory=None
++            def measure(fn):
++                t0=perf_counter_ns();r=fn();return (perf_counter_ns()-t0)/1_000_000,r
++            first,result=measure(runner.validate_cut)
++            baseline=[measure(lambda:verify_certified_cut(journal,cutoffs,digest.hexdigest()))[0] for _ in range(repeats)]
++            cached=[measure(runner.validate_cut)[0] for _ in range(repeats)]
++            # One post-cut row (new peer) must not invalidate a verified prefix.
++            with journal.db:
++                journal.db.execute('INSERT INTO events (origin,seq,digest,wire,wire_len) VALUES(?,?,?,?,?)',
++                                   ('zz-new',1,hashlib.sha256(b'new').hexdigest(),b'',1))
++            suffix,cached_result=measure(runner.validate_cut)
++            assert cached_result==result
++            return {'rows':size,'origins':origins,'first_verified_ms':round(first,4),
++                    'full_rescan_median_ms':round(median(baseline),4),
++                    'witness_check_median_ms':round(median(cached),4),
++                    'witness_after_suffix_ms':round(suffix,4),
++                    'speed_ratio_full_to_cached':round(median(baseline)/max(0.00001,median(cached)),1),
++                    'benchmark_kind':'local_metadata_only_not_swarm'}
++        finally:
++            journal.close()
++
++
++def main():
++    parser=argparse.ArgumentParser()
++    parser.add_argument('--events',type=int,nargs='+',default=[20000,80000])
++    parser.add_argument('--origins',type=int,default=20)
++    parser.add_argument('--repeats',type=int,default=20)
++    args=parser.parse_args()
++    if not 1<=args.origins<=256 or not 1<=args.repeats<=200:
++        parser.error('invalid repetitions or origin count')
++    for size in args.events:
++        if size<args.origins or size%args.origins or size>250_000:
++            parser.error('event count must be multiple of origins, <=250000')
++        print(json.dumps(bench(size,args.repeats,args.origins),sort_keys=True),flush=True)
++
++if __name__=='__main__':main()
+--- /dev/null
++++ b/README_V55_STATUS.md
+@@ -0,0 +1,40 @@
++# Kagami v55 — certified-cut incremental reuse and measured epoch hot path (2026-10-27)
++
++## What changed from v54
++
++**A previously verified certified cut no longer requires O(total indexed events) CPU work again at final handoff, provided its trusted local SQLite audit witness has not changed.** The very first check remains the exact v52 canonical SHA-256 scan, including validation of every per-origin contiguous prefix against the *independently certified* cut digest. There is **no waiver** for missing certified rows and **no new consensus authority**.
++
++1. `EventJournal` now installs durable SQLite mutation-audit triggers. UPDATE and DELETE of historical events bump `meta.epoch_index_mutation` *in the same transaction*. An INSERT guard refuses `INSERT OR REPLACE` for existing IDs; this closes SQLite's default non-recursive REPLACE loophole. Purely new append-only events do **not** bump the mutation counter. `epoch_cut_guard()` returns the SQLite schema version plus mutation revision.
++2. `StreamingCertifiedRebase.validate_cut()` performs the full certificate check on first use. After success, repeat validation can reuse that exact digest only when schema and historic-event mutation revisions are unchanged. Because the entire high-water prefix was complete and composite IDs are unique, a new `(origin, seq)` INSERT cannot add a missing in-prefix row. If the guard changes, the code makes a **full check**; if it fails after previous success, it poisons the shadow and refuses further training. `tick()` checks the witness before changing shadow weights.
++3. Handoff archive's canonical digest is likewise computed at least once. It can be reused when a local stamp (`sqlite3.total_changes`, `PRAGMA data_version`, `PRAGMA schema_version`) remains identical, detecting writes from the archive's thread-owned SQLite worker as well as its caller connection. On change, the full original sorted digest is recomputed. A concurrent change *during* a scan aborts rather than attesting an unstable snapshot.
++4. Warm rebase reads the actual signed event payload using `EventJournal.get_async` (or `asyncio.to_thread` for compatible custom journals). Multi-megabyte event sidecar reads and hashing no longer block the trainer watcher loop.
++5. Added 11 focused regression tests: cached verified prefix, post-cut append invariance, historical tamper from same/external connection, unsafe SQL REPLACE, schema trigger removal, legacy journal fallback, archive cache invalidation from worker writes or inline tampering, shadow poisoning, and asynchronous signed-wire carry.
++
++### Correctness assumptions / fail-closed boundary
++
++- Reuse is an **incremental *local audit* of an already authenticated SHA-256 commitment**, not a newly constructed Merkle proof and not a substitute for independently signed generation/cut certificates. SQLite is trusted local storage; an attacker with arbitrary DDL and direct DB-file mutation can bypass local audit machinery, so this is NOT an adversarial storage proof. The old whole-scan validation remains the required entry condition.
++- The SQLite primary key and replacement guard make verified contiguous signed frontiers append-immutable, unless historical mutations are recorded. If a source lacks the guard, **the optimization is disabled** and full validation is retained.
++- A writer/ingress barrier is still required at final handoff. The cached digest does not attest remote consensus, payload bytes or disk-media bitrot. It does not authorize GC.
++- In a multi-process deployment, acquire the existing exclusive journal writer lock; do not run handoff against a separately mutated raw SQLite file.
++- Existing `verify_candidate_files`, shard hashes, TLS/signature verification, and final network rekey remain unchanged. This revision does not skip their expensive but necessary work.
++
++## Measured performance
++
++`PYTHONPATH=. python tools/benchmark_epoch_cut_v55.py --events 20000 80000 --repeats 20`
++
++| Synthetic indexed rows | Old full certificate-cut scan (median) | v55 trusted local witness check (median) | Initial complete scan |
++| ---: | ---: | ---: | ---: |
++| 20,000 | 115.318 ms | 0.0044 ms | 113.1082 ms |
++| 80,000 | 443.3382 ms | 0.0046 ms | 474.6094 ms |
++
++This benchmark measures **only in-memory-cache-friendly SQLite metadata and SHA-256 overhead** on the local test machine, with 20 synthetic origins, and excludes signatures, Tensor load, fsync, checkpoint verification, transport, consensus and WAN latency. The original full scan **still runs once** per newly prepared epoch or after an audit change. Numbers are not a forecast for 4,096 devices or overall training throughput.
++
++A separate local `sync=NORMAL`, 512-byte payload append micro-benchmark (3 repeats, median) showed normal 4,000-event appends increasing from **129.2 ms (v54)** to **147.0 ms (v55)** (~14% in this fast synthetic microcase) due to the SQLite duplicate-ID guard and triggers. On real `sync=FULL` with durable fsync and larger updates, relative overhead must be measured separately; no speedup claim is made for append throughput.
++
++## Still incomplete
++
++- 4,096-origin/peer autonomous quorum checkpoint certification and proof of a globally safe cut. Multi-generation offline reconciliation and globally bounded log storage with never-rejoining peers.
++- Production validation on a 4,096-device real WAN swarm. Zero-pause 300B-class full model/optimizer swap.
++- Repeated full model-shard file hashing during checkpoint installation, plus long replay time when the *first* cut is huge. These intentionally remain exact, not guessed from file metadata.
++
++See `VALIDATION_V55.md` for test output, `CHANGES_V55.patch` for the source changes, and `tools/benchmark_epoch_cut_v55.py` to reproduce the metadata-only benchmark.
+--- /dev/null
++++ b/VALIDATION_V55.md
+@@ -0,0 +1,27 @@
++# Kagami v55 validation (2026-10-27)
++
++## Verification commands
++
++```bash
++python -m pytest -q --tb=short
++python -m pytest -q tests/test_epoch_v55_incremental_cut.py tests/test_epoch_live_rebase_v52.py --tb=short
++PYTHONPATH=. python tools/benchmark_epoch_cut_v55.py --events 20000 80000 --repeats 20
++```
++
++### Focused tests
++
++- 18 passed in 2.27 s (before the final full-suite re-run).
++- Checks both original signed torch/LoHA warm-carry path and newly added v55 guard/dedup/poison scenarios.
++
++### Measured local metadata performance
++
++- 20,000 indexed events, 20 origins: first scan 113.1082 ms; repeated whole scan median 115.3180 ms; validated guard median 0.0044 ms.
++- 80,000 indexed events, 20 origins: first scan 474.6094 ms; repeated whole scan median 443.3382 ms; validated guard median 0.0046 ms.
++- Appending one post-cut origin after validation leaves the witness valid (20k 0.0077 ms / 80k 0.0075 ms).
++- A separate micro-case using `sync=NORMAL`, 4,000 sequential 512-byte appends gives v54 ~129.2 ms vs v55 ~147.0 ms (3-repeat median). **The extra SQLite mutation audit has a measurable write-side cost in synthetic low-latency tests.**
++
++Synthetic rows for the cut benchmark contain no signed wire payload; do not interpret this as complete-generation adoption speed or production security proof. The full cut is still hashed on first use and on audit invalidation.
++
++### Full suite
++
++**691 passed, 3 skipped in 76.92 s (0:01:16), failures: 0**. Full local Python 3.13 test suite, not a live 4,096-peer proof.

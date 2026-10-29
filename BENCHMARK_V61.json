@@ -1,0 +1,14 @@
+{
+  "warning": "Single local CPU sparse-edits storage microbench; NOT 300B, WAN, LoHA dense-update, or end-to-end training.",
+  "tensor_bytes": 16777216,
+  "page_bytes": 65536,
+  "changed_pages": 1,
+  "logical_sparse_file_bytes": 196608,
+  "allocated_blocks_bytes": 65536,
+  "page_store_accounted_bytes": 65536,
+  "initialization_seconds": 0.00031236700033332454,
+  "one_row_edit_seconds": 0.0009600960001989733,
+  "all_pages_modified_seconds": 0.01863739500004158,
+  "all_pages_modified_accounted_bytes": 16777216,
+  "all_pages_modified_disk_blocks_bytes": 16781312
+}

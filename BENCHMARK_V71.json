@@ -1,0 +1,10 @@
+{
+  "platform": "CPU synthetic 32 value prefixes; scalar head+128 hidden, no real HF model",
+  "serial_ms": 2.1592,
+  "serial_forwards": 32,
+  "batch_ms": 1.9241,
+  "batch_forwards": 4,
+  "speedup": 1.12,
+  "repeats": 30,
+  "notes": "Synthetic batch-forward benchmark only; no real GPU or Hub weights"
+}

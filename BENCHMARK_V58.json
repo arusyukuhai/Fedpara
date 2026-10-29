@@ -1,0 +1,9 @@
+{
+  "origins": 4096,
+  "indexed_events": 20480,
+  "legacy_fenced_capture_ms": 111.773,
+  "v58_factor_fence_ms": 0.262,
+  "v58_background_index_ms": 111.152,
+  "frozen_factor_bytes": 16896,
+  "note": "Synthetic metadata and tiny torch model; not model export or WAN throughput."
+}

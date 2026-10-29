@@ -42,6 +42,7 @@ def test_requested_events_are_served_before_broadcast_with_fairness(monkeypatch)
     monkeypatch.setattr('patchlib.elasticnet.transmit',fake_transmit)
     n=node()
     n._channel=type('Channel',(),{'readyState':'open','bufferedAmount':0})()
+    n.hello_received=True
     n.lookup_requested_event=lambda origin,seq: b'urgent:'+str(seq).encode()
     n.queue_requested_events([('p'+'b'*32,i) for i in range(1,21)])
     n.outgoing.put_nowait(b'ordinary')
@@ -68,6 +69,7 @@ def test_disconnected_transmitter_marks_failed_for_reconnect(monkeypatch):
     monkeypatch.setattr('patchlib.elasticnet.transmit',fail)
     n=node()
     n._channel=type('Channel',(),{'readyState':'open','bufferedAmount':0})()
+    n.hello_received=True
     n.lookup_requested_event=lambda origin,seq: b'signed'
     n.queue_requested_events([('p'+'b'*32,1)])
     async def main():

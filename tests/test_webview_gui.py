@@ -20,7 +20,7 @@ def test_serverless_inline_webview_page():
     assert "script-src 'unsafe-inline' 'unsafe-eval'" in html
     assert "id=\"retryBridge\"" in html
     assert '<link rel="stylesheet"' not in html
-    assert '<script src=' not in html
+    assert 'cdn.jsdelivr.net' not in html
     assert 'fetch(path' not in html
 
 
@@ -46,7 +46,7 @@ def test_bridge_roundtrip_room_dataset_and_code(tmp_path):
     with pytest.raises(FileNotFoundError, match='checkpoint'):
         bridge.start_training({'room': rid, 'base': str(tmp_path / 'missing.fstate'),
                                'ws': 'ws://127.0.0.1:8080/ws', 'kind': 'loha', 'rank': 32})
-    assert bridge.stop_training()['stopping']
+    assert bridge.stop_training()['relay_only'] is False
 
 
 def test_webview_launch_does_not_bind_tcp_port(tmp_path, monkeypatch):
@@ -139,19 +139,21 @@ def test_webview_rejects_non_fstate_file(tmp_path):
                           'kind':'loha','rank':32})
 
 
-def test_noir_emerald_design_system_is_inline_and_no_external_fonts():
+def test_noir_emerald_design_system_with_user_selected_fonts():
     # A single invariant protects the requested black/white retro-modern
     # appearance against a return to the old blue/dark dashboard theme.
     html = compose_html()
-    assert 'Chicago' in html and 'Courier New' in html
-    assert '--paper: #080e0b' in html
-    assert '--ink: #e5f6ec' in html
+    assert 'Noto Sans JP' in html and 'Myriad Pro' in html
+    assert 'Courier New' not in html and 'Chicago' not in html
+    assert '--color-paper: #080e0b' in html
+    assert '--color-ink: #e5f6ec' in html
     assert 'color-scheme: dark' in html
     assert '#10b981' in html
     assert 'caret-color: #34d399' in html
-    assert '.room-card' in html and '.directory-toolbar' in html
+    assert '.model-card' in html and '.models-layout' in html
     assert 'prefers-reduced-motion' in html
-    assert 'https://fonts.' not in html
+    assert 'https://fonts.googleapis.com' in html
+    assert 'https://fonts.cdnfonts.com/css/myriad-pro' in html
     assert "background_color='#080e0b'" in Path(__import__('patchlib.webview_gui',fromlist=['__file__']).__file__).read_text()
     assert 'status-error' in html and 'status-ok' in html
     assert '#527cf0' not in html

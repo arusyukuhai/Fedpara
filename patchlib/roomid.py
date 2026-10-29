@@ -96,8 +96,8 @@ def auto_identity(path: Path):
 
 class RoomDiscovery:
     """Lightweight signaling-only membership; auto reconnects on dropped WS."""
-    def __init__(self, ws_url: str, room: str, peer_id: str, token: str = '', *, max_peers: int = 96,
-                 manifest=None, backup_urls=(), publish=False, publish_token=None):
+    def __init__(self, ws_url: str, room: str, peer_id: str, token: str = '', *, max_peers: int = 4096,
+                 manifest=None, backup_urls=(), publish=False, publish_token=None, max_degree: int=8):
         from .room_manifest import validate_manifest
         self.url=ws_url
         self.urls=tuple(dict.fromkeys([ws_url,*backup_urls]))
@@ -113,7 +113,15 @@ class RoomDiscovery:
         self.token=token
         self.publish=bool(publish)
         self.publish_token=publish_token if publish_token is not None else os.environ.get("ROOM_PUBLISH_TOKEN", "")
+        if not isinstance(max_peers, int) or not 1 <= max_peers <= 4096:
+            raise ValueError('max_peers must be in [1,4096]')
+        if max_degree not in (2,4,6,8):raise ValueError('max_degree must be 2,4,6,8')
+        self.max_degree=max_degree
         self.max_peers=max_peers
+        self.topology_v2=False
+        self.online_count=1
+        self.roster_revision=-1
+        self.count_revision=-1
         self.members: set[str]=set()
         # Authoritative first roster is sticky. A second member may join
         # before the trainer loop observes the initial empty roster.
@@ -139,25 +147,63 @@ class RoomDiscovery:
             elif self.manifest is not None:
                 raise PatchError('room did not confirm immutable model/dataset manifest')
             peers=message.get('peers')
-            if not isinstance(peers,list) or len(peers)>self.max_peers or any(not isinstance(p,str) or not IDENT.fullmatch(p) for p in peers):
+            if not isinstance(peers,list) or len(peers)>self.max_peers or any(
+                    not isinstance(p,str) or not IDENT.fullmatch(p) for p in peers):
                 raise PatchError('invalid lobby roster')
             if len(set(peers))!=len(peers):raise PatchError('duplicate IDs in lobby')
+            if message.get('topology')!='bounded-v2':
+                raise PatchError('obsolete signaling server: bounded-v2 topology required')
+            if message.get('degree')!=self.max_degree:
+                raise PatchError('overlay degree mismatch')
+            if len(peers)>self.max_degree:raise PatchError('too many overlay neighbors')
+            total=message.get('online')
+            revision=message.get('revision')
+            if type(total)!=int or not 1<=total<=self.max_peers:
+                raise PatchError('invalid room membership count')
+            if type(revision)!=int or revision<0:
+                raise PatchError('invalid roster revision')
             if self.first_roster_was_empty is None:
                 self.room_existing = message.get('existing_room') is True
-                self.first_roster_was_empty = not (set(peers)-{self.peer_id})
+                self.first_roster_was_empty = (total==1)
+            self.topology_v2=True
+            self.roster_revision=revision
+            self.count_revision=revision
+            self.online_count=total
             self.members=set(peers)-{self.peer_id}
+        elif kind=='group-neighbors':
+            if not self.topology_v2:raise PatchError('unexpected bounded overlay update')
+            peers=message.get('peers')
+            revision=message.get('revision')
+            total=message.get('online')
+            if (type(revision)!=int or revision<0 or type(total)!=int or
+                not 1<=total<=self.max_peers or not isinstance(peers,list) or
+                len(peers)>self.max_degree or len(set(peers))!=len(peers) or
+                any(not isinstance(p,str) or not IDENT.fullmatch(p) or p==self.peer_id
+                    for p in peers)):
+                raise PatchError('invalid bounded overlay update')
+            # Other WebSocket workers may dispatch obsolete notifications after
+            # a more recent join/leave. Never roll the local topology backward.
+            if revision <= self.roster_revision:return
+            self.roster_revision=revision
+            if revision>=self.count_revision:
+                self.count_revision=revision
+                self.online_count=total
+            self.members=set(peers)
+        elif kind=='group-count':
+            if not self.topology_v2:return
+            version=message.get('revision')
+            total=message.get('online')
+            if type(version)!=int or version<0 or type(total)!=int or not 1<=total<=self.max_peers:
+                raise PatchError('invalid room count update')
+            if version<self.count_revision:return
+            self.count_revision=version
+            self.online_count=total
         elif kind in ('group-peer-joined','group-peer-left'):
-            peer=message.get('peer')
-            if not isinstance(peer,str) or not IDENT.fullmatch(peer):raise PatchError('invalid lobby peer')
-            if peer==self.peer_id:return
-            if kind=='group-peer-joined':
-                if len(self.members)>=self.max_peers-1: raise PatchError('too many lobby members')
-                self.members.add(peer)
-            else:self.members.discard(peer)
+            raise PatchError('obsolete full-roster signaling server')
         elif kind=='error':raise ConnectionError('lobby rejected: '+str(message.get('message','error')))
         else:return
         logging.getLogger('fedpara.roomid').info(
-            'room presence: peer=%s type=%s living=%d',self.peer_id,kind,1+len(self.members))
+            'room presence: peer=%s type=%s online=%d neighbors=%d',self.peer_id,kind,self.online_count,len(self.members))
         self.updated.set()
 
     async def run(self, stop: asyncio.Event):
@@ -174,13 +220,25 @@ class RoomDiscovery:
                 async with websockets.connect(url,max_size=65536,open_timeout=8,
                                               **signaling_keepalive(url)) as ws:
                     self.active_url=url
+                    # Each reconnection establishes a fresh authoritative view.
+                    self.roster_revision=-1
+                    self.count_revision=-1
                     payload={'type':'group-join','room':self.room,'peer':self.peer_id,'token':self.token}
                     if self.manifest is not None: payload['manifest']=self.manifest
                     if self.publish:
                         payload['publish']=True
                         if self.publish_token:payload['publish_token']=self.publish_token
+                    payload['topology_v2']=True
+                    payload['topology_degree']=self.max_degree
                     await ws.send(json.dumps(payload))
+                    # Multiple signaling workers can deliver a newer topology
+                    # notification before the join acknowledgement. Buffer it.
+                    pending=[]
                     first=json.loads(await asyncio.wait_for(ws.recv(),15))
+                    while first.get('type') == 'group-neighbors':
+                        if len(pending)>=128:raise ConnectionError('too many pending lobby notices')
+                        pending.append(first)
+                        first=json.loads(await asyncio.wait_for(ws.recv(),15))
                     if first.get('type')!='group-members':
                         if first.get('type') == 'error':
                             reason=str(first.get('message','error'))
@@ -193,6 +251,7 @@ class RoomDiscovery:
                             raise PatchError('lobby rejected room: '+reason)
                         raise ConnectionError('lobby join failed: '+str(first))
                     self.accept(first)
+                    for earlier in pending:self.accept(earlier)
                     self.online=True;self.emergency=False
                     connected_at=time.monotonic()
                     last_ping=connected_at

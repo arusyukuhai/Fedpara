@@ -183,9 +183,17 @@ def compare_legacy_swarm_trace(root, *, cap_per_peer: int = 8, eta: float = 1.0,
         if len(owners)*cap_per_peer>256:
             raise ValueError('counterfactual event budget exceeded: reduce --cap-per-peer')
         for owner in owners:
-            rows=db.execute('SELECT wire FROM events WHERE origin=? ORDER BY seq LIMIT ?',
-                            (owner,cap_per_peer)).fetchall()
-            for (wire,) in rows:
+            from .event_archive import read_stored_wire
+            columns={r[1] for r in db.execute('PRAGMA table_info(events)')}
+            if 'log_offset' in columns:
+                rows=db.execute("SELECT wire,log_offset,log_size,wire_len,digest FROM events WHERE origin=? ORDER BY seq LIMIT ?",
+                                (owner,cap_per_peer)).fetchall()
+                signed=(read_stored_wire(journal,*r) for r in rows)
+            else:
+                rows=db.execute('SELECT wire FROM events WHERE origin=? ORDER BY seq LIMIT ?',
+                                (owner,cap_per_peer)).fetchall()
+                signed=(bytes(r[0]) for r in rows)
+            for wire in signed:
                 origin,meta,weights,_=unpack_event(bytes(wire),{},unsafe=False)
                 parts=adapter._validate(meta,weights)
                 deltas={}

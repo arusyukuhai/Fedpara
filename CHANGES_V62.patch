@@ -1,0 +1,1064 @@
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -132,6 +132,9 @@
+     streaming=bool(getattr(args,'streaming_base',False))
+     lazy_write=bool(getattr(args,'streaming_lazy_write',False))
+     page_cow=bool(getattr(args,'streaming_page_cow',False))
++    factor_ledger=bool(getattr(args,'streaming_factor_ledger',False))
++    if factor_ledger and (not lazy_write or page_cow):
++        raise ValueError('--streaming-factor-ledger requires --streaming-lazy-write and excludes --streaming-page-cow')
+     if page_cow and not lazy_write:
+         raise ValueError('--streaming-page-cow requires --streaming-lazy-write')
+     if page_cow and getattr(args,'generation_v2_trainer',False):
+@@ -318,7 +321,13 @@
+             # Recheck factor placements after custom CPU/GPU dispatch.
+             check_adapter_placement(adapter)
+     if lazy_write:
+-        if page_cow:
++        if factor_ledger:
++            from .factor_ledger_v62 import attach_factor_ledger
++            manager=attach_factor_ledger(mdl,adapter,
++                scratch_dir=getattr(args,'streaming_scratch_dir',None),
++                max_entries=getattr(args,'stream_factor_max_events',32),
++                limit_gib=getattr(args,'stream_lazy_limit_gb',0))
++        elif page_cow:
+             from .paged_mutable_v61 import attach_paged_mutable
+             manager=attach_paged_mutable(mdl,adapter,
+                 scratch_dir=getattr(args,'streaming_scratch_dir',None),
+@@ -865,6 +874,10 @@
+         help='Create HF model on meta and mmap local safetensors; CPU streaming execution only')
+     p.add_argument('--streaming-lazy-write',action='store_true',
+         help='Experimental train-elastic: no up-front full mutable base copy; materialize each modified tensor once into private scratch')
++    p.add_argument('--streaming-factor-ledger',action='store_true',
++                   help='EXPERIMENTAL: retain verified before/after LoHA/LoRA factors as virtual base; compact exactly after bounded events')
++    p.add_argument('--stream-factor-max-events',type=int,default=32,
++                   help='maximum signed contributions per group before exact dense compaction (1..256)')
+     p.add_argument('--streaming-page-cow',action='store_true',
+         help='Experimental: retain only modified tensor pages on disk; no v2 auto epoch export')
+     p.add_argument('--stream-page-kib',type=int,default=64,choices=(4,16,64,256,1024),
+--- a/patchlib/continual.py
++++ b/patchlib/continual.py
+@@ -23,6 +23,7 @@
+ from .numerics import squared_l2
+ from .lazy_mutable_weights_v60 import prepare_base_group
+ from .paged_mutable_v61 import paged_destination
++from .factor_ledger_v62 import _factor_tile
+ 
+ PROTOCOL = 'fedpara-continual-elastic-fedsum-relora-mixed-async-v6'
+ 
+@@ -115,17 +116,28 @@
+                 power=0.
+                 # Bounded temporary cache: avoid allocating a whole dense LLM.
+                 cache_group=(sum(t.numel()*4 for t in deltas if t is not None) +
+-                             math.prod(group.shape)*4 <= 64*1024*1024)
++                             math.prod(group.shape)*4 <= 64*1024*1024
++                             and not (len(group.shape)==2 and row_size>self.block_elements))
+                 blocks=[]
+                 for lo in range(0,n0,rows):
+                     hi=min(lo+rows,n0)
+-                    diff = _delta_block(spec,tensors_a,lo,hi) - _delta_block(
+-                        spec,tensors_b,lo,hi)
+-                    if not bool(torch.isfinite(diff).all().item()):
+-                        raise PatchError('nonfinite continual effective update')
+-                    power += squared_l2(diff)
+-                    if cache_group:
+-                        blocks.append(diff.contiguous())
++                    if len(group.shape)==2 and row_size>self.block_elements:
++                        # A single extremely wide row may be larger than the
++                        # entire staging budget. Bound both axes rather than
++                        # materializing that full row during signature check.
++                        parts=((_factor_tile(spec,tensors_a,slice(lo,hi),slice(cl,ce))-
++                                _factor_tile(spec,tensors_b,slice(lo,hi),slice(cl,ce)))
++                               for cl in range(0,row_size,self.block_elements)
++                               for ce in [min(row_size,cl+self.block_elements)])
++                    else:
++                        parts=(_delta_block(spec,tensors_a,lo,hi)-
++                               _delta_block(spec,tensors_b,lo,hi),)
++                    for diff in parts:
++                        if not bool(torch.isfinite(diff).all().item()):
++                            raise PatchError('nonfinite continual effective update')
++                        power += squared_l2(diff)
++                        if cache_group:
++                            blocks.append(diff.contiguous())
+                 rms=math.sqrt(power/math.prod(group.shape))
+                 if not math.isfinite(rms) or rms>self.max_delta_rms:
+                     raise PatchError('excessive continual effective update RMS')
+@@ -140,6 +152,26 @@
+         # of times per event; one reduction per 8 MiB is much cheaper while
+         # preserving nonfinite-base protection before each bounded write.
+         # No model/optimizer tensors are modified until a batch passes.
++        ledger=getattr(self.adapter.model,'_fedpara_lazy_mutable_weights',None)
++        if ledger is not None and getattr(ledger,'_fedpara_is_factor_ledger',False):
++            with self.adapter.lock,torch.no_grad():
++                ledger.apply_verified(self,[(info,prepared)])
++                if info.origin == self.self_id:
++                    for group,parts in zip(self.adapter.groups,prepared.now_parts):
++                        spec=group.overlay.local
++                        for param,tensor in zip(spec.parts,parts):
++                            param.copy_(tensor.to(param.device,dtype=param.dtype))
++                            param.grad=None
++                        for j,tensor in enumerate(parts):
++                            getattr(group.overlay.anchor,f'part{j}').copy_(
++                                tensor.to(spec.parts[j].device,dtype=torch.float32))
++                    if self.should_reinitialize(info.seq):
++                        from .relora import reset_committed_factors,reinit_seed
++                        reset_committed_factors(self.adapter,seed=reinit_seed(
++                            self.genesis,self.self_id,info.seq))
++                _invalidate_frozen_caches(self.adapter.model)
++                self.applied.add((info.origin,info.seq))
++            return
+         with self.adapter.lock, torch.no_grad():
+             pending = []
+             flags = []
+@@ -235,6 +267,13 @@
+         ids=[(info.origin,info.seq) for info,_ in updates]
+         if len(set(ids)) != len(ids) or any(info.origin == self.self_id for info,_ in updates):
+             raise PatchError('aggregate must contain distinct remote signed events')
++        ledger=getattr(self.adapter.model,'_fedpara_lazy_mutable_weights',None)
++        if ledger is not None and getattr(ledger,'_fedpara_is_factor_ledger',False):
++            with self.adapter.lock,torch.no_grad():
++                ledger.apply_verified(self,updates)
++                _invalidate_frozen_caches(self.adapter.model)
++                self.applied.update(ids)
++            return
+         with self.adapter.lock, torch.no_grad():
+             pending=[]
+             flags=[]
+--- a/patchlib/layer_offload.py
++++ b/patchlib/layer_offload.py
+@@ -156,6 +156,10 @@
+ class _FrozenDiskLinear(torch.autograd.Function):
+     @staticmethod
+     def forward(ctx,x,bias,path,shape,dtype,cache):
++        # A signed remote event may arrive between forward and backward.
++        # Pin the virtual version to compute the correct input gradient and
++        # keep all tiles within this one kernel on the same frozen revision.
++        path=path.snapshot() if hasattr(path,'snapshot') else path
+         ctx.path,ctx.shape,ctx.dtype,ctx.cache=path,shape,dtype,cache
+         ctx.has_bias=bias is not None
+         if cache is not None:
+@@ -278,6 +282,7 @@
+ class _FrozenDiskConv1D(torch.autograd.Function):
+     @staticmethod
+     def forward(ctx,x,bias,source,shape,dtype,cache):
++        source=source.snapshot() if hasattr(source,'snapshot') else source
+         ctx.source,ctx.shape,ctx.dtype,ctx.cache=source,shape,dtype,cache
+         weight=(cache.weight(source,shape,dtype,x.device,compute_dtype=x.dtype)
+                 if cache is not None else None)
+--- a/patchlib/shards.py
++++ b/patchlib/shards.py
+@@ -186,7 +186,8 @@
+ def export_state_sharded(model, store: Path, output: Path, *, model_id: str,
+                          revision: str, peer_id: str, seq: int = 0,
+                          adapter=None, shard_bytes: int = DEFAULT_SHARD_BYTES,
+-                         max_state_bytes: int = 32*1024**3) -> dict:
++                         max_state_bytes: int = 32*1024**3,
++                         frozen_base_sources=None) -> dict:
+     """Export live PyTorch state directly into shards, with no intermediate .fstate.
+ 
+     Includes effective LoRA/LoHA-adapted weights, embeddings, and buffers.
+@@ -199,6 +200,9 @@
+     manager=getattr(model,'_fedpara_lazy_mutable_weights',None)
+     if manager is not None and getattr(manager,'stores',None):
+         raise PatchError('paged COW needs explicit manager.materialize_all(adapter) before full-state export')
++    # The factor ledger supports direct bounded sharded export; the immutable
++    # original Parameter alone is NOT the effective model.  Thread-local scope
++    # suppresses its state_dict hook only for this controlled serialization.
+     if type(shard_bytes) is not int or not MIN_SHARD_BYTES <= shard_bytes <= MAX_SHARD_BYTES:
+         raise PatchError('invalid shard_bytes')
+     if not isinstance(model_id,str) or not model_id or not isinstance(revision,str) or not revision:
+@@ -211,7 +215,15 @@
+     # property (which eagerly allocates an entire dense LoHa/LoRA weight).
+     guard = adapter.lock if adapter is not None else None
+     from contextlib import nullcontext
+-    with guard if guard is not None else nullcontext(), torch.no_grad():
++    ledger=(manager if getattr(manager,'_fedpara_is_factor_ledger',False) else None)
++    with guard if guard is not None else nullcontext(), torch.no_grad(), (ledger.export_context() if ledger is not None else nullcontext()):
++        if ledger is not None:ledger._healthy()
++        sources_by_alias=(frozen_base_sources if frozen_base_sources is not None
++                          else ({alias:ledger.sources[g.canonical]
++                          for g in adapter.groups for alias in g.aliases
++                          if g.canonical in ledger.sources} if ledger is not None else {}))
++        if frozen_base_sources is not None and ledger is None:
++            raise PatchError('frozen factor ledger sources require a factor-ledger manager')
+         tensors = effective_state_sources(model, adapter)
+         if not 0 < len(tensors) <= MAX_TENSORS:
+             raise PatchError('invalid number of registered tensors')
+@@ -233,7 +245,8 @@
+             tensor_hash=hashlib.sha256()
+             buffer=bytearray()
+             written=0
+-            for piece in effective_chunks(tensor,overlay,chunk_bytes=shard_bytes):
++            for piece in effective_chunks(tensor,overlay,chunk_bytes=shard_bytes,
++                                          base_source=sources_by_alias.get(name)):
+                 tensor_hash.update(piece)
+                 written += len(piece)
+                 buffer.extend(piece)
+@@ -428,8 +441,8 @@
+     needs adequate CPU/device memory (or an external offload-capable backend).
+     """
+     manager=getattr(model,'_fedpara_lazy_mutable_weights',None)
+-    if manager is not None and getattr(manager,'stores',None):
+-        raise PatchError('cannot import into a virtual page COW base; materialize all first')
++    if manager is not None and (getattr(manager,'stores',None) or getattr(manager,'sources',None)):
++        raise PatchError('cannot import into a virtual base; materialize all first')
+     meta=read_manifest(manifest,max_state_bytes=max_state_bytes)
+     if (meta['model_id'],meta['revision'])!=(model_id,revision):
+         raise PatchError('sharded snapshot model identity/revision mismatch')
+--- a/patchlib/shard_runtime.py
++++ b/patchlib/shard_runtime.py
+@@ -79,7 +79,7 @@
+ 
+ 
+ def effective_chunks(original: torch.Tensor, overlay=None, *, chunk_bytes: int = 4 * 1024 * 1024,
+-                     work_elements: int = 131072) -> Iterator[bytes]:
++                     work_elements: int = 131072, base_source=None) -> Iterator[bytes]:
+     """Serialize effective tensor in bounded working blocks (including huge rows).
+ 
+     For ordinary 2-D matrices, use native low-rank matmul on full row stripes;
+@@ -97,9 +97,20 @@
+     block = max(1, min(chunk_bytes // original.element_size(), work_elements))
+     shape = tuple(original.shape)
+     with torch.no_grad():
+-        flat = original.detach().view(-1) if original.is_contiguous() else None
++        flat = original.detach().view(-1) if original.is_contiguous() and base_source is None else None
+         total = original.numel()
+         def base_range(lo, end):
++            if base_source is not None:
++                if len(shape)!=2:raise PatchError('factor ledger requires 2-D base')
++                width=shape[1]
++                pieces=[]
++                offset=lo
++                while offset<end:
++                    row,col=divmod(offset,width)
++                    stop=min(end,offset+width-col)
++                    pieces.append(base_source[row:row+1,col:col+stop-offset].reshape(-1))
++                    offset=stop
++                return torch.cat(pieces) if pieces else torch.empty(0,dtype=original.dtype)
+             if flat is not None:
+                 return flat[lo:end]
+             indices = torch.arange(lo, end, dtype=torch.long, device=original.device)
+@@ -130,7 +141,8 @@
+         if rows:
+             for row in range(0, shape[0], rows):
+                 end = min(shape[0], row+rows)
+-                original_part = original[row:end]
++                original_part = (base_source.rows(row,end) if base_source is not None
++                                 else original[row:end])
+                 delta = None
+                 for spec, sign in specs:
+                     value = _row_factor(spec, row, end)
+--- a/patchlib/epoch_frozen_export_v58.py
++++ b/patchlib/epoch_frozen_export_v58.py
+@@ -13,6 +13,7 @@
+ """
+ from __future__ import annotations
+ from dataclasses import dataclass, replace
++from contextlib import nullcontext
+ from types import SimpleNamespace
+ from pathlib import Path
+ import threading
+@@ -55,10 +56,14 @@
+     event_count: int
+     factor_bytes: int
+     model: object
++    frozen_base_sources: object = None
+ 
+     def assert_immutable_base(self):
+         """Fail closed on normal PyTorch in-place/storage/base replacements."""
+-        now = effective_state_sources(self.model, self.adapter)
++        manager=getattr(self.model,'_fedpara_lazy_mutable_weights',None)
++        with (manager.export_context() if getattr(manager,'_fedpara_is_factor_ledger',False)
++              else nullcontext()):
++            now = effective_state_sources(self.model, self.adapter)
+         if set(now) != {x[0] for x in self.sources}:
+             raise PatchError('model topology changed during frozen export')
+         for name, ident, version, ptr, offset, shape, dtype in self.sources:
+@@ -80,14 +85,25 @@
+     """
+     if type(max_factor_bytes) is not int or max_factor_bytes <= 0:
+         raise ValueError('invalid frozen factor budget')
+-    with adapter.lock, torch.no_grad():
++    manager=getattr(model,'_fedpara_lazy_mutable_weights',None)
++    ledger=manager if getattr(manager,'_fedpara_is_factor_ledger',False) else None
++    with adapter.lock, torch.no_grad(), (ledger.export_context() if ledger is not None else nullcontext()):
+         sources = effective_state_sources(model, adapter)
++        virtual=ledger.frozen_sources() if ledger is not None else None
+         base_info = []
+         for name, (tensor, _) in sorted(sources.items()):
+             base_info.append((name, id(tensor), tensor._version,
+                  tensor.untyped_storage().data_ptr(), tensor.storage_offset(),
+                  tuple(tensor.shape), str(tensor.dtype)))
+         budget = [0, max_factor_bytes]
++        if ledger is not None:
++            # Frozen snapshots pin the immutable event-factor tuples until the
++            # worker finishes even if the live manager compacts meanwhile.
++            budget[0] += sum(
++                ledger.sources[g.canonical].stats()['factor_bytes']
++                for g in adapter.groups if g.canonical in ledger.sources)
++            if budget[0] > budget[1]:
++                raise PatchError('frozen factor ledger exceeds snapshot byte budget')
+         groups = [SimpleNamespace(aliases=tuple(group.aliases),
+                    overlay=_ImmutableOverlay(group.overlay, budget))
+                   for group in adapter.groups]
+@@ -102,7 +118,7 @@
+             frontier, inventory = _indexed_frontier(journal)
+         result = FrozenExport(frozen, tuple(base_info), frontier, inventory,
+                               sum(frontier.values()) if frontier is not None else None,
+-                              budget[0], model)
++                              budget[0], model, virtual)
+         result.assert_immutable_base()
+         return result
+ 
+--- a/patchlib/epoch_export_v57.py
++++ b/patchlib/epoch_export_v57.py
+@@ -91,7 +91,8 @@
+         meta=export_state_sharded(model,store,temp,
+             model_id=adapter.model_id,revision=adapter.revision,peer_id=peer,
+             seq=export_seq,adapter=effective_adapter,shard_bytes=shard_bytes,
+-            max_state_bytes=max_state_bytes)
++            max_state_bytes=max_state_bytes,
++            frozen_base_sources=(frozen.frozen_base_sources if frozen is not None else None))
+         # Harden the content-addressed blobs against a sudden power failure.
+         # The regular streaming exporter omits per-shard fsync for throughput;
+         # a *certified* checkpoint must not sign undurable shard bytes.
+--- a/patchlib/factor_ledger_v62.py
++++ b/patchlib/factor_ledger_v62.py
+@@ -0,0 +1,344 @@
++"""Bounded, exact (up to ordinary floating arithmetic) factor-separated FedSum base.
++
++Unmodified safetensors stays immutable.  Authenticated before/after factor
++pairs are held as a *bounded* virtual base rather than written as dense COW
++pages.  The signed journal, not this RAM-only ledger, is authoritative after
++restarts.  Reaching the cap compacts to a private dense scratch tensor once;
++subsequent writes use the existing v60 implementation.  It is not a magic
++constant-storage representation of indefinitely many independent updates.
++"""
++from __future__ import annotations
++import math
++import threading
++from contextlib import contextmanager
++import torch
++from .core import PatchError
++from .lazy_mutable_weights_v60 import LazyMutableWeights, LazyWeightError
++from .livefed import _delta_block
++
++
++def _factor_tile(spec, parts, rs, cs):
++    if spec.dense:
++        return parts[0][rs,cs]
++    a,b=parts[0],parts[1]
++    if spec.kind=='lora':
++        return (a[rs] @ b[cs].T)*(spec.alpha/spec.rank)
++    c,d=parts[2],parts[3]
++    return ((a[rs] @ b[cs].T)*(c[rs] @ d[cs].T))*(spec.alpha/spec.rank)
++
++
++class FactorLedgerSource:
++    """CPU tile source consumed by existing disk Linear/Conv1D/Embedding kernels."""
++    _fedpara_is_paged=True  # tells the disk kernel to tile, never cache full weight
++    def __init__(self,base,spec,*,max_entries=32):
++        if base.ndim!=2 or base.device.type!='cpu' or not base.is_contiguous():
++            raise LazyWeightError('factor ledger requires contiguous CPU 2-D base')
++        if spec.dense or spec.kind not in ('lora','loha'):
++            raise LazyWeightError('factor ledger requires actual low-rank factors')
++        self.base=base.detach()
++        self.spec=spec
++        self.shape=tuple(base.shape)
++        self.dtype=base.dtype
++        self.device=torch.device('cpu')
++        self.max_entries=max_entries
++        self.entries=[]
++        self.lock=threading.RLock()
++        self.poisoned=False
++
++    def _healthy(self):
++        if self.poisoned:raise LazyWeightError('factor ledger poisoned; signed journal replay required')
++
++    def tile(self,rs,cs):
++        if not isinstance(rs,slice) or not isinstance(cs,slice):
++            raise TypeError('factor ledger requires bounded slice tiles')
++        lo,hi,s1=rs.indices(self.shape[0]);cl,ch,s2=cs.indices(self.shape[1])
++        if s1!=1 or s2!=1:raise ValueError('factor ledger requires unit stride')
++        with self.lock,torch.no_grad():
++            self._healthy()
++            base=self.base[lo:hi,cl:ch].clone()
++            for now,old in self.entries:
++                # Float32 accumulation matches continual FedSum's update order.
++                diff=_factor_tile(self.spec,now,slice(lo,hi),slice(cl,ch))-\
++                     _factor_tile(self.spec,old,slice(lo,hi),slice(cl,ch))
++                base=(base.float()+diff).to(self.dtype)
++            return base
++
++    def __getitem__(self,index):
++        if not isinstance(index,tuple) or len(index)!=2:
++            raise TypeError('factor ledger requires two-dimensional slices')
++        return self.tile(*index)
++
++    @property
++    def T(self):return _TransposeLedger(self)
++
++    def gather_rows(self,ids):
++        cpu=ids.to(device='cpu',dtype=torch.long)
++        if cpu.numel() and ((cpu<0).any() or (cpu>=self.shape[0]).any()):
++            raise IndexError('out of range embedding ID')
++        uniq,inv=torch.unique(cpu.reshape(-1),sorted=True,return_inverse=True)
++        result=torch.empty((len(uniq),self.shape[1]),dtype=self.dtype)
++        for i,k in enumerate(uniq.tolist()):
++            result[i]=self.tile(slice(k,k+1),slice(0,self.shape[1]))[0]
++        return result[inv].view(*ids.shape,self.shape[1])
++
++    def rows(self,lo,hi):return self.tile(slice(lo,hi),slice(0,self.shape[1]))
++
++    def snapshot(self):
++        """Pin the current immutable factor tuples for a concurrent exporter."""
++        with self.lock:
++            self._healthy()
++            copy=FactorLedgerSource.__new__(FactorLedgerSource)
++            copy.base=self.base
++            copy.spec=self.spec
++            copy.shape=self.shape
++            copy.dtype=self.dtype
++            copy.device=self.device
++            copy.max_entries=self.max_entries
++            copy.entries=list(self.entries)  # append never mutates existing entries
++            copy.lock=threading.RLock()
++            copy.poisoned=False
++            return copy
++
++    def append(self,now,old):
++        with self.lock:
++            self._healthy()
++            if len(self.entries)>=self.max_entries:
++                raise LazyWeightError('factor ledger full; compaction required')
++            self.entries.append((tuple(t.detach().to('cpu',dtype=torch.float32).contiguous().clone() for t in now),
++                                 tuple(t.detach().to('cpu',dtype=torch.float32).contiguous().clone() for t in old)))
++
++    def stats(self):
++        return {'entries':len(self.entries),
++                'factor_bytes':sum(t.numel()*t.element_size() for pair in self.entries for p in pair for t in p)}
++
++
++class _TransposeLedger:
++    _fedpara_is_paged=True
++    def __init__(self,source):
++        self.source=source;self.shape=source.shape[::-1];self.dtype=source.dtype
++    def __getitem__(self,index):return self.source[index[1],index[0]].T.contiguous()
++
++
++class FactorLedgerManager:
++    _fedpara_is_factor_ledger=True
++    def __init__(self,model,adapter,*,scratch_dir=None,max_entries=32,limit_gib=0):
++        if type(max_entries) is not int or not 1<=max_entries<=256:
++            raise ValueError('factor-ledger max_entries must be 1..256')
++        self.model=model;self.adapter=adapter
++        self.fallback=LazyMutableWeights(model,scratch_dir=scratch_dir,limit_gib=limit_gib)
++        self.directory=self.fallback.directory
++        self.max_entries=max_entries
++        self.sources={}
++        self.compacted=set()
++        self.poisoned=False
++        self.limit_bytes=int(limit_gib*1024**3)
++        # This limit covers factors; fallback has its own independent quota.
++        self.factor_bytes=0
++        self._export_context=threading.local()
++
++    def _healthy(self):
++        if self.poisoned or any(s.poisoned for s in self.sources.values()):
++            raise LazyWeightError('factor ledger poisoned; restart from authenticated journal')
++
++    def _original(self,group):
++        path,_,attr=group.aliases[0].rpartition('.')
++        mod=self.model.get_submodule(path) if path else self.model
++        return mod.parametrizations[attr].original
++
++    def _members(self,group):
++        modules=[]
++        for alias in group.aliases:
++            path,_,attr=alias.rpartition('.')
++            mod=self.model.get_submodule(path) if path else self.model
++            if mod.parametrizations[attr].original is not self._original(group):
++                raise LazyWeightError('tied group mismatch')
++            modules.append(mod)
++        return modules
++
++    def materialize_group(self,group):
++        """Called by legacy signed gate; do NOT force a dense copy here."""
++        self._healthy()
++        key=group.canonical
++        if key in self.compacted or key in self.sources:return False
++        base=self._original(group)
++        members=self._members(group)
++        spec=group.overlay.local
++        if (base.ndim!=2 or base.device.type!='cpu' or not base.is_contiguous()
++            or spec.dense or any(not hasattr(m,'_fedpara_disk_source') for m in members)):
++            self.fallback.materialize_group(group)
++            self.compacted.add(key)
++            return False
++        source=FactorLedgerSource(base,spec,max_entries=self.max_entries)
++        self.sources[key]=source
++        for mod in members:
++            cache=getattr(mod,'_fedpara_disk_cache',None)
++            if cache is not None:cache.invalidate()
++            mod._fedpara_disk_source=source
++            mod._fedpara_disk_path='<factor-separated-journal-overlay>'
++        return True
++
++    def _append(self,group,now,old):
++        key=group.canonical
++        source=self.sources.get(key)
++        if source is None:
++            raise LazyWeightError('non-ledger groups require legacy signed apply')
++        if len(source.entries)>=self.max_entries:
++            self._compact(group)
++            return False
++        size=sum(t.numel()*4 for parts in (now,old) for t in parts)
++        if self.limit_bytes and self.factor_bytes+size+self.fallback.used_bytes>self.limit_bytes:
++            self._compact(group)
++            return False
++        source.append(now,old)
++        self.factor_bytes+=size
++        return True
++
++    def _compact(self,group):
++        """One-time expensive exact materialization; no lossily truncated SVD."""
++        key=group.canonical
++        source=self.sources[key]
++        original=self._original(group)
++        remaining=self.factor_bytes-source.stats()['factor_bytes']
++        dense_bytes=original.numel()*original.element_size()
++        if self.limit_bytes and self.fallback.used_bytes+remaining+dense_bytes>self.limit_bytes:
++            raise LazyWeightError('exact ledger compaction exceeds combined capacity quota')
++        # The source references original genesis; v60 replaces original.data
++        # and switches disk kernels, so retain it while reconstructing.
++        self.fallback.materialize_group(group)
++        with torch.no_grad():
++            flat=original.data
++            width=original.shape[1]
++            row_step=max(1,min(64,65536//max(1,width)))
++            for lo in range(0,original.shape[0],row_step):
++                end=min(original.shape[0],lo+row_step)
++                col_step=max(1,65536//(end-lo))
++                for col in range(0,width,col_step):
++                    ce=min(width,col+col_step)
++                    flat[lo:end,col:ce].copy_(
++                        source[lo:end,col:ce].to(flat.dtype))
++        self.factor_bytes-=source.stats()['factor_bytes']
++        self.sources.pop(key)
++        self.compacted.add(key)
++
++    @staticmethod
++    def _tiles(shape,budget):
++        """Yield bounded 2-D tiles, including rows wider than the byte budget."""
++        if len(shape)!=2:
++            width=math.prod(shape[1:]) if len(shape)>1 else 1
++            for lo in range(0,shape[0] if shape else 1,max(1,budget//width)):
++                hi=min(shape[0] if shape else 1,lo+max(1,budget//width))
++                yield lo,hi,None,None
++            return
++        height,width=shape
++        rows=max(1,budget//max(width,1))
++        for lo in range(0,height,rows):
++            hi=min(height,lo+rows)
++            cols=max(1,budget//(hi-lo))
++            for cl in range(0,width,cols):
++                yield lo,hi,cl,min(width,cl+cols)
++
++    @staticmethod
++    def _piece(spec,prepared,gi,lo,hi,cl,ce):
++        dense=prepared.deltas[gi]
++        if dense is not None:
++            value=dense[lo:hi] if spec.shape else dense
++            return value if cl is None else value[:,cl:ce]
++        a,b=prepared.now_parts[gi],prepared.old_parts[gi]
++        if cl is not None:
++            rs,cs=slice(lo,hi),slice(cl,ce)
++            return _factor_tile(spec,a,rs,cs)-_factor_tile(spec,b,rs,cs)
++        return _delta_block(spec,a,lo,hi)-_delta_block(spec,b,lo,hi)
++
++    def apply_verified(self,engine,updates):
++        """Consume independently authenticated/validated event factors only.
++
++        All current candidates are checked before any append. Commit failures
++        poison the trainer for clean signed-journal replay. The record journal
++        is durable before the engine invokes this method.
++        """
++        self._healthy()
++        adapter=self.adapter
++        for group in adapter.groups:
++            self.materialize_group(group)
++        try:
++            with torch.no_grad():
++                for gi,group in enumerate(adapter.groups):
++                    orig=self._original(group)
++                    source=self.sources.get(group.canonical)
++                    spec=group.overlay.local
++                    for lo,hi,cl,ce in self._tiles(group.shape,engine.block_elements):
++                        if source is not None:
++                            base=(source.rows(lo,hi) if cl is None else
++                                  source[lo:hi,cl:ce])
++                        else:
++                            base=orig[lo:hi] if cl is None and group.shape else (orig if cl is None else orig[lo:hi,cl:ce])
++                        candidate=base.float()
++                        for _,prepared in updates:
++                            value=self._piece(spec,prepared,gi,lo,hi,cl,ce)
++                            candidate=candidate+value.to(candidate.device)
++                        if not bool(torch.isfinite(candidate).all().item()):
++                            raise PatchError('nonfinite factor-separated effective base')
++            for gi,group in enumerate(adapter.groups):
++                key=group.canonical
++                if key in self.sources and len(self.sources[key].entries)+len(updates)>self.max_entries:
++                    self._compact(group)
++                orig=self._original(group)
++                spec=group.overlay.local
++                for _,prepared in updates:
++                    now,old=prepared.now_parts[gi],prepared.old_parts[gi]
++                    if key in self.sources and self._append(group,now,old):
++                        continue
++                    for lo,hi,cl,ce in self._tiles(group.shape,engine.block_elements):
++                        delta=self._piece(spec,prepared,gi,lo,hi,cl,ce)
++                        dest=(orig[lo:hi] if group.shape else orig) if cl is None else orig[lo:hi,cl:ce]
++                        dest.copy_((dest.float()+delta.to(dest.device)).to(dest.dtype))
++        except BaseException:
++            self.poisoned=True
++            raise
++
++    def frozen_sources(self):
++        self._healthy()
++        return {alias:source.snapshot() for group in self.adapter.groups
++                for alias in group.aliases
++                if (source:=self.sources.get(group.canonical)) is not None}
++
++    @contextmanager
++    def export_context(self):
++        # Only trusted, bounded sharded serialization may see stale original
++        # tensors; the exporter explicitly supplies our virtual base instead.
++        previous=getattr(self._export_context,'active',False)
++        self._export_context.active=True
++        try:yield
++        finally:self._export_context.active=previous
++
++    def export_allowed(self):return getattr(self._export_context,'active',False)
++
++    def materialize_all(self,adapter):
++        self._healthy()
++        try:
++            for group in adapter.groups:
++                if group.canonical in self.sources:self._compact(group)
++                elif group.canonical not in self.compacted:
++                    self.fallback.materialize_group(group)
++                    self.compacted.add(group.canonical)
++        except BaseException:
++            self.poisoned=True
++            raise
++
++    def stats(self):
++        return {'ledger_groups':len(self.sources),'compacted_groups':len(self.compacted),
++                'factor_bytes':self.factor_bytes,'fallback_bytes':self.fallback.used_bytes,
++                'scratch':str(self.directory)}
++
++
++def attach_factor_ledger(model,adapter,*,scratch_dir=None,max_entries=32,limit_gib=0):
++    if getattr(model,'_fedpara_streaming_base_info',{}).get('mode')!='read-only-mmap':
++        raise LazyWeightError('factor ledger requires immutable safetensors genesis')
++    manager=FactorLedgerManager(model,adapter,scratch_dir=scratch_dir,
++                                max_entries=max_entries,limit_gib=limit_gib)
++    object.__setattr__(model,'_fedpara_lazy_mutable_weights',manager)
++    def forbid_stale_state(module,prefix,keep_vars):
++        if manager.sources and not manager.export_allowed():
++            raise LazyWeightError('virtual low-rank ledger: use sharded export, not model.state_dict')
++    model.register_state_dict_pre_hook(forbid_stale_state)
++    return manager
+--- a/tests/test_factor_ledger_v62.py
++++ b/tests/test_factor_ledger_v62.py
+@@ -0,0 +1,321 @@
++"""v62: authentic before/after factors remain virtual and export correctly."""
++import hashlib
++import pytest
++import torch
++from torch import nn
++from safetensors.torch import save_file
++from patchlib.core import UniversalAdapter
++from patchlib.continual import ContinualElasticEngine
++from patchlib.elastic import EventJournal
++from patchlib.streaming_base import materialize_meta_from_safetensors
++from patchlib.layer_offload import install_disk_linear_offload
++from patchlib.factor_ledger_v62 import attach_factor_ledger, LazyWeightError
++from patchlib.shards import export_state_sharded, apply_sharded_effective_state, read_manifest
++
++
++class Toy(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.a=nn.Linear(10,8)
++        self.b=nn.Linear(8,6)
++    def forward(self,x):return self.b(torch.tanh(self.a(x)))
++
++
++def build(tmp,kind='loha',max_entries=32):
++    torch.manual_seed(38)
++    initial=Toy()
++    source=tmp/'source';source.mkdir(parents=True)
++    save_file({k:v.clone().detach().contiguous() for k,v in initial.state_dict().items()},str(source/'model.safetensors'))
++    with torch.device('meta'):m=Toy()
++    materialize_meta_from_safetensors(m,source,writable=False)
++    a=UniversalAdapter(m,'test','v62',kind=kind,rank=3,target_scope='auto')
++    install_disk_linear_offload(m,a,tmp/'disk',min_weight_mib=0.)
++    ledger=attach_factor_ledger(m,a,scratch_dir=tmp/'scratch',max_entries=max_entries)
++    base=Toy();base.load_state_dict(initial.state_dict())
++    torch.manual_seed(111)
++    b=UniversalAdapter(base,'test','v62',kind=kind,rank=3,target_scope='auto')
++    return source,m,a,ledger,base,b
++
++
++@pytest.mark.parametrize('kind',['lora','loha'])
++def test_real_signed_events_no_dense_writes_and_gradients(tmp_path,kind):
++    source,m,a,ledger,reference,b=build(tmp_path,kind)
++    pristine=(source/'model.safetensors').read_bytes()
++    ja=EventJournal(tmp_path/'journal-a.sqlite','e'*64)
++    jb=EventJournal(tmp_path/'journal-b.sqlite','e'*64)
++    eng_a=ContinualElasticEngine(a,'alice','e'*64,ja,unsafe=True)
++    eng_b=ContinualElasticEngine(b,'alice','e'*64,jb,unsafe=True)
++    x=torch.randn(3,10)
++    opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.01)
++    m(x).square().mean().backward();opt.step();opt.zero_grad(set_to_none=True)
++    wire=eng_a.seal_local(1)
++    assert eng_b.ingest(wire)
++    assert len(ledger.sources)==2
++    assert ledger.stats()['fallback_bytes']==0
++    assert ledger.stats()['factor_bytes']>0
++    assert (source/'model.safetensors').read_bytes()==pristine
++    assert torch.allclose(m(x),reference(x),atol=1e-5,rtol=1e-5)
++    # Both virtual base and signed local anchor now agree for backward input gradient.
++    z=x.clone().requires_grad_(True);q=x.clone().requires_grad_(True)
++    m(z).square().mean().backward();reference(q).square().mean().backward()
++    assert torch.allclose(z.grad,q.grad,atol=1e-5,rtol=1e-5)
++    before=m(x).detach().clone()
++    assert not eng_a.ingest(wire)
++    assert torch.allclose(m(x),before,atol=1e-6)
++    ja.close();jb.close()
++
++
++def test_exact_compaction_then_more_updates_and_direct_shard_export(tmp_path):
++    source,m,a,ledger,base,b=build(tmp_path,max_entries=1)
++    ja=EventJournal(tmp_path/'a.sqlite','e'*64)
++    jb=EventJournal(tmp_path/'b.sqlite','e'*64)
++    eng=ContinualElasticEngine(a,'alice','e'*64,ja,unsafe=True)
++    ref=ContinualElasticEngine(b,'alice','e'*64,jb,unsafe=True)
++    x=torch.randn(4,10)
++    opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.03)
++    for i in range(3):
++        m(x).square().mean().backward();opt.step();opt.zero_grad(set_to_none=True)
++        wire=eng.seal_local(1)
++        assert ref.ingest(wire)
++        assert torch.allclose(m(x),base(x),atol=2e-5,rtol=2e-5)
++    assert ledger.stats()['compacted_groups']==2
++    assert ledger.stats()['factor_bytes']==0
++    meta=export_state_sharded(m,tmp_path/'store',tmp_path/'manifest.fmanifest',
++        model_id='test',revision='v62',peer_id='alice',seq=3,adapter=a,
++        max_state_bytes=2*1024**2)
++    assert meta['total_tensor_bytes']>0
++    ja.close();jb.close()
++
++
++def test_shard_export_reads_virtual_factor_not_stale_genesis(tmp_path):
++    source,m,a,ledger,base,b=build(tmp_path)
++    ja=EventJournal(tmp_path/'a.sqlite','e'*64)
++    eng=ContinualElasticEngine(a,'alice','e'*64,ja,unsafe=True)
++    x=torch.randn(2,10)
++    opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.02)
++    m(x).sum().backward();opt.step();eng.seal_local(1)
++    expected=m(x).detach().clone()
++    with pytest.raises(LazyWeightError,match='virtual low-rank ledger'):
++        m.state_dict()
++    meta=export_state_sharded(m,tmp_path/'store',tmp_path/'manifest.fmanifest',
++        model_id='test',revision='v62',peer_id='alice',seq=1,adapter=a,
++        max_state_bytes=2*1024**2)
++    assert ledger.stats()['fallback_bytes']==0
++    assert ledger.stats()['ledger_groups']>0
++    rebuilt=Toy()
++    new_adapter=UniversalAdapter(rebuilt,'test','v62',kind='loha',rank=3,target_scope='auto')
++    apply_sharded_effective_state(rebuilt,new_adapter,tmp_path/'manifest.fmanifest',
++        tmp_path/'store',model_id='test',revision='v62',max_state_bytes=2*1024**2)
++    assert torch.allclose(rebuilt(x),expected,atol=2e-5,rtol=2e-5)
++    ja.close()
++
++
++def test_clean_journal_replay_and_bound_limit(tmp_path):
++    source,m,a,ledger,base,b=build(tmp_path)
++    j=EventJournal(tmp_path/'j.sqlite','e'*64)
++    eng=ContinualElasticEngine(a,'alice','e'*64,j,unsafe=True)
++    x=torch.randn(2,10)
++    opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.02)
++    m(x).sum().backward();opt.step();wire=eng.seal_local(1)
++    expected=m(x).detach().clone()
++    root=tmp_path/'restart';root.mkdir()
++    torch.manual_seed(44)
++    with torch.device('meta'):m2=Toy()
++    materialize_meta_from_safetensors(m2,source,writable=False)
++    a2=UniversalAdapter(m2,'test','v62',kind='loha',rank=3,target_scope='auto')
++    install_disk_linear_offload(m2,a2,root/'disk',min_weight_mib=0.)
++    l2=attach_factor_ledger(m2,a2,scratch_dir=root/'scratch',max_entries=32)
++    j2=EventJournal(root/'j.sqlite','e'*64)
++    second=ContinualElasticEngine(a2,'bob','e'*64,j2,unsafe=True)
++    assert second.ingest(wire)
++    assert torch.allclose(m2(x),expected,atol=1e-5,rtol=1e-5)
++    j.close();j2.close()
++
++
++def test_batched_remote_and_duplicate_safety(tmp_path):
++    import copy
++    source,m,a,ledger,base,b=build(tmp_path)
++    j=EventJournal(tmp_path/'j.sqlite','e'*64)
++    ref_j=EventJournal(tmp_path/'ref.sqlite','e'*64)
++    target=ContinualElasticEngine(a,'target','e'*64,j,unsafe=True)
++    reference=ContinualElasticEngine(b,'target','e'*64,ref_j,unsafe=True)
++    remote=[]
++    for k in (0,1):
++        # A source's random local factors need not match the target's initial factors.
++        src=Toy();src.load_state_dict({key:value.clone() for key,value in Toy().state_dict().items()})
++        src_a=UniversalAdapter(src,'test','v62',kind='loha',rank=3,target_scope='auto')
++        src_j=EventJournal(tmp_path/f'r{k}.sqlite','e'*64)
++        src_eng=ContinualElasticEngine(src_a,f'origin{k}','e'*64,src_j,unsafe=True)
++        with torch.no_grad():
++            for group in src_a.groups:
++                for p in group.overlay.local.parts:
++                    p.add_(torch.randn_like(p)*.02)
++        wire=src_eng.seal_local(1)
++        remote.append((wire,src_j))
++    prepared=[]
++    for wire,_ in remote:
++        info,parts=target._check(wire)
++        prepared.append((info,parts))
++        assert reference.ingest(wire)
++    # The producer's signed Journal is the authority; the aggregation method
++    # is fed only already authenticated/deduplicated records.
++    target._apply_checked_many(prepared)
++    x=torch.randn(3,10)
++    assert torch.allclose(m(x),base(x),atol=1e-5,rtol=1e-5)
++    assert ledger.stats()['ledger_groups']==2
++    assert ledger.stats()['fallback_bytes']==0
++    for _,journal in remote:journal.close()
++    j.close();ref_j.close()
++
++
++def test_bad_nonfinite_source_poisons_nothing_and_refuses_commit(tmp_path):
++    from patchlib.core import PatchError
++    source,m,a,ledger,base,b=build(tmp_path)
++    j=EventJournal(tmp_path/'j.sqlite','e'*64)
++    eng=ContinualElasticEngine(a,'alice','e'*64,j,unsafe=True)
++    x=torch.randn(2,10)
++    opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.01)
++    m(x).sum().backward();opt.step()
++    wire=eng._make_wire(1,1)
++    info,prepared=eng._check(wire)
++    # Integrity check for prepared-update values: no factor is committed on
++    # overflowing candidate, even if a prevalidated delta is mutated in RAM.
++    prepared.deltas[0].view(-1)[0]=float('inf')
++    with pytest.raises(PatchError,match='nonfinite'):
++        eng._apply_checked(info,prepared)
++    assert ledger.stats()['factor_bytes']==0
++    j.close()
++
++
++def test_cli_compatibility_gate():
++    from types import SimpleNamespace
++    from patchlib.cli import load_model
++    args=SimpleNamespace(streaming_base=True,streaming_lazy_write=True,
++       streaming_factor_ledger=True,streaming_page_cow=True,
++       generation_v2_trainer=False,initialization='pretrained')
++    with pytest.raises(ValueError,match='excludes'):
++        load_model(args,use_adapter=True)
++    # The bounded factor-ledger frozen source is now supported by v2 export;
++    # unrelated CLI/model validation remains responsible for the committee.
++
++
++def test_background_frozen_export_pins_exact_factor_epoch(tmp_path):
++    from patchlib.epoch_frozen_export_v58 import capture
++    source,m,a,ledger,_,_=build(tmp_path)
++    j=EventJournal(tmp_path/'j.sqlite','e'*64)
++    engine=ContinualElasticEngine(a,'alice','e'*64,j,unsafe=True)
++    x=torch.randn(4,10)
++    opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.01)
++    m(x).square().mean().backward();opt.step();opt.zero_grad(set_to_none=True)
++    engine.seal_local(1)
++    exact_at_cut=m(x).detach().clone()
++    frozen=capture(journal=j,model=m,adapter=a,max_factor_bytes=8*1024**2)
++    assert frozen.frozen_base_sources
++    # The trainer progresses after the frozen snapshot was pinned.
++    m(x).square().mean().backward();opt.step();opt.zero_grad(set_to_none=True)
++    engine.seal_local(1)
++    frozen.assert_immutable_base()
++    export_state_sharded(m,tmp_path/'frozen-objects',tmp_path/'frozen.fmanifest',
++        model_id='test',revision='v62',peer_id='alice',seq=1,
++        adapter=frozen.adapter,frozen_base_sources=frozen.frozen_base_sources,
++        max_state_bytes=2*1024**2)
++    restored=Toy()
++    restored_adapter=UniversalAdapter(restored,'test','v62',kind='loha',rank=3,target_scope='auto')
++    apply_sharded_effective_state(restored,restored_adapter,tmp_path/'frozen.fmanifest',
++         tmp_path/'frozen-objects',model_id='test',revision='v62',max_state_bytes=2*1024**2)
++    assert torch.allclose(restored(x),exact_at_cut,atol=2e-5,rtol=2e-5)
++    assert len(next(iter(ledger.sources.values())).entries)==2
++    j.close()
++
++
++def test_capture_rejects_factor_budget(tmp_path):
++    from patchlib.epoch_frozen_export_v58 import capture
++    from patchlib.core import PatchError
++    _,m,a,ledger,_,_=build(tmp_path)
++    j=EventJournal(tmp_path/'j.sqlite','e'*64)
++    eng=ContinualElasticEngine(a,'alice','e'*64,j,unsafe=True)
++    x=torch.randn(2,10);opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.01)
++    m(x).sum().backward();opt.step();eng.seal_local(1)
++    with pytest.raises(PatchError,match='budget'):
++        capture(journal=j,model=m,adapter=a,max_factor_bytes=10)
++    j.close()
++
++
++def test_signed_v2_frozen_export_preserves_virtual_cut(tmp_path):
++    from patchlib.epoch_frozen_export_v58 import capture
++    from patchlib.epoch_export_v57 import export_at_step_boundary,verify_receipt
++    from patchlib.identity import generate_keypair,signer_from_pem,verifier_from_pem
++    from patchlib.shards import _blob_path
++    _,m,a,ledger,_,_=build(tmp_path)
++    j=EventJournal(tmp_path/'j.sqlite','e'*64)
++    engine=ContinualElasticEngine(a,'alice','e'*64,j,unsafe=True)
++    x=torch.randn(3,10)
++    opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.01)
++    m(x).sum().backward();opt.step();opt.zero_grad(set_to_none=True)
++    engine.seal_local(1)
++    frozen=capture(journal=j,model=m,adapter=a,max_factor_bytes=2*1024**2)
++    expected=m(x).detach().clone()
++    m(x).sum().backward();opt.step();opt.zero_grad(set_to_none=True)
++    engine.seal_local(1)
++    private=tmp_path/'a.key';public=tmp_path/'a.pub'
++    generate_keypair(private,public)
++    proposal,pages,receipt=export_at_step_boundary(journal=j,model=m,adapter=a,
++       store=tmp_path/'signed-store',incoming=tmp_path/'signed-incoming',
++       room='test',epoch=1,parent='0'*64,replicas=['alice','bob'],
++       signer=signer_from_pem(private),peer='alice',
++       max_state_bytes=2*1024**2,shard_bytes=65536,frozen=frozen)
++    assert verify_receipt(receipt,proposal,
++        trusted={'alice':verifier_from_pem(public)},committee=['alice','bob'])
++    assert frozen.frontier=={'alice':1}
++    new=Toy()
++    new_adapter=UniversalAdapter(new,'test','v62',kind='loha',rank=3,target_scope='auto')
++    apply_sharded_effective_state(new,new_adapter,
++       tmp_path/'signed-incoming'/(proposal['manifest']+'.fmanifest'),
++       tmp_path/'signed-store',model_id='test',revision='v62',max_state_bytes=2*1024**2)
++    assert torch.allclose(new(x),expected,atol=2e-5,rtol=2e-5)
++    j.close()
++
++
++def test_linear_autograd_pins_virtual_revision_during_remote_append():
++    from patchlib.factor_ledger_v62 import FactorLedgerSource
++    from patchlib.core import FactorDelta
++    from patchlib.layer_offload import _FrozenDiskLinear, _FrozenDiskConv1D
++    torch.manual_seed(92)
++    base=torch.randn(5,7)
++    spec=FactorDelta((5,7),'lora',2,2)
++    src=FactorLedgerSource(base,spec,max_entries=8)
++    x=torch.randn(3,7,requires_grad=True)
++    out=_FrozenDiskLinear.apply(x,None,src,tuple(base.shape),base.dtype,None)
++    # Simulate a remote signed append between the forward and its backward.
++    now=[torch.randn_like(p)*.1 for p in spec.parts]
++    old=[torch.zeros_like(p) for p in spec.parts]
++    src.append(now,old)
++    out.sum().backward()
++    assert torch.allclose(x.grad,torch.ones((3,5))@base,atol=1e-5)
++    x2=torch.randn(2,5,requires_grad=True)
++    old_weight=src.rows(0,5).clone()
++    y=_FrozenDiskConv1D.apply(x2,None,src,tuple(base.shape),base.dtype,None)
++    src.append([2*v for v in now],old)
++    y.sum().backward()
++    assert torch.allclose(x2.grad,torch.ones((2,7))@old_weight.T,atol=1e-5)
++
++
++def test_very_wide_rows_validate_in_bounded_tiles(tmp_path):
++    class Wide(nn.Module):
++        def __init__(self):
++            super().__init__();self.proj=nn.Linear(8193,2,bias=False)
++        def forward(self,x):return self.proj(x)
++    m=Wide()
++    a=UniversalAdapter(m,'wide','base',kind='loha',rank=2,target_scope='all')
++    j=EventJournal(tmp_path/'wide.sqlite','e'*64)
++    engine=ContinualElasticEngine(a,'alice','e'*64,j,unsafe=True,block_elements=1024)
++    with torch.no_grad():
++        for group in a.groups:
++            for part in group.overlay.local.parts:
++                part.add_(.01)
++    wire=engine._make_wire(1,1)
++    info,prepared=engine._check(wire)
++    assert all(value is None for value in prepared.deltas)
++    assert engine.ingest(wire)
++    assert torch.isfinite(m.proj(torch.randn(1,8193))).all()
++    j.close()
+--- a/benchmarks/benchmark_v62_factor_ledger.py
++++ b/benchmarks/benchmark_v62_factor_ledger.py
+@@ -0,0 +1,66 @@
++"""Synthetic dense low-rank update: factor memory vs page COW disk cost.
++
++This is not an end-to-end training or 300B performance benchmark.
++"""
++import json, tempfile, time
++from pathlib import Path
++import torch
++from patchlib.core import FactorDelta
++from patchlib.factor_ledger_v62 import FactorLedgerSource
++from patchlib.paged_mutable_v61 import SparsePageStore
++
++
++def run(rows=2048,cols=2048,rank=8):
++    torch.set_num_threads(min(torch.get_num_threads(),4))
++    torch.manual_seed(621)
++    base=torch.zeros((rows,cols),dtype=torch.float32)
++    spec=FactorDelta((rows,cols),'loha',rank,rank)
++    now=[torch.randn_like(p)*.1 for p in spec.parts]
++    old=[torch.zeros_like(p) for p in spec.parts]
++    with tempfile.TemporaryDirectory() as tmp:
++        sparse=SparsePageStore(base,Path(tmp)/'pages',page_bytes=65536)
++        ledger=FactorLedgerSource(base,spec,max_entries=32)
++        t0=time.perf_counter()
++        ledger.append(now,old)
++        factor_write_ms=(time.perf_counter()-t0)*1000
++        # Prepare full dense update solely for the v61 control workload.
++        from patchlib.livefed import _delta_block
++        full=_delta_block(spec,now,0,rows)
++        t0=time.perf_counter()
++        for lo in range(0,rows,16):
++            hi=min(rows,lo+16)
++            sparse.write_rows(lo,full[lo:hi])
++        page_write_ms=(time.perf_counter()-t0)*1000
++        t0=time.perf_counter()
++        ledg_tile=ledger[3:67,0:cols]
++        factor_read_ms=(time.perf_counter()-t0)*1000
++        t0=time.perf_counter()
++        page_tile=sparse[3:67,0:cols]
++        page_read_ms=(time.perf_counter()-t0)*1000
++        initial_factor_bytes=ledger.stats()['factor_bytes']
++        err=(ledg_tile-page_tile).abs().max().item()
++        tile_scaling={'1':round(factor_read_ms,4)}
++        # Worst-case retained update history; all entries are read on each tile.
++        for count in (8,32):
++            for _ in range(count-len(ledger.entries)):
++                ledger.append(now,old)
++            t0=time.perf_counter()
++            _=ledger[3:67,0:cols]
++            tile_scaling[str(count)]=round((time.perf_counter()-t0)*1000,4)
++        report={
++          'kind':'synthetic-cpu-single-loha-event','rows':rows,'cols':cols,'rank':rank,
++          'base_bytes':base.numel()*base.element_size(),
++          'factor_ledger_bytes':initial_factor_bytes,
++          'page_cow_written_bytes':sparse.stats()['allocated_page_bytes'],
++          'factor_append_ms':round(factor_write_ms,4),
++          'page_cow_update_ms':round(page_write_ms,4),
++          'factor_tile_read_ms':round(factor_read_ms,4),
++          'page_tile_read_ms':round(page_read_ms,4),
++          'max_abs_tile_diff':err,
++          'factor_tile_read_scaling_ms':tile_scaling,
++          'note':'Control path receives already-computed dense update; not end-to-end validated event time. Inference tile time rises with retained event count.'
++        }
++        sparse.close()
++        return report
++
++if __name__=='__main__':print(json.dumps(run(),indent=2))

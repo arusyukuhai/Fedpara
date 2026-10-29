@@ -1,0 +1,14 @@
+{
+  "no_cache": {
+    "seconds_median": 0.008032466999793542,
+    "actor_forward_calls": 24,
+    "forward_input_tokens": 708
+  },
+  "cache": {
+    "seconds_median": 0.0073041329997067805,
+    "actor_forward_calls": 24,
+    "forward_input_tokens": 41
+  },
+  "sequential_hub_rows_seconds": 0.403078596999876,
+  "prefetch_hub_rows_seconds": 0.2221563929997501
+}

@@ -1,0 +1,368 @@
+--- a/patchlib/mixed_learning_v65.py
++++ b/patchlib/mixed_learning_v65.py
+@@ -49,10 +49,16 @@
+             'input_map':str(getattr(args,'input_map','')),
+             'reward_source':'ground-truth-reference-v1',
+             'task':'causal-lm'}
++    if getattr(args,'ppo_reward','token_match')=='hf_model':
++        from .reward_model_v67 import reward_spec
++        generated['version']='pt-sft-clipped-ppo-v67'
++        generated['reward_source']='external-hf-sequence-scorer-v1'
++        generated['reward_model']=reward_spec(args)
+     if (getattr(args,'critic_kind','mlp')!='mlp' or
+             int(getattr(args,'critic_hidden',32))!=32 or
+             float(getattr(args,'critic_lr',1e-3))!=.001):
+-        generated['version']='pt-sft-clipped-ppo-v66'
++        if generated['version']!='pt-sft-clipped-ppo-v67':
++            generated['version']='pt-sft-clipped-ppo-v66'
+         generated['critic']={'kind':getattr(args,'critic_kind','mlp'),
+                              'hidden':int(getattr(args,'critic_hidden',32)),
+                              'lr':float(getattr(args,'critic_lr',1e-3))}
+@@ -92,8 +98,13 @@
+         val=float(getattr(args,field,0))
+         if not math.isfinite(val) or val<0 or val>100:
+             raise MixedLearningError(f'{field} must be finite and in [0,100]')
+-    if getattr(args,'ppo_reward','token_match') not in ('token_match','exact'):
+-        raise MixedLearningError('PPO reward must be token_match or exact')
++    if getattr(args,'ppo_reward','token_match') not in ('token_match','exact','hf_model'):
++        raise MixedLearningError('PPO reward must be token_match, exact or hf_model')
++    if getattr(args,'ppo_reward','token_match')=='hf_model':
++        from .reward_model_v67 import reward_spec
++        reward_spec(args)
++        if getattr(args,'reward_model_device','cpu') not in ('cpu','cuda','mps'):
++            raise MixedLearningError('Invalid reward model device')
+     if getattr(args,'critic_kind','mlp') not in ('mlp','linear'):
+         raise MixedLearningError('critic_kind must be mlp or linear')
+     if type(getattr(args,'critic_hidden',32)) is not int or not 8<=getattr(args,'critic_hidden',32)<=512:
+@@ -216,6 +227,10 @@
+         self.tok=tokenizer
+         self.sft=JsonlCycle(args.sft_jsonl) if getattr(args,'sft_jsonl',None) else None
+         self.ppo=JsonlCycle(args.ppo_jsonl) if getattr(args,'ppo_jsonl',None) else None
++        self.reward_scorer=None
++        if self.ppo and getattr(args,'ppo_reward','token_match')=='hf_model':
++            from .reward_model_v67 import HFRewardScorer
++            self.reward_scorer=HFRewardScorer(args)
+         self.critic=None
+         self.critic_optim=None
+         self.cached=None
+@@ -260,10 +275,11 @@
+ 
+     def _new_rollout(self,model,device):
+         row=self.ppo.next()
+-        if not isinstance(row.get('prompt'),str) or not isinstance(row.get('reference'),str):
+-            raise MixedLearningError('PPO row requires prompt and reference strings (verifiable reward)')
++        is_hf=self.reward_scorer is not None
++        if not isinstance(row.get('prompt'),str) or (not is_hf and not isinstance(row.get('reference'),str)):
++            raise MixedLearningError('PPO row requires prompt and, for ground-truth reward, reference strings')
+         prompt=_tokens(self.tok,row['prompt'])
+-        reference=_tokens(self.tok,row['reference'])
++        reference=(_tokens(self.tok,row['reference']) if not is_hf else None)
+         if len(prompt)+2>self.args.max_length:
+             prompt=prompt[-(self.args.max_length-2):]
+         max_new=min(self.args.ppo_max_tokens,self.args.max_length-len(prompt))
+@@ -298,10 +314,16 @@
+                 old_values=self.critic(feat).detach()
+                 # Observable, deterministic reference-based reward. Never ask
+                 # this model to grade its own response.
+-                exact=int(chosen==reference)
+-                token_matches=sum(a==b for a,b in zip(chosen,reference))
+-                partial=token_matches/max(len(chosen),len(reference))
+-                reward=float(exact if getattr(self.args,'ppo_reward','token_match')=='exact' else partial)
++                if is_hf:
++                    completion=self.tok.decode(chosen,skip_special_tokens=True)
++                    if not completion:
++                        completion=self.tok.decode(chosen,skip_special_tokens=False)
++                    reward=self.reward_scorer.score(row['prompt'],completion)
++                else:
++                    exact=int(chosen==reference)
++                    token_matches=sum(a==b for a,b in zip(chosen,reference))
++                    partial=token_matches/max(len(chosen),len(reference))
++                    reward=float(exact if getattr(self.args,'ppo_reward','token_match')=='exact' else partial)
+                 T=len(chosen)
+                 rs=torch.zeros(T,device=device);rs[-1]=reward
+                 # Terminal-only verifiable reward; bootstrap V_T=0.
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -1026,8 +1026,17 @@
+     p.add_argument('--critic-lr',type=float,default=1e-3,help='Local PPO value critic learning rate')
+     p.add_argument('--critic-init',type=Path,help='Optional Kagami safetensors value-critic initial weights')
+     p.add_argument('--critic-state-dir',type=Path,help='Private local value-critic optimizer+weights directory')
+-    p.add_argument('--ppo-reward',choices=('token_match','exact'),default='token_match',
++    p.add_argument('--ppo-reward',choices=('token_match','exact','hf_model'),default='token_match',
+                    help='Verifiable ground-truth reward; never model-judged')
++    p.add_argument('--reward-model-id',default='',help='Hugging Face scalar sequence-classification Reward Model repo')
++    p.add_argument('--reward-model-revision',default='',help='Pinned 40-hex commit SHA of Reward Model')
++    p.add_argument('--reward-model-device',choices=('cpu','cuda','mps'),default='cpu',help='Inference device, independent from actor')
++    p.add_argument('--reward-model-loader',choices=('sequence_classification','auto_model'),default='sequence_classification')
++    p.add_argument('--reward-model-format',choices=('plain','chat'),default='plain')
++    p.add_argument('--reward-model-output',choices=('logits','score','end_scores','rewards'),default='logits')
++    p.add_argument('--reward-model-index',type=int,default=0,help='Reward column (index 0 for scalar)')
++    p.add_argument('--reward-model-scale',type=float,default=1.0)
++    p.add_argument('--reward-model-max-length',type=int,default=512)
+     p.add_argument('--steps', type=int, default=50)
+     p.add_argument('--batch-size', type=int, default=2)
+     p.add_argument('--max-length', type=int, default=128)
+--- a/patchlib/mix_gui_v66.py
++++ b/patchlib/mix_gui_v66.py
+@@ -14,15 +14,21 @@
+ FIELDS=('enabled','sft_jsonl','ppo_jsonl','pt_weight','sft_weight','ppo_weight',
+         'ppo_clip','ppo_kl_coef','ppo_value_coef','ppo_gamma','ppo_gae_lambda',
+         'ppo_max_tokens','ppo_reuse','ppo_reward','critic_kind','critic_hidden',
+-        'critic_lr','critic_init')
++        'critic_lr','critic_init','reward_model_id','reward_model_revision',
++        'reward_model_device','reward_model_loader','reward_model_output','reward_model_format','reward_model_index',
++        'reward_model_scale','reward_model_max_length')
+ DEFAULT={'enabled':False,'sft_jsonl':'','ppo_jsonl':'','pt_weight':1.,
+          'sft_weight':1.,'ppo_weight':.2,'ppo_clip':.2,'ppo_kl_coef':.02,
+          'ppo_value_coef':.5,'ppo_gamma':.99,'ppo_gae_lambda':.95,
+          'ppo_max_tokens':8,'ppo_reuse':2,'ppo_reward':'token_match',
+-         'critic_kind':'mlp','critic_hidden':32,'critic_lr':.001,'critic_init':''}
++         'critic_kind':'mlp','critic_hidden':32,'critic_lr':.001,'critic_init':'',
++         'reward_model_id':'','reward_model_revision':'','reward_model_device':'cpu',
++         'reward_model_loader':'sequence_classification',
++         'reward_model_output':'logits','reward_model_format':'plain','reward_model_index':0,
++         'reward_model_scale':1.0,'reward_model_max_length':512}
+ 
+ 
+-def _path(value, *, ext, role=None):
++def _path(value, *, ext, role=None, hf_reward=False):
+     if not isinstance(value,str) or len(value)>4096 or '\x00' in value:
+         raise ValueError('Expected a local dataset/critic file path')
+     if not value.strip():return ''
+@@ -39,7 +45,7 @@
+                     if len(line)>65536:raise ValueError('Dataset JSONL line exceeds 64KiB')
+                     obj=json.loads(line)
+                     if not isinstance(obj,dict):raise ValueError('Dataset row must be a JSON object')
+-                    required=('prompt','response') if role=='sft' else ('prompt','reference') if role=='ppo' else ()
++                    required=('prompt','response') if role=='sft' else (('prompt',) if hf_reward else ('prompt','reference')) if role=='ppo' else ()
+                     for name in required:
+                         if not isinstance(obj.get(name),str) or not obj[name] or len(obj[name])>16384:
+                             raise ValueError(f'{role} dataset must contain nonempty {name} text <=16Ki chars')
+@@ -59,18 +65,24 @@
+         return dict(DEFAULT)
+     if task!='causal-lm':raise ValueError('Simultaneous PT/SFT/PPO currently needs a causal LM')
+     for key in ('sft_jsonl','ppo_jsonl'):
+-        values[key]=_path(values[key],ext='.jsonl',role=key.removesuffix('_jsonl'))
++        values[key]=_path(values[key],ext='.jsonl',role=key.removesuffix('_jsonl'),
++                          hf_reward=(key=='ppo_jsonl' and values['ppo_reward']=='hf_model'))
+     values['critic_init']=_path(values['critic_init'],ext='.safetensors')
+     for key in ('pt_weight','sft_weight','ppo_weight','ppo_clip','ppo_kl_coef',
+-                'ppo_value_coef','ppo_gamma','ppo_gae_lambda','critic_lr'):
++                'ppo_value_coef','ppo_gamma','ppo_gae_lambda','critic_lr','reward_model_scale'):
+         raw=values[key]
+         if type(raw) not in (int,float) or not math.isfinite(float(raw)):
+             raise ValueError(key+' must be a finite number')
+         values[key]=float(raw)
+-    for key in ('critic_hidden','ppo_max_tokens','ppo_reuse'):
++    for key in ('critic_hidden','ppo_max_tokens','ppo_reuse','reward_model_index','reward_model_max_length'):
+         if type(values[key]) is not int:raise ValueError(key+' must be an integer')
+-    if values['critic_kind'] not in ('mlp','linear') or values['ppo_reward'] not in ('token_match','exact'):
++    if values['critic_kind'] not in ('mlp','linear') or values['ppo_reward'] not in ('token_match','exact','hf_model'):
+         raise ValueError('Unsupported critic or PPO reward type')
++    if values['ppo_reward']=='hf_model':
++        from .reward_model_v67 import reward_spec
++        reward_spec(SimpleNamespace(**values))
++        if values['reward_model_device'] not in ('cpu','cuda','mps'):
++            raise ValueError('Invalid Reward Model inference device')
+     if not (values['sft_jsonl'] or values['ppo_jsonl']):
+         if not allow_pt_only or values['pt_weight']<=0:
+             raise ValueError('Choose an SFT/PPO JSONL, or join an existing pinned mixed room as a PT-only peer')
+@@ -103,6 +115,17 @@
+             '--critic-hidden',str(values['critic_hidden']),
+             '--critic-lr',str(values['critic_lr']),
+             '--critic-state-dir',str(state_dir)]
++    if values['ppo_reward']=='hf_model':
++        for key,flag in (('reward_model_id','--reward-model-id'),
++                ('reward_model_revision','--reward-model-revision'),
++                ('reward_model_device','--reward-model-device'),
++                ('reward_model_loader','--reward-model-loader'),
++                ('reward_model_output','--reward-model-output'),
++                ('reward_model_format','--reward-model-format'),
++                ('reward_model_index','--reward-model-index'),
++                ('reward_model_scale','--reward-model-scale'),
++                ('reward_model_max_length','--reward-model-max-length')):
++            result.extend([flag,str(values[key])])
+     for key,flag in (('sft_jsonl','--sft-jsonl'),('ppo_jsonl','--ppo-jsonl'),
+                      ('critic_init','--critic-init')):
+         if values[key]:result.extend([flag,values[key]])
+--- a/patchlib/webview_controller.py
++++ b/patchlib/webview_controller.py
+@@ -912,6 +912,47 @@
+             if len(variants)>=64:break
+         return {'repo':repo,'revision':revision,'variants':variants,'available':bool(variants)}
+ 
++    def search_reward_models(self, payload):
++        """Metadata-only Hub discovery; never download or execute model code."""
++        if not isinstance(payload,dict):raise ValueError('Expected search object')
++        query=payload.get('query','')
++        if not isinstance(query,str) or not 1<=len(query.strip())<=100:
++            raise ValueError('Search query must contain 1..100 characters')
++        try:
++            from huggingface_hub import HfApi
++        except ImportError as exc:
++            raise RuntimeError('Install huggingface_hub for Reward Model search') from exc
++        hits=HfApi().list_models(search=query,sort='downloads',limit=15)
++        from .reward_model_v67 import _HF_REPO, _SHA
++        results=[]
++        for m in hits:
++            name=str(getattr(m,'id',''))
++            if _HF_REPO.fullmatch(name):
++                commit=str(getattr(m,'sha','') or '')
++                results.append({'id':name,'revision':commit if _SHA.fullmatch(commit) else '',
++                                'pipeline':str(getattr(m,'pipeline_tag','') or ''),
++                                'gated':bool(getattr(m,'gated',False))})
++        return {'models':results}
++
++    def inspect_reward_model(self, payload):
++        """Resolve a user's selected repo to an immutable pinned HF revision."""
++        if not isinstance(payload,dict):raise ValueError('Expected Reward Model object')
++        repo=payload.get('repo','')
++        from .reward_model_v67 import _HF_REPO, _SHA
++        if not isinstance(repo,str) or not _HF_REPO.fullmatch(repo):
++            raise ValueError('Expected organization/repo Hugging Face ID')
++        try:
++            from huggingface_hub import HfApi
++        except ImportError as exc:
++            raise RuntimeError('Install huggingface_hub for Reward Model inspection') from exc
++        m=HfApi().model_info(repo,files_metadata=False)
++        commit=str(getattr(m,'sha','') or '')
++        if not _SHA.fullmatch(commit):
++            raise ValueError('Hub did not provide a valid immutable commit SHA')
++        return {'id':repo,'revision':commit.lower(),
++                'pipeline':str(getattr(m,'pipeline_tag','') or ''),
++                'gated':bool(getattr(m,'gated',False))}
++
+     def search_datasets(self, payload):
+         """Bounded public HF Hub search, no arbitrary URL or remote Python."""
+         if not isinstance(payload,dict):raise ValueError('dataset search object required')
+--- a/patchlib/webview_gui.py
++++ b/patchlib/webview_gui.py
+@@ -125,6 +125,12 @@
+ 
+     def recommend_training(self, payload):
+         return self._controller.recommend_training(payload)
++
++    def search_reward_models(self, payload):
++        return self._controller.search_reward_models(payload)
++
++    def inspect_reward_model(self, payload):
++        return self._controller.inspect_reward_model(payload)
+ 
+     def search_datasets(self, payload):
+         return self._controller.search_datasets(payload)
+--- a/web/desktop_webview.js
++++ b/web/desktop_webview.js
+@@ -135,14 +135,15 @@
+ function get(id){return String($(id).value||'').trim();}
+ const routes=Object.freeze({defaults:'defaults',newRoom:'new_room',save:'save_room',join:'join_room',register:'register_room',
+   publicModels:'list_rooms',localModels:'local_models',select:'select_model',compat:'model_compatibility',
+-  mixedSettings:'mixed_settings',pickMixFile:'pick_training_file',device:'device_capabilities',datasets:'search_datasets',inspect:'inspect_dataset',plan:'recommend_training',code:'register_code',start:'start_training',
++  mixedSettings:'mixed_settings',pickMixFile:'pick_training_file',
++  rewardSearch:'search_reward_models',rewardInspect:'inspect_reward_model',device:'device_capabilities',datasets:'search_datasets',inspect:'inspect_dataset',plan:'recommend_training',code:'register_code',start:'start_training',
+   status:'training_status',history:'training_history',pause:'stop_training',resume:'resume_training',disconnect:'disconnect_training',
+   open:'open_storage',paths:'storage_paths',copy:'copy_logs',saveLog:'save_logs',eval:'evaluate',evalStatus:'eval_status',cancelEval:'cancel_eval',evalCheckpoints:'available_checkpoints',captureSnapshot:'request_eval_snapshot',snapshotStatus:'eval_snapshot_status'});
+ let bridgeWait;
+ function ready(){return !!window.pywebview?.api&&typeof window.pywebview.api.defaults==='function';}
+ async function waitBridge(){if(ready())return window.pywebview.api;if(bridgeWait)return bridgeWait;bridgeWait=new Promise((resolve,reject)=>{const started=Date.now();let timer=null;function check(){if(ready()){clearTimeout(timer);resolve(window.pywebview.api);return;}if(Date.now()-started>9000){reject(new Error(t('noBrowser')));return;}timer=setTimeout(check,110);}check();}).finally(()=>{bridgeWait=null;});return bridgeWait;}
+ async function api(action,payload={}){const name=routes[action];if(!name)throw Error('Unknown RPC route');const bridge=await waitBridge();if(typeof bridge[name]!=='function')throw Error('Missing Python RPC: '+name);
+-  const ms=(action==='datasets'||action==='inspect'||action==='plan'||action==='publicModels'||action==='join'||action==='select')?16500:(action==='eval'||action==='captureSnapshot')?45000:action==='status'?4500:10000;
++  const ms=(action==='datasets'||action==='inspect'||action==='plan'||action==='publicModels'||action==='join'||action==='select'||action==='rewardSearch'||action==='rewardInspect')?16500:(action==='eval'||action==='captureSnapshot')?45000:action==='status'?4500:10000;
+   let timer;try{return await Promise.race([Promise.resolve().then(()=>bridge[name](payload)),new Promise((_,reject)=>timer=setTimeout(()=>reject(Error('RPC timeout: '+action)),ms))]);}finally{clearTimeout(timer);}}
+ const safe=(title,call)=>async (...args)=>{try{return await call(...args);}catch(e){notify(title+': '+String(e.message||e),true);return null;}};
+ function create(tag,cls,text){const el=document.createElement(tag);if(cls)el.className=cls;if(text!==undefined)el.textContent=String(text);return el;}
+@@ -273,13 +274,18 @@
+   pt_weight:'mixPtWeight',sft_weight:'mixSftWeight',ppo_weight:'mixPpoWeight',
+   ppo_clip:'mixPpoClip',ppo_kl_coef:'mixPpoKl',ppo_value_coef:'mixValueCoef',
+   ppo_gamma:'mixGamma',ppo_gae_lambda:'mixGaeLambda',ppo_max_tokens:'mixPpoTokens',
+-  ppo_reuse:'mixPpoReuse',ppo_reward:'mixPpoReward',critic_kind:'mixCriticKind',
++  ppo_reuse:'mixPpoReuse',ppo_reward:'mixPpoReward',
++  reward_model_id:'mixRewardModelId',reward_model_revision:'mixRewardRevision',
++  reward_model_device:'mixRewardDevice',reward_model_loader:'mixRewardLoader',reward_model_output:'mixRewardOutput',reward_model_format:'mixRewardFormat',
++  reward_model_index:'mixRewardIndex',reward_model_scale:'mixRewardScale',
++  reward_model_max_length:'mixRewardMaxLength',critic_kind:'mixCriticKind',
+   critic_hidden:'mixCriticHidden',critic_lr:'mixCriticLr'};
+ const mixedNumeric=new Set(['pt_weight','sft_weight','ppo_weight','ppo_clip','ppo_kl_coef',
+   'ppo_value_coef','ppo_gamma','ppo_gae_lambda','ppo_max_tokens','ppo_reuse',
+-  'critic_hidden','critic_lr']);
+-const mixedInt=new Set(['ppo_max_tokens','ppo_reuse','critic_hidden']);
+-function syncMixed(){const on=get('mixEnabled')==='on';$('mixFields').hidden=!on;const k=get('mixCriticKind');$('mixCriticHidden').disabled=k==='linear';setText('mixPtDataset',sources.map(x=>x.repo+' ['+x.split+']').join(', ')||'No PT dataset');}
++  'critic_hidden','critic_lr','reward_model_index','reward_model_scale','reward_model_max_length']);
++const mixedInt=new Set(['ppo_max_tokens','ppo_reuse','critic_hidden','reward_model_index','reward_model_max_length']);
++function syncMixed(){const on=get('mixEnabled')==='on';$('mixFields').hidden=!on;const k=get('mixCriticKind');$('mixCriticHidden').disabled=k==='linear';
++  $('mixRewardFields').hidden=get('mixPpoReward')!=='hf_model';setText('mixPtDataset',sources.map(x=>x.repo+' ['+x.split+']').join(', ')||'No PT dataset');}
+ function mixedPayload(){
+  const enabled=get('mixEnabled')==='on';if(!enabled)return {enabled:false};
+  const data={enabled:true};
+@@ -298,7 +304,9 @@
+ function applyMixed(data){$('mixEnabled').value=data?.enabled?'on':'off';for(const [field,id] of Object.entries(mixedIds)){
+   const value=data?.[field];const defaults={pt_weight:1,sft_weight:1,ppo_weight:.2,ppo_clip:.2,
+     ppo_kl_coef:.02,ppo_value_coef:.5,ppo_gamma:.99,ppo_gae_lambda:.95,
+-    ppo_max_tokens:8,ppo_reuse:2,ppo_reward:'token_match',critic_kind:'mlp',critic_hidden:32,critic_lr:.001};
++    ppo_max_tokens:8,ppo_reuse:2,ppo_reward:'token_match',
++    reward_model_id:'',reward_model_revision:'',reward_model_device:'cpu',reward_model_loader:'sequence_classification',
++    reward_model_output:'logits',reward_model_format:'plain',reward_model_index:0,reward_model_scale:1,reward_model_max_length:512,critic_kind:'mlp',critic_hidden:32,critic_lr:.001};
+   $(id).value=value??defaults[field]??'';
+  }syncMixed();}
+ async function reloadMixed(room){
+@@ -313,12 +321,39 @@
+                      'ppo_gae_lambda','ppo_max_tokens','ppo_reuse','ppo_reward']){
+      if(p[key]!==undefined)data[key]=p[key];
+    }
++   if(p.reward_model){data.reward_model_id=p.reward_model.repo;data.reward_model_revision=p.reward_model.revision;
++     data.reward_model_output=p.reward_model.output;data.reward_model_loader=p.reward_model.loader;data.reward_model_format=p.reward_model.format;data.reward_model_index=p.reward_model.index;
++     data.reward_model_scale=p.reward_model.scale;data.reward_model_max_length=p.reward_model.max_length;
++     data.reward_model_device='cpu';}
+    if(p.critic){data.critic_kind=p.critic.kind;data.critic_hidden=p.critic.hidden;data.critic_lr=p.critic.lr;}
+  }
+  applyMixed(data);
+ }
+ $('mixEnabled').addEventListener('change',syncMixed);
+ $('mixCriticKind').addEventListener('change',syncMixed);
++$('mixPpoReward').addEventListener('change',syncMixed);
++$('mixRewardSearch').addEventListener('click',safe('Hugging Face Reward Models',async()=>{
++  const results=await api('rewardSearch',{query:get('mixRewardModelId')||'reward'});
++  const select=$('mixRewardSearchResults');select.replaceChildren(create('option',null,'Select a Hub model…'));
++  select.options[0].value='';
++  for(const item of (results.models||[])){
++    const option=create('option',null,item.id+(item.gated?' [gated]':''));
++    option.value=item.id;option.dataset.sha=item.revision||'';select.append(option);
++  }
++  if(select.options.length===1)throw Error('No matching Hugging Face models were found');
++}));
++$('mixRewardSearchResults').addEventListener('change',()=>{
++  const select=$('mixRewardSearchResults');const opt=select.selectedOptions[0];
++  if(!select.value)return;
++  $('mixRewardModelId').value=select.value;
++  if(opt.dataset.sha)$('mixRewardRevision').value=opt.dataset.sha;
++});
++$('mixRewardPin').addEventListener('click',safe('Reward Model revision',async()=>{
++  const found=await api('rewardInspect',{repo:get('mixRewardModelId')});
++  $('mixRewardRevision').value=found.revision;
++  notify('Pinned '+found.id+' @ '+found.revision.slice(0,12));
++}));
++
+ for(const [button,target,kind] of [['pickMixSft','mixSftPath','sft'],['pickMixPpo','mixPpoPath','ppo'],['pickMixCritic','mixCriticInit','critic']]){
+  $(button).addEventListener('click',safe('Browse',async()=>{const r=await api('pickMixFile',{kind});if(r.path)$(target).value=r.path;}));
+ }
+--- a/web/desktop_webview.html
++++ b/web/desktop_webview.html
+@@ -40,7 +40,18 @@
+     <div id="mixFields" hidden>
+       <div class="mixed-segment"><strong>01 · PRETRAINING</strong><p class="footnote">PT uses the immutable room's attached HF datasets. Create a new room to change them.</p><div class="mixed-info" id="mixPtDataset">—</div><label><span>PT loss weight</span><input id="mixPtWeight" type="number" min="0" max="100" step="0.1" value="1"></label></div>
+       <div class="mixed-segment"><strong>02 · SUPERVISED FINE-TUNING</strong><p class="footnote">Local JSONL: {"prompt":"...","response":"..."}. Paths are never broadcast to peers.</p><label><span>SFT dataset (.jsonl)</span><div class="mixed-path"><input id="mixSftPath" placeholder="/path/to/sft.jsonl" spellcheck="false"><button type="button" id="pickMixSft">Browse</button></div></label><label><span>SFT loss weight</span><input id="mixSftWeight" type="number" min="0" max="100" step="0.1" value="1"></label></div>
+-      <div class="mixed-segment"><strong>03 · PPO</strong><p class="footnote">Local JSONL: {"prompt":"...","reference":"..."}. Ground-truth scoring; no Self-Critic.</p><label><span>PPO dataset (.jsonl)</span><div class="mixed-path"><input id="mixPpoPath" placeholder="/path/to/ppo.jsonl" spellcheck="false"><button type="button" id="pickMixPpo">Browse</button></div></label><div class="fieldgrid"><label><span>PPO loss weight</span><input id="mixPpoWeight" type="number" min="0" max="100" step="0.1" value="0.2"></label><label><span>Reward</span><select id="mixPpoReward"><option value="token_match">Token match</option><option value="exact">Exact text tokens</option></select></label><label><span>Clip epsilon</span><input id="mixPpoClip" type="number" value="0.2" step="0.05" min="0.01" max="0.5"></label><label><span>KL coefficient</span><input id="mixPpoKl" type="number" value="0.02" step="0.01" min="0" max="10"></label><label><span>Max rollout tokens</span><input id="mixPpoTokens" type="number" value="8" min="1" max="128"></label><label><span>Rollout reuse</span><input id="mixPpoReuse" type="number" value="2" min="1" max="8"></label></div></div>
++      <div class="mixed-segment"><strong>03 · PPO</strong><p class="footnote">Local JSONL: {"prompt":"...","reference":"..."}. Ground-truth scoring; no Self-Critic.</p><label><span>PPO dataset (.jsonl)</span><div class="mixed-path"><input id="mixPpoPath" placeholder="/path/to/ppo.jsonl" spellcheck="false"><button type="button" id="pickMixPpo">Browse</button></div></label><div class="fieldgrid"><label><span>PPO loss weight</span><input id="mixPpoWeight" type="number" min="0" max="100" step="0.1" value="0.2"></label><label><span>Reward</span><select id="mixPpoReward"><option value="token_match">Token match</option><option value="exact">Exact text tokens</option><option value="hf_model">Hugging Face Reward Model</option></select></label><label><span>Clip epsilon</span><input id="mixPpoClip" type="number" value="0.2" step="0.05" min="0.01" max="0.5"></label><label><span>KL coefficient</span><input id="mixPpoKl" type="number" value="0.02" step="0.01" min="0" max="10"></label><label><span>Max rollout tokens</span><input id="mixPpoTokens" type="number" value="8" min="1" max="128"></label><label><span>Rollout reuse</span><input id="mixPpoReuse" type="number" value="2" min="1" max="8"></label></div></div>
++      <div class="mixed-segment" id="mixRewardFields" hidden><strong>HUGGING FACE · REWARD MODEL</strong>
++      <p class="footnote">External frozen scorer, not the PPO value Critic. Standard scalar sequence-classification heads; custom remote Python code is never executed. Use a fixed 40-character commit SHA so peers cannot silently load different checkpoints. PPO JSONL needs only {"prompt":"..."} in this mode.</p>
++      <div class="fieldgrid"><label class="wide"><span>HF model ID</span><div class="mixed-path"><input id="mixRewardModelId" placeholder="organization/reward-model" spellcheck="false"><button type="button" id="mixRewardSearch">Search Hub</button></div><select id="mixRewardSearchResults" aria-label="Hugging Face Reward Model search results"><option value="">Search to see models…</option></select></label>
++      <label class="wide"><span>Immutable revision (40-digit SHA)</span><div class="mixed-path"><input id="mixRewardRevision" placeholder="commit SHA (40 hex characters)" spellcheck="false"><button type="button" id="mixRewardPin">Pin current commit</button></div></label>
++      <label><span>Inference device</span><select id="mixRewardDevice"><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label>
++      <label><span>Loader</span><select id="mixRewardLoader"><option value="sequence_classification">Sequence classification scorer</option><option value="auto_model">Generic AutoModel (must expose scalar output)</option></select></label>
++      <label><span>Prompt format</span><select id="mixRewardFormat"><option value="plain">Plain prompt + completion</option><option value="chat">Tokenizer chat template</option></select></label>
++      <label><span>Score tensor field</span><select id="mixRewardOutput"><option value="logits">logits</option><option value="score">score</option><option value="end_scores">end_scores</option><option value="rewards">rewards</option></select></label>
++      <label><span>Score index</span><input id="mixRewardIndex" type="number" value="0" min="0" max="65535"></label>
++      <label><span>Reward multiplier</span><input id="mixRewardScale" type="number" value="1" min="0.001" max="100" step="0.1"></label>
++      <label><span>Max input tokens</span><input id="mixRewardMaxLength" type="number" value="512" min="16" max="8192"></label></div></div>
+       <div class="mixed-segment"><strong>04 · VALUE CRITIC</strong><p class="footnote">Separate local value estimator for PPO/GAE. This is not a reward judge or part of signed model updates.</p><div class="fieldgrid"><label><span>Architecture</span><select id="mixCriticKind"><option value="mlp">MLP (4 → hidden → 1)</option><option value="linear">Linear (4 → 1)</option></select></label><label><span>Hidden size</span><input id="mixCriticHidden" type="number" min="8" max="512" value="32"></label><label><span>Critic learning rate</span><input id="mixCriticLr" type="number" min="0.0000001" max="0.1" step="0.0001" value="0.001"></label><label><span>Value loss coefficient</span><input id="mixValueCoef" type="number" min="0" max="10" step="0.1" value="0.5"></label><label><span>Gamma</span><input id="mixGamma" type="number" min="0.01" max="1" step="0.01" value="0.99"></label><label><span>GAE lambda</span><input id="mixGaeLambda" type="number" min="0.01" max="1" step="0.01" value="0.95"></label></div><label><span>Optional initial Critic (.safetensors)</span><div class="mixed-path"><input id="mixCriticInit" placeholder="Local Kagami value-Critic checkpoint" spellcheck="false"><button type="button" id="pickMixCritic">Browse</button></div></label><p class="footnote">Critic weights and AdamW state are saved in the selected room's private local storage and reused after restart.</p></div>
+       <div id="mixedConfigStatus" class="footnote" role="status">These settings apply when launching a new worker; changing a room's pinned objective protocol requires a new room.</div>
+     </div>

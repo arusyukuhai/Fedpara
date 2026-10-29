@@ -1,0 +1,811 @@
+--- base/kagami-v60/patchlib/cli.py	2026-10-27 04:31:04.000000000 +0000
++++ kagami-v60/patchlib/cli.py	2026-10-27 04:46:53.509623202 +0000
+@@ -131,6 +131,11 @@
+         raise ValueError('initialization must be pretrained/random/config')
+     streaming=bool(getattr(args,'streaming_base',False))
+     lazy_write=bool(getattr(args,'streaming_lazy_write',False))
++    page_cow=bool(getattr(args,'streaming_page_cow',False))
++    if page_cow and not lazy_write:
++        raise ValueError('--streaming-page-cow requires --streaming-lazy-write')
++    if page_cow and getattr(args,'generation_v2_trainer',False):
++        raise ValueError('paged COW exporter is not yet certified for autonomous v2 generations')
+     if lazy_write and (not streaming or getattr(args,'cmd',None)!='train-elastic'
+                        or getattr(args,'mode','elastic')!='elastic'):
+         raise ValueError('--streaming-lazy-write requires --streaming-base and elastic train-elastic mode')
+@@ -313,12 +318,26 @@
+             # Recheck factor placements after custom CPU/GPU dispatch.
+             check_adapter_placement(adapter)
+     if lazy_write:
+-        from .lazy_mutable_weights_v60 import attach_lazy_mutable
+-        manager=attach_lazy_mutable(mdl,adapter,
+-            scratch_dir=getattr(args,'streaming_scratch_dir',None),
+-            copy_mib=getattr(args,'stream_chunk_mib',8),
+-            limit_gib=getattr(args,'stream_lazy_limit_gb',0))
++        if page_cow:
++            from .paged_mutable_v61 import attach_paged_mutable
++            manager=attach_paged_mutable(mdl,adapter,
++                scratch_dir=getattr(args,'streaming_scratch_dir',None),
++                page_kib=getattr(args,'stream_page_kib',64),
++                limit_gib=getattr(args,'stream_lazy_limit_gb',0))
++        else:
++            from .lazy_mutable_weights_v60 import attach_lazy_mutable
++            manager=attach_lazy_mutable(mdl,adapter,
++                scratch_dir=getattr(args,'streaming_scratch_dir',None),
++                copy_mib=getattr(args,'stream_chunk_mib',8),
++                limit_gib=getattr(args,'stream_lazy_limit_gb',0))
+         print('LAZY STREAM MUTABLE:',json.dumps(manager.stats()),flush=True)
++    expert_path=getattr(args,'streaming_expert_path',None)
++    if expert_path:
++        if not streaming:
++            raise ValueError('--streaming-expert-path requires --streaming-base')
++        from .expert_disk import install_streamed_experts
++        count=install_streamed_experts(mdl,expert_path)
++        print('STREAMED FROZEN EXPERTS:',count,expert_path,flush=True)
+     print('adapter:',json.dumps({**adapter.counts(),'layout':adapter.layout,
+                                    'resolved_revision':revision},indent=2))
+     return mdl,adapter
+@@ -846,6 +865,12 @@
+         help='Create HF model on meta and mmap local safetensors; CPU streaming execution only')
+     p.add_argument('--streaming-lazy-write',action='store_true',
+         help='Experimental train-elastic: no up-front full mutable base copy; materialize each modified tensor once into private scratch')
++    p.add_argument('--streaming-page-cow',action='store_true',
++        help='Experimental: retain only modified tensor pages on disk; no v2 auto epoch export')
++    p.add_argument('--stream-page-kib',type=int,default=64,choices=(4,16,64,256,1024),
++        help='Per-tensor sparse COW page size in KiB')
++    p.add_argument('--streaming-expert-path',
++        help='Expert ModuleList/Dict whose entirely frozen experts run on demand from CPU mappings')
+     p.add_argument('--stream-lazy-limit-gb',type=int,default=0,
+         help='Maximum lazy writable tensor scratch GiB (0=no hard cap; monitor disk usage)')
+     p.add_argument('--streaming-scratch-dir',type=Path,
+--- base/kagami-v60/patchlib/continual.py	2026-10-27 04:20:06.000000000 +0000
++++ kagami-v60/patchlib/continual.py	2026-10-27 04:45:19.495394940 +0000
+@@ -22,6 +22,7 @@
+ from .livefed import _delta_block
+ from .numerics import squared_l2
+ from .lazy_mutable_weights_v60 import prepare_base_group
++from .paged_mutable_v61 import paged_destination
+ 
+ PROTOCOL = 'fedpara-continual-elastic-fedsum-relora-mixed-async-v6'
+ 
+@@ -180,7 +181,7 @@
+                     previous = [t.to(original.device, dtype=torch.float32) for t in b]
+                 for lo in range(0, n0, rows):
+                     end = min(lo + rows, n0)
+-                    dest = original[lo:end] if group.shape else original
++                    dest = paged_destination(self.adapter,group,lo,end,original)
+                     if pending and dest.device != pending_device:
+                         flush()
+                     if device_delta is not None:
+@@ -270,7 +271,7 @@
+                         sources.append(('factor',(a,b)))
+                 for lo in range(0,n0,rows):
+                     end=min(lo+rows,n0)
+-                    dest=original[lo:end] if group.shape else original
++                    dest=paged_destination(self.adapter,group,lo,end,original)
+                     if pending and dest.device!=pending_device:
+                         flush()
+                     combined=None
+--- base/kagami-v60/patchlib/expert_disk.py	2026-10-25 07:31:32.000000000 +0000
++++ kagami-v60/patchlib/expert_disk.py	2026-10-27 04:48:42.542883490 +0000
+@@ -110,3 +110,65 @@
+         expert=experts[key]
+         experts[key]=DiskExpertProxy(expert,directory,identifier=f'{expert_path}:{key}')
+     return len(keys)
++
++
++class StreamedFrozenExpert(nn.Module):
++    """Per-call Expert loading from existing immutable CPU mappings.
++
++    Keeps *no second expert archive*. Loading on GPU occurs for just the
++    invoked expert, and backward recomputes it, including input gradients.
++    Expert's own weights and factors are frozen; non-expert model/router can
++    still train. This does not support packed MoE or training expert factors.
++    """
++    def __init__(self, expert:nn.Module):
++        super().__init__()
++        if any(p.requires_grad for p in expert.parameters()):
++            raise ValueError('streamed expert contains trainable parameters; refuse silent gradient loss')
++        if any(p.device.type!='cpu' for p in expert.parameters()):
++            raise ValueError('streamed expert requires mapped CPU base')
++        self.expert=expert
++
++    def _load(self,device):
++        # CPU branch leaves mmapped views intact. GPU branch loads the selected
++        # expert only. Avoid retaining loaded device tensors between calls.
++        values={}
++        for n,t in list(self.expert.named_parameters())+list(self.expert.named_buffers()):
++            if t.device.type!='cpu':raise RuntimeError('streamed expert mapping moved off CPU')
++            values[n]=t.detach().to(device=device)
++        return values
++
++    def forward(self,x):
++        # Checkpointed recomputation must reproduce forward exactly. Training
++        # dropout would resample a mask; training BatchNorm mutates buffers.
++        if any(m.training and isinstance(m,(nn.modules.dropout._DropoutNd,
++                         nn.modules.batchnorm._BatchNorm))
++               for m in self.expert.modules()):
++            raise RuntimeError('stateful/stochastic frozen Expert training is unsupported')
++        if torch.is_grad_enabled() and x.requires_grad:
++            return _ExpertCall.apply(x,self)
++        with torch.no_grad():
++            result=functional_call(self.expert,self._load(x.device),(x,),strict=False)
++        if not isinstance(result,torch.Tensor):raise TypeError('streamed expert must return tensor')
++        return result
++
++
++def install_streamed_experts(model:nn.Module, path:str, *, indices=None):
++    """Explicit unpacked Expert modules only; no changes to signed model layout."""
++    modules=model.get_submodule(path)
++    if not isinstance(modules,(nn.ModuleList,nn.ModuleDict)):
++        raise ValueError('streamed experts require ModuleList or ModuleDict')
++    keys=list(range(len(modules))) if isinstance(modules,nn.ModuleList) else list(modules.keys())
++    if indices is not None:
++        wanted=set(indices)
++        if not wanted.issubset(set(keys)):raise ValueError('unknown expert identifiers')
++        keys=[k for k in keys if k in wanted]
++    # Prevalidate everything so an incompatible expert cannot cause partial install.
++    for key in keys:
++        expert=modules[key]
++        if any(p.requires_grad or p.device.type!='cpu' for p in expert.parameters()):
++            raise ValueError('streamed expert must have immutable CPU tensors and no trainable factors')
++        if any(b.device.type!='cpu' for b in expert.buffers()):
++            raise ValueError('streamed expert buffers must be on CPU')
++    for key in keys:
++        modules[key]=StreamedFrozenExpert(modules[key])
++    return len(keys)
+--- base/kagami-v60/patchlib/layer_offload.py	2026-10-27 04:25:04.000000000 +0000
++++ kagami-v60/patchlib/layer_offload.py	2026-10-27 04:45:19.495605903 +0000
+@@ -22,6 +22,10 @@
+ 
+ 
+ def _mapping(path, shape, dtype, device):
++    if getattr(path,'_fedpara_is_paged',False):
++        if torch.device(device).type!='cpu':
++            raise RuntimeError('paged virtual tensor must execute through bounded tiling')
++        return path
+     if isinstance(path,torch.Tensor):
+         value=path
+     else:
+@@ -82,6 +86,7 @@
+ 
+     def weight(self,path,shape,dtype,device,*, compute_dtype=None):
+         device=torch.device(device)
++        if getattr(path,'_fedpara_is_paged',False):return None
+         if device.type=='cpu':return None
+         target_dtype=compute_dtype or dtype
+         size=math.prod(shape)*target_dtype.itemsize
+@@ -219,8 +224,11 @@
+     source=module._fedpara_disk_source
+     cpu_ids=ids.to('cpu') if ids.device.type!='cpu' else ids
+     base=_mapping(source,module._fedpara_disk_shape,module._fedpara_disk_dtype,'cpu')
+-    y=F.embedding(cpu_ids,base,padding_idx=module.padding_idx,
+-                  scale_grad_by_freq=False,sparse=False).to(ids.device)
++    if getattr(base,'_fedpara_is_paged',False):
++        y=base.gather_rows(cpu_ids).to(ids.device)
++    else:
++        y=F.embedding(cpu_ids,base,padding_idx=module.padding_idx,
++                      scale_grad_by_freq=False,sparse=False).to(ids.device)
+     overlay=getattr(module,'_fedpara_disk_overlay',None)
+     if overlay is not None:
+         residual=_embedding_residual(ids,overlay.local)
+@@ -275,7 +283,7 @@
+                 if cache is not None else None)
+         if weight is None:
+             weight=_mapping(source,shape,dtype,'cpu')
+-        if weight.device==x.device and weight.dtype==x.dtype:
++        if not getattr(weight,'_fedpara_is_paged',False) and weight.device==x.device and weight.dtype==x.dtype:
+             return F.linear(x,weight.T,bias.to(x.device,dtype=x.dtype))
+         tile=cache.tile_bytes if cache is not None else 16*1024**2
+         return _tiled_linear_forward(x,weight.T,bias,x.device,tile)
+@@ -288,7 +296,7 @@
+             weight=(cache.weight(ctx.source,ctx.shape,ctx.dtype,grad.device,
+                     compute_dtype=grad.dtype) if cache is not None else None)
+             if weight is None:weight=_mapping(ctx.source,ctx.shape,ctx.dtype,'cpu')
+-            if weight.device==grad.device and weight.dtype==grad.dtype:
++            if not getattr(weight,'_fedpara_is_paged',False) and weight.device==grad.device and weight.dtype==grad.dtype:
+                 gx=grad @ weight.T
+             else:
+                 gx=_tiled_linear_backward(grad,weight.T,grad.device,
+--- base/kagami-v60/patchlib/lazy_mutable_weights_v60.py	2026-10-27 04:33:30.000000000 +0000
++++ kagami-v60/patchlib/lazy_mutable_weights_v60.py	2026-10-27 04:45:19.495672171 +0000
+@@ -162,5 +162,7 @@
+ def materialize_all(adapter):
+     manager=getattr(adapter.model,'_fedpara_lazy_mutable_weights',None)
+     if manager is not None:
++        if hasattr(manager,"materialize_all"):
++            return manager.materialize_all(adapter)
+         for group in adapter.groups:
+             manager.materialize_group(group)
+--- base/kagami-v60/patchlib/shards.py	2026-10-27 04:21:04.000000000 +0000
++++ kagami-v60/patchlib/shards.py	2026-10-27 04:53:27.324172884 +0000
+@@ -193,6 +193,12 @@
+     CUDA tensors are moved to CPU in individually bounded blocks.
+     """
+     import torch
++    # A sparse page COW engine deliberately leaves the raw nn.Parameter at
++    # immutable genesis values. Exporting it without materializing would
++    # silently certify INCORRECT weights, so require an explicit full export.
++    manager=getattr(model,'_fedpara_lazy_mutable_weights',None)
++    if manager is not None and getattr(manager,'stores',None):
++        raise PatchError('paged COW needs explicit manager.materialize_all(adapter) before full-state export')
+     if type(shard_bytes) is not int or not MIN_SHARD_BYTES <= shard_bytes <= MAX_SHARD_BYTES:
+         raise PatchError('invalid shard_bytes')
+     if not isinstance(model_id,str) or not model_id or not isinstance(revision,str) or not revision:
+@@ -421,6 +427,9 @@
+     Does not construct a model or offload its base weights; the model still
+     needs adequate CPU/device memory (or an external offload-capable backend).
+     """
++    manager=getattr(model,'_fedpara_lazy_mutable_weights',None)
++    if manager is not None and getattr(manager,'stores',None):
++        raise PatchError('cannot import into a virtual page COW base; materialize all first')
+     meta=read_manifest(manifest,max_state_bytes=max_state_bytes)
+     if (meta['model_id'],meta['revision'])!=(model_id,revision):
+         raise PatchError('sharded snapshot model identity/revision mismatch')
+
+--- /dev/null
++++ b/patchlib/paged_mutable_v61.py
++"""Experimental disk sparse-page overlay for signed, out-of-core FedSum bases.
++
++The original CPU safetensors mapping is immutable. Each changed PAGE is held in
++an epoch-private sparse file, indexed by an in-process page set. Scratch is
++NEVER trusted on restart; signed EventJournal replay recreates it. This is a
++bounded-I/O mechanism, not a compression guarantee for dense LoHA changes.
++
++All writes must arrive through ContinualElasticEngine's signed update gate.
++The overlay MUST be materialized before legacy snapshot/whole-model export.
++"""
++from __future__ import annotations
++import hashlib
++import math
++from collections import OrderedDict
++import os
++import threading
++from pathlib import Path
++
++import torch
++
++from .lazy_mutable_weights_v60 import LazyMutableWeights, LazyWeightError
++
++
++class SparsePageStore:
++    """Writable sparse-page virtual 2-D tensor with immutable mapped backing."""
++    _fedpara_is_paged=True
++
++    def __init__(self, base, dest:Path, *, page_bytes=65536, limit_callback=None, on_fault=None):
++        if base.ndim!=2 or base.device.type!='cpu' or not base.is_contiguous():
++            raise LazyWeightError('page COW supports contiguous CPU matrix only')
++        if not base.is_floating_point() or base.element_size() not in (2,4,8):
++            raise LazyWeightError('page COW requires floating numeric matrix')
++        if page_bytes < 4096 or page_bytes > 4*1024*1024 or page_bytes%base.element_size():
++            raise ValueError('invalid COW page size')
++        self.base=base.detach()
++        self.shape=tuple(base.shape)
++        self.dtype=base.dtype
++        self.device=torch.device('cpu')
++        self.page_bytes=page_bytes
++        self.page_elems=page_bytes//base.element_size()
++        self.n=base.numel()
++        self.path=Path(dest)
++        self.lock=threading.RLock()
++        self.pages=set()
++        self.limit_callback=limit_callback
++        self.on_fault=on_fault
++        self.fd=os.open(self.path,os.O_RDWR|os.O_CREAT|os.O_EXCL,0o600)
++        self.closed=False
++        self.poisoned=False
++
++    def close(self):
++        with self.lock:
++            if not self.closed:os.close(self.fd);self.closed=True
++
++    def _healthy(self):
++        if self.closed or self.poisoned:
++            raise LazyWeightError("paged COW store closed or poisoned; clean signed-journal replay required")
++
++    def _bounds(self,page):
++        a=page*self.page_elems
++        return a,min(self.n,a+self.page_elems)
++
++    def _page(self,page):
++        a,b=self._bounds(page)
++        if page not in self.pages:
++            return self.base.reshape(-1)[a:b].clone()
++        length=(b-a)*self.base.element_size()
++        data=os.pread(self.fd,length,a*self.base.element_size())
++        if len(data)!=length:raise LazyWeightError('short COW page read')
++        # clone: never allow caller to mutate the returned bytes or original base.
++        return torch.frombuffer(bytearray(data),dtype=self.dtype).clone()
++
++    def _read_flat(self,a,b):
++        values=self.base.reshape(-1)[a:b].clone()
++        for page in range(a//self.page_elems,(b-1)//self.page_elems+1):
++            if page not in self.pages:continue
++            pa,pb=self._bounds(page)
++            left=max(a,pa);right=min(b,pb)
++            values[left-a:right-a].copy_(self._page(page)[left-pa:right-pa])
++        return values
++
++    def rows(self,lo,hi):
++        if not 0<=lo<=hi<=self.shape[0]:raise IndexError('bad COW row range')
++        with self.lock:
++            self._healthy()
++            a=lo*self.shape[1];b=hi*self.shape[1]
++            return self._read_flat(a,b).view(hi-lo,self.shape[1])
++
++    def tile(self,rs,cs):
++        if not isinstance(rs,slice) or not isinstance(cs,slice):
++            raise TypeError('paged source permits only bounded 2D slice tiles')
++        lo,hi,step=rs.indices(self.shape[0]);l2,h2,step2=cs.indices(self.shape[1])
++        if step!=1 or step2!=1:raise ValueError('paged source requires unit stride')
++        with self.lock:
++            self._healthy()
++            # read exactly requested columns, never widen to entire long row
++            out=self.base[lo:hi,l2:h2].clone()
++            if not self.pages:return out
++            # Tiny bounded LRU prevents rereading the same on-disk page
++            # once per row when a page spans several narrow rows.
++            cache=OrderedDict()
++            for i,r in enumerate(range(lo,hi)):
++                a=r*self.shape[1]+l2;b=r*self.shape[1]+h2
++                for page in range(a//self.page_elems,(b-1)//self.page_elems+1) if b>a else ():
++                    if page not in self.pages:continue
++                    pa,pb=self._bounds(page)
++                    left=max(a,pa);right=min(b,pb)
++                    if page in cache:
++                        cached=cache[page];cache.move_to_end(page)
++                    else:
++                        cached=self._page(page);cache[page]=cached
++                        if len(cache)>16:cache.popitem(last=False)
++                    out[i,left-a:right-a].copy_(cached[left-pa:right-pa])
++            return out
++
++    def __getitem__(self,item):
++        if not isinstance(item,tuple) or len(item)!=2:
++            raise TypeError('paged source requires 2D tile')
++        return self.tile(*item)
++
++    @property
++    def T(self):return TransposedPages(self)
++
++    def gather_rows(self,idx):
++        cpu=idx.to(device='cpu',dtype=torch.long)
++        if cpu.numel() and ((cpu<0).any() or (cpu>=self.shape[0]).any()):
++            raise IndexError('embedding index outside COW source')
++        unique,inverse=torch.unique(cpu.reshape(-1),sorted=True,return_inverse=True)
++        result=torch.empty((len(unique),self.shape[1]),dtype=self.dtype)
++        with self.lock:
++            self._healthy()
++            for n,row in enumerate(unique.tolist()):
++                result[n].copy_(self._read_flat(row*self.shape[1],(row+1)*self.shape[1]))
++        return result[inverse].view(*idx.shape,self.shape[1])
++
++    def write_rows(self,lo,values):
++        """Called under signed gate. Fail closed on *any* partial update error."""
++        try:
++            return self._write_rows(lo,values)
++        except BaseException:
++            self.poisoned=True
++            if self.on_fault is not None:self.on_fault()
++            raise
++
++    def _write_rows(self,lo,values):
++        if values.device.type!='cpu' or values.dtype!=self.dtype:
++            values=values.to(device='cpu',dtype=self.dtype)
++        if values.ndim!=2 or values.shape[1]!=self.shape[1]:
++            raise LazyWeightError('COW update shape mismatch')
++        hi=lo+values.shape[0]
++        if not 0<=lo<=hi<=self.shape[0]:raise LazyWeightError('COW update range')
++        if not torch.isfinite(values).all():raise LazyWeightError('nonfinite COW values')
++        with self.lock:
++            self._healthy()
++            a=lo*self.shape[1];b=hi*self.shape[1]
++            newflat=values.contiguous().view(-1)
++            # Validate disk capacity for ALL new pages before writing any page.
++            page_ids=list(range(a//self.page_elems,(b-1)//self.page_elems+1)) if b>a else []
++            new_pages=[p for p in page_ids if p not in self.pages]
++            if self.limit_callback:self.limit_callback(len(new_pages)*self.page_bytes)
++            for page in page_ids:
++                pa,pb=self._bounds(page)
++                l=max(a,pa);r=min(b,pb)
++                old=self._page(page)
++                replacement=newflat[l-a:r-a]
++                # Deltas can be sparse: do not allocate untouched pages.
++                if torch.equal(old[l-pa:r-pa],replacement):continue
++                old[l-pa:r-pa].copy_(replacement)
++                offset=pa*self.base.element_size()
++                data=old.contiguous().view(torch.uint8).numpy().tobytes()
++                if page not in self.pages and hasattr(os,'posix_fallocate'):
++                    # Disk-full is an exception rather than mmap SIGBUS.
++                    try:os.posix_fallocate(self.fd,offset,len(data))
++                    except OSError as exc:
++                        import errno
++                        if exc.errno not in (errno.EOPNOTSUPP,errno.ENOSYS,errno.EINVAL):raise
++                if os.pwrite(self.fd,data,offset)!=len(data):
++                    raise LazyWeightError('short COW page write')
++                if page not in self.pages:
++                    self.pages.add(page)
++                    if self.limit_callback:self.limit_callback(-len(data))
++
++    def stats(self):
++        return {'changed_pages':len(self.pages),
++                'allocated_page_bytes':sum((self._bounds(i)[1]-self._bounds(i)[0])*self.base.element_size()
++                                          for i in self.pages)}
++
++
++class TransposedPages:
++    _fedpara_is_paged=True
++    def __init__(self,source):
++        self.source=source;self.shape=(source.shape[1],source.shape[0]);self.dtype=source.dtype
++    def __getitem__(self,index):
++        return self.source[index[1],index[0]].T.contiguous()
++
++
++class PageDestination:
++    device=torch.device('cpu')
++    def __init__(self,store,lo,hi):
++        self.store=store;self.lo=lo;self.hi=hi;self.dtype=store.dtype
++    def float(self):return self.store.rows(self.lo,self.hi).float()
++    def copy_(self,value):self.store.write_rows(self.lo,value)
++
++
++class PagedMutableWeights:
++    """Fallback to v60 for unsupported groups, safely page eligible disk bases."""
++    def __init__(self,model,adapter,*,scratch_dir=None,page_kib=64,limit_gib=0):
++        self.model=model
++        self.fallback=LazyMutableWeights(model,scratch_dir=scratch_dir,limit_gib=limit_gib)
++        self.directory=self.fallback.directory
++        self.stores={}
++        if page_kib not in (4,16,64,256,1024):
++            raise ValueError("page size must be 4,16,64,256,1024 KiB")
++        self.page_bytes=page_kib*1024
++        self.limit_bytes=int(limit_gib*1024**3)
++        self._reserved=0
++        self.poisoned=False
++
++    def _mark_poison(self):
++        self.poisoned=True
++
++    def _healthy(self):
++        if self.poisoned:
++            raise LazyWeightError('paged COW manager poisoned; restart from signed journal')
++
++    def _fallback_group(self,group):
++        parent,sep,attr=group.aliases[0].rpartition('.')
++        module=self.model.get_submodule(parent) if sep else self.model
++        original=module.parametrizations[attr].original
++        added=original.numel()*original.element_size()
++        if self.limit_bytes and self._reserved+self.fallback.used_bytes+added>self.limit_bytes:
++            raise LazyWeightError('COW fallback would exceed combined disk quota')
++        return self.fallback.materialize_group(group)
++
++    def _quota(self,amount):
++        if amount>0 and self.limit_bytes and self._reserved+amount+self.fallback.used_bytes>self.limit_bytes:
++            raise LazyWeightError('paged COW capacity exceeds disk quota')
++        if amount<0:self._reserved+=(-amount)
++
++    def materialize_group(self,group):
++        self._healthy()
++        if group.canonical in self.stores:
++            self.stores[group.canonical]._healthy()
++            return False
++        if group.canonical in self.fallback.materialized:return False
++        modules=[]
++        for alias in group.aliases:
++            parent,sep,leaf=alias.rpartition('.')
++            module=self.model.get_submodule(parent) if sep else self.model
++            # Existing offload kernels must consume the virtual source. Never
++            # expose stale original tensors to a non-intercepted forward.
++            if not hasattr(module,'_fedpara_disk_source'):
++                return self._fallback_group(group)
++            modules.append(module)
++        parent,sep,attr=group.aliases[0].rpartition('.')
++        orig=(self.model.get_submodule(parent) if sep else self.model).parametrizations[attr].original
++        if orig.ndim!=2 or orig.device.type!='cpu' or not orig.is_contiguous():
++            return self._fallback_group(group)
++        digest=hashlib.sha256(group.canonical.encode()).hexdigest()
++        store=SparsePageStore(orig,self.directory/(digest+'.pages'),page_bytes=self.page_bytes,
++                              limit_callback=self._quota,on_fault=self._mark_poison)
++        self.stores[group.canonical]=store
++        for mod in modules:
++            cache=getattr(mod,'_fedpara_disk_cache',None)
++            if cache is not None:cache.invalidate()
++            mod._fedpara_disk_source=store
++            mod._fedpara_disk_path='<epoch-private-sparse-pages>'
++        return True
++
++    def destination(self,group,lo,hi,original):
++        self._healthy()
++        store=self.stores.get(group.canonical)
++        if store is not None:return PageDestination(store,lo,hi)
++        return original[lo:hi]
++
++    def materialize_all(self,adapter):
++        self._healthy()
++        # Legacy exporters need ordinary effective torch.Tensor Parameters.
++        # This operation is explicitly O(model size); don't do it each event.
++        for group in adapter.groups:
++            store=self.stores.get(group.canonical)
++            if store is not None:store._healthy()
++            if store is None:
++                self._fallback_group(group)
++                continue
++            # The source has not been modified, so v60's immutable copy is safe
++            self._fallback_group(group)
++            parent,_,attr=group.aliases[0].rpartition('.')
++            orig=self.model.get_submodule(parent).parametrizations[attr].original
++            flat=orig.data.reshape(-1)
++            with torch.no_grad():
++                for i in sorted(store.pages):
++                    a,b=store._bounds(i)
++                    flat[a:b].copy_(store._page(i))
++            store.close()
++            self.stores.pop(group.canonical,None)
++
++    def stats(self):
++        return {'changed_tensors':len(self.stores),
++                'allocated_page_bytes':sum(s.stats()['allocated_page_bytes'] for s in self.stores.values()),
++                'fallback_bytes':self.fallback.used_bytes,'scratch':str(self.directory)}
++
++
++def attach_paged_mutable(model,adapter,*,scratch_dir=None,page_kib=64,limit_gib=0):
++    if getattr(model,'_fedpara_streaming_base_info',{}).get('mode')!='read-only-mmap':
++        raise LazyWeightError('paged COW requires immutable safetensors genesis')
++    manager=PagedMutableWeights(model,adapter,scratch_dir=scratch_dir,page_kib=page_kib,limit_gib=limit_gib)
++    object.__setattr__(model,'_fedpara_lazy_mutable_weights',manager)
++    def forbid_stale_full_state(module,prefix,keep_vars):
++        if manager.stores:
++            raise LazyWeightError('paged COW base is virtual: materialize all before torch state_dict')
++    # A direct torch.save(model.state_dict()) would otherwise export stale
++    # immutable originals despite current, signed virtual page updates.
++    model.register_state_dict_pre_hook(forbid_stale_full_state)
++    return manager
++
++
++def paged_destination(adapter,group,lo,hi,original):
++    manager=getattr(adapter.model,'_fedpara_lazy_mutable_weights',None)
++    if manager is not None and hasattr(manager,'destination'):
++        return manager.destination(group,lo,hi,original)
++    return original[lo:hi] if group.shape else original
+
+--- /dev/null
++++ b/tests/test_paged_mutable_v61.py
++"""v61: sparse page COW, signed updates, frozen MoE input gradients."""
++import hashlib
++from pathlib import Path
++import pytest
++import torch
++from torch import nn
++from safetensors.torch import save_file
++from patchlib.core import UniversalAdapter
++from patchlib.continual import ContinualElasticEngine
++from patchlib.elastic import EventJournal
++from patchlib.streaming_base import materialize_meta_from_safetensors
++from patchlib.layer_offload import install_disk_linear_offload
++from patchlib.paged_mutable_v61 import attach_paged_mutable, SparsePageStore, LazyWeightError
++from patchlib.expert_disk import StreamedFrozenExpert, install_streamed_experts
++
++
++class Toy(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.one=nn.Linear(10,8)
++        self.two=nn.Linear(8,5)
++    def forward(self,x):return self.two(torch.tanh(self.one(x)))
++
++
++def _setup(tmp_path):
++    torch.manual_seed(91)
++    reference=Toy()
++    root=tmp_path/'source';root.mkdir()
++    save_file({k:v.detach().clone().contiguous() for k,v in reference.state_dict().items()},
++              str(root/'model.safetensors'))
++    with torch.device('meta'):model=Toy()
++    materialize_meta_from_safetensors(model,root,writable=False)
++    adapter=UniversalAdapter(model,'p','base',kind='loha',rank=3,target_scope='auto')
++    install_disk_linear_offload(model,adapter,tmp_path/'offload',min_weight_mib=0.)
++    manager=attach_paged_mutable(model,adapter,scratch_dir=tmp_path/'scratch',page_kib=4)
++    return root,model,adapter,manager
++
++
++def test_sparse_page_unchanged_reads_and_sparse_edits(tmp_path):
++    base=torch.arange(10_000,dtype=torch.float32).view(100,100)
++    store=SparsePageStore(base,tmp_path/'pages',page_bytes=4096)
++    assert torch.equal(store[1:3,5:9],base[1:3,5:9])
++    assert store.stats()['allocated_page_bytes']==0
++    rows=store.rows(1,2)
++    rows[0,7]+=9
++    store.write_rows(1,rows)
++    assert store.stats()['changed_pages']==1
++    assert store[1:2,7:8][0,0]==base[1,7]+9
++    assert store[90:91,90:91][0,0]==base[90,90]
++    assert base[1,7]==107  # source unchanged
++    assert torch.equal(store.T[5:9,1:3],store[1:3,5:9].T)
++    assert torch.equal(store.gather_rows(torch.tensor([1,4,1]))[0],store.rows(1,2)[0])
++    store.close()
++
++
++def test_signed_paged_updates_forward_and_restart(tmp_path):
++    root,m,a,pages=_setup(tmp_path)
++    virgin=(root/'model.safetensors').read_bytes()
++    j=EventJournal(tmp_path/'a.sqlite','a'*64)
++    engine=ContinualElasticEngine(a,'alice','a'*64,j,unsafe=True)
++    x=torch.randn(4,10)
++    optim=torch.optim.AdamW(list(a.trainable_parameters()),lr=.008)
++    m(x).square().mean().backward();optim.step();optim.zero_grad(set_to_none=True)
++    wire=engine.seal_local(1)
++    assert pages.stats()['allocated_page_bytes']>0
++    assert (root/'model.safetensors').read_bytes()==virgin
++    after=m(x).detach().clone()
++    assert not engine.ingest(wire)
++    assert torch.allclose(m(x),after,atol=1e-6)
++    # reconstruct clean from immutable genesis and signed journal
++    tmp2=tmp_path/'restart';tmp2.mkdir()
++    root2=tmp2/'source';root2.mkdir()
++    (root2/'model.safetensors').write_bytes(virgin)
++    with torch.device('meta'):m2=Toy()
++    materialize_meta_from_safetensors(m2,root2,writable=False)
++    a2=UniversalAdapter(m2,'p','base',kind='loha',rank=3,target_scope='auto')
++    install_disk_linear_offload(m2,a2,tmp2/'offload',min_weight_mib=0.)
++    p2=attach_paged_mutable(m2,a2,scratch_dir=tmp2/'scratch',page_kib=4)
++    j2=EventJournal(tmp2/'b.sqlite','a'*64)
++    eng2=ContinualElasticEngine(a2,'bob','a'*64,j2,unsafe=True)
++    assert eng2.ingest(wire)
++    assert torch.allclose(m(x),m2(x),atol=2e-5)
++    # whole-state export materializes the actual effective pages, not stale base
++    old=m2(x).detach().clone()
++    p2.materialize_all(a2)
++    assert torch.allclose(m2(x),old,atol=2e-5)
++    j.close();j2.close()
++
++
++def test_paged_limit_rejects_before_write(tmp_path):
++    root,m,a,pages=_setup(tmp_path)
++    pages.limit_bytes=2
++    j=EventJournal(tmp_path/'j.sqlite','b'*64)
++    eng=ContinualElasticEngine(a,'me','b'*64,j,unsafe=True)
++    x=torch.randn(2,10)
++    opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.001)
++    m(x).sum().backward();opt.step()
++    with pytest.raises(LazyWeightError,match='quota|capacity'):
++        eng.seal_local(1)
++    assert pages.stats()['allocated_page_bytes']==0
++    j.close()
++
++
++def test_streamed_frozen_experts_identical_input_gradients(tmp_path):
++    torch.manual_seed(234)
++    class Switch(nn.Module):
++        def __init__(self):
++            super().__init__();self.experts=nn.ModuleList([nn.Sequential(nn.Linear(7,11),nn.GELU(),nn.Linear(11,7)) for _ in range(4)])
++            self.router=nn.Linear(7,4)
++        def forward(self,x):
++            w=self.router(x).softmax(-1)
++            return sum(self.experts[i](x)*w[:,i,None] for i in range(4))
++    baseline=Switch();paged=Switch();paged.load_state_dict(baseline.state_dict())
++    for model in (baseline,paged):
++        for expert in model.experts:
++            for p in expert.parameters():p.requires_grad_(False)
++    assert install_streamed_experts(paged,'experts')==4
++    x=torch.randn(3,7,requires_grad=True)
++    y=x.detach().clone().requires_grad_(True)
++    baseline(x).square().mean().backward();paged(y).square().mean().backward()
++    assert torch.allclose(baseline(x),paged(y),atol=1e-6)
++    assert torch.allclose(x.grad,y.grad,atol=1e-5)
++    assert torch.allclose(baseline.router.weight.grad,paged.router.weight.grad,atol=1e-5)
++    assert isinstance(paged.experts[2],StreamedFrozenExpert)
++    paged.experts[3].expert[0].weight.requires_grad_(True)
++    with pytest.raises(ValueError,match='trainable'):
++        install_streamed_experts(paged,'experts',indices=[3])
++
++
++def test_paged_export_refuses_stale_base_and_explicit_materialization(tmp_path):
++    root,m,a,pages=_setup(tmp_path)
++    group=a.groups[0]
++    assert pages.materialize_group(group)
++    store=pages.stores[group.canonical]
++    changed=store.rows(0,1);changed+=1
++    store.write_rows(0,changed)
++    from patchlib.shards import export_state_sharded
++    from patchlib.core import PatchError
++    with pytest.raises(LazyWeightError,match='state_dict'):
++        m.state_dict()
++    with pytest.raises(PatchError,match='explicit'):
++        export_state_sharded(m,tmp_path/'shards',tmp_path/'out.fmanifest',
++            model_id='toy',revision='v1',peer_id='test',seq=1,adapter=a)
++    pages.materialize_all(a)
++    assert not pages.stores
++    assert torch.equal(m.get_submodule(group.aliases[0].rpartition('.')[0]).parametrizations.weight.original[:1],changed)
++
++
++def test_poisoned_sparse_store_rejects_later_reads(tmp_path,monkeypatch):
++    import os
++    base=torch.zeros((2000,20),dtype=torch.float32)
++    store=SparsePageStore(base,tmp_path/'pages',page_bytes=4096)
++    def bad_write(*args):raise OSError('injected I/O fault')
++    monkeypatch.setattr(os,'pwrite',bad_write)
++    with pytest.raises(OSError,match='injected'):
++        store.write_rows(0,torch.ones((1,20)))
++    with pytest.raises(LazyWeightError,match='poisoned'):
++        store.rows(0,1)
++    store.close()
++
++
++def test_streamed_expert_rejects_stochastic_training():
++    expert=nn.Sequential(nn.Linear(5,7),nn.Dropout(.5),nn.Linear(7,3))
++    for p in expert.parameters():p.requires_grad_(False)
++    proxy=StreamedFrozenExpert(expert)
++    with pytest.raises(RuntimeError,match='stochastic'):
++        proxy(torch.randn(2,5,requires_grad=True))
++    proxy.eval()
++    result=proxy(torch.randn(2,5,requires_grad=True))
++    assert result.shape==(2,3)
++
++
++def test_conv1d_paged_signed_replay_and_input_grads(tmp_path):
++    from test_lazy_mutable_v60 import Conv1D
++    torch.manual_seed(55)
++    original=Conv1D(7,9)
++    root=tmp_path/'source';root.mkdir()
++    save_file({k:v.detach().clone().contiguous() for k,v in original.state_dict().items()},
++              str(root/'model.safetensors'))
++    with torch.device('meta'):model=Conv1D(7,9)
++    materialize_meta_from_safetensors(model,root,writable=False)
++    adapter=UniversalAdapter(model,'conv','v1',kind='loha',rank=3,target_scope='auto')
++    install_disk_linear_offload(model,adapter,tmp_path/'offload',min_weight_mib=0.)
++    manager=attach_paged_mutable(model,adapter,scratch_dir=tmp_path/'cow',page_kib=4)
++    j=EventJournal(tmp_path/'j.sqlite','d'*64)
++    eng=ContinualElasticEngine(adapter,'a','d'*64,j,unsafe=True)
++    x=torch.randn(4,9,requires_grad=True)
++    model(x).square().mean().backward()
++    opt=torch.optim.AdamW(list(adapter.trainable_parameters()),lr=.01)
++    opt.step();opt.zero_grad(set_to_none=True)
++    eng.seal_local(1)
++    assert manager.stats()['allocated_page_bytes']>0
++    z=torch.randn(4,9,requires_grad=True)
++    out=model(z).square().mean()
++    out.backward()
++    assert z.grad is not None and torch.isfinite(z.grad).all()
++    j.close()
++
++
++def test_cli_paged_mode_on_real_elastic_loader_path(tmp_path,monkeypatch):
++    from types import SimpleNamespace,ModuleType
++    import sys
++    from patchlib.cli import load_model
++    torch.manual_seed(34)
++    root=tmp_path/'immutable';root.mkdir()
++    base=Toy()
++    save_file({k:v.detach().contiguous() for k,v in base.state_dict().items()},
++              str(root/'model.safetensors'))
++    class Config:
++        _commit_hash=None
++        use_cache=True
++    class FakeConfig:
++        @staticmethod
++        def from_pretrained(*a,**kw):return Config()
++    class FakeAuto:
++        @staticmethod
++        def from_config(config,**kw):
++            m=Toy();m.config=config;return m
++    fake=ModuleType('transformers')
++    fake.AutoConfig=FakeConfig;fake.AutoModelForCausalLM=FakeAuto
++    monkeypatch.setitem(sys.modules,'transformers',fake)
++    args=SimpleNamespace(cmd='train-elastic',mode='elastic',initialization='pretrained',
++        model=str(root),revision='main',factory_file=None,trust_remote_code=False,
++        streaming_base=True,streaming_lazy_write=True,streaming_page_cow=True,
++        stream_page_kib=4,streaming_scratch_dir=tmp_path/'nvme',stream_chunk_mib=1,
++        stream_lazy_limit_gb=0,device='cpu',auto_class=None,hf_task='causal-lm',
++        model_id=None,kind='loha',rank=3,alpha=None,max_peers=2,target_scope='auto',
++        state_base=None,sharded_base_manifest=None,sharded_base_store=None,
++        disk_linear_dir=None,disk_linear_min_mib=.00001,
++        auto_rank=False,resource_report=None,gradient_checkpointing=False)
++    m,a=load_model(args,use_adapter=True)
++    mgr=m._fedpara_lazy_mutable_weights
++    assert mgr.stats()['allocated_page_bytes']==0
++    j=EventJournal(tmp_path/'journal.sqlite','e'*64)
++    eng=ContinualElasticEngine(a,'one','e'*64,j,unsafe=True)
++    opt=torch.optim.AdamW(list(a.trainable_parameters()),lr=.002)
++    m(torch.randn(2,10)).sum().backward();opt.step()
++    eng.seal_local(1)
++    assert mgr.stats()['allocated_page_bytes']>0
++    j.close()

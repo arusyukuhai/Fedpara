@@ -1,0 +1,1198 @@
+diff -ruN '--exclude=CHANGES_V52.patch' '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' ../kagami_v52_patch_base/kagami-v51/README.md kagami-v52/README.md
+--- ../kagami_v52_patch_base/kagami-v51/README.md	2026-10-26 23:37:36.000000000 +0000
++++ kagami-v52/README.md	2026-10-27 00:07:27.475443513 +0000
+@@ -1,3 +1,7 @@
++# Kagami v52 status
++
++**Important:** The v52 incremental live carry and restart recovery are not a fully automatic live generation migration. Read [README_V52_STATUS.md](README_V52_STATUS.md) for implemented guarantees, tests, and outstanding production integrations.
++
+ > **v51修正版（限定実装）:** 無停止世代移行の本番ワーカー完全実装ではありません。まず [README_V51_STATUS.md](README_V51_STATUS.md) と [VALIDATION_V51.md](VALIDATION_V51.md) をご確認ください。
+ 
+ > **v50変更版の状態:** 無停止世代移行の完全版ではありません。追加した転送・復旧処理、検証結果、未接続の本番経路については [README_V50_STATUS.md](README_V50_STATUS.md) を先に確認してください。
+diff -ruN '--exclude=CHANGES_V52.patch' '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' ../kagami_v52_patch_base/kagami-v51/README_V52_STATUS.md kagami-v52/README_V52_STATUS.md
+--- ../kagami_v52_patch_base/kagami-v51/README_V52_STATUS.md	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v52/README_V52_STATUS.md	2026-10-27 00:10:07.994541807 +0000
+@@ -0,0 +1,150 @@
++# Kagami v52 — Certified streaming carry, warm hot-swap, and restart recovery
++
++## Scope and truth-in-testing
++
++**This is NOT yet the promised fully automatic, 4096-node, no-stop generation
++migration.** It is the next safe implementation increment over v51. In
++particular, v52 **does not automatically commit checkpoints, generate quorum
++votes, or invoke the live epoch switch from production `train-live`**. These
++are remaining requirements, not features to toggle on optimistically.
++
++## Implemented in v52
++
++1. `patchlib/epoch_live_rebase_v52.py`
++   - Streams the exact signed old-genesis suffix by increasing journal rowid,
++     **not by OFFSET or an all-events Python list**. A signed update arriving
++     late from a disconnected origin cannot hide behind an already-scanned
++     origin/sequence cursor.
++   - Compares *all* covered cut indexes against the certified SHA-256 cut,
++     including exact per-origin terminal sequences. Scans memory O(origins).
++   - Bounded per-tick processing: default at most 16 events / 16 MiB of wire
++     payload (the tensor evaluation itself needs additional model memory).
++   - Uses the existing independently authenticated `CrossEpochCarryArchive`:
++     append signed original bytes durably before applying their effective
++     weight deltas. On restart, reconstruct a clean certified base and replay.
++   - On a failed signed-wire check or incomplete/corrupt carry, poisons the
++     shadow, which cannot be published. Resuming a previously applied durable
++     archive avoids re-decoding carried events but checks event identity hash.
++   - Under a **caller-supplied verified old-writer barrier**, performs a final
++     suffix sweep, rechecks the cut, and writes a crash-atomic + fsynced local
++     carry receipt containing the exact archive inventory digest. The receipt
++     is NOT authority to delete old signed history.
++
++2. `patchlib/live_epoch_switch_v48.py` (service strengthened)
++   - `PreparedEpoch.rebaser` supports streaming suffix staging while the old
++     `TrainerStepRouter` still admits training steps. Each poll is bounded;
++     the service keeps the same prepared shadow between polls rather than
++     reloading and replaying it from scratch.
++   - A locally controlled `old_ingress_frozen` hook must attest that the old
++     receiver/writer is actually drained and frozen before final carry.
++   - The trained checkpoint is reverified before final publication. A failed
++     snapshot, unexpected old writer, conflicting certificate or unverified
++     carry prevents activation. No old history is silently removed.
++   - Background old-history GC does not poll for a nonexistent epoch-0 active
++     pointer while shadow preparation is in progress.
++
++3. `patchlib/epoch_trainer_boot_v52.py` and `patchlib/elasticnet.py`
++   - `train-live` now detects a persisted pointer at
++     `<journal>.live-epoch/active-epoch.json` **before opening the initial
++     generation journal**.
++   - It reconstructs the pinned committee's signed certificate chain, verifies
++     the pointer against the exact epoch/manifest/genesis, hashes all shards,
++     installs the certified base before new optimizer creation, and validates
++     the durable old signed carry plus its final receipt before replaying the
++     new-epoch journal.
++   - Rejects unsafe paths, a missing epoch/certificate, missing source or new
++     journal, an old writer that appended after the recorded handoff, a cut
++     mismatch, and corrupt or missing carried events instead of guessing.
++   - Pins the immutable original generation root in future generation-control
++     `hello` frames even after restoring a successor epoch.
++   - Plugs the existing signed old-epoch inbound carry lane into
++     `AsyncInboundPipeline` on certified restart.
++
++4. Regression tests
++   - Added `tests/test_epoch_live_rebase_v52.py` with actual signed LoHA,
++     three successive old updates, partial background staging, final flush,
++     warm-switch service, offline/restart replay, and poisoned-shadow rejection.
++   - Added `tests/test_epoch_trainer_boot_v52.py` with a real sharded checkpoint,
++     pinned certified pointer verification, durable carry-receipt validation,
++     old-writer resurrection rejection and a dangling symlink safety test.
++   - Bounded live service tests cover incremental staged reuse, actual PyTorch
++     optimizer swap and refusal to switch without a writer fence.
++
++## Remaining work — must be completed before describing it as production-ready
++
++- **Production trainer hook is not yet connected.** The real `train-live`
++  optimization loop still needs to use `TrainerStepRouter.step()`, create and
++  stage certified shadow models in background, invoke the prepared switch, and
++  atomically rewire its shared `model`, `adapter`, `optimizer`, `journal`,
++  `engine` and existing WebRTC sessions under a drain/fence. v52's
++  `LiveEpochSwitchService` is a tested opt-in library, NOT an automatically
++  called production switch.
++- **No automated certifiable snapshot cut and quorum votes.** The v51 live
++  generation bridge continues to refuse automatic votes without an atomic
++  trainer-produced cut receipt; blindly enabling votes would risk
++  irreversible model divergence.
++- **Old-world/new-world anti-entropy is incomplete.** After adoption, the
++  transport must relay old signed carry events and their inventory among
++  *different generation* members (including long-offline peers). The current
++  WebRTC bridge exchanges signed generation certificates but does not carry
++  full cross-generation training history.
++- The legacy `online_generation` v1 proposal embeds <=256 cutoffs and a
++  <=40 KiB signed control payload; **a real 4096-peer certified cut needs the
++  paged Merkle-frontier v2 validation and transport integrated end-to-end**.
++- Checkpoint cache GC and old journal destruction remain conservative. Old
++  data can continue growing until a separately proven finalized coverage
++  checkpoint exists. A 300B+ shadow model needs explicit memory/disk capacity
++  management; tests here use small networks, not large-model benchmarks.
++- A future GC design must allow restart after legitimately verified old-source
++  deletion. This version still requires the old source journal for verifying
++  its durable final carry boundary.
++- No 4096 physical devices, network partitions lasting months, multi-week
++  storage-bounded benchmark, or sustained Byzantine failure test was run.
++
++## Local file contract (not a manual activation shortcut)
++
++A *previously* durable pointer is only a locator. For epoch E, local recovery
++looks for:
++
++```
++<journal>.live-epoch/active-epoch.json
++<journal>.live-epoch/checkpoints/views/<manifest-hash>/checkpoint.fmanifest
++<journal>.live-epoch/checkpoints/views/<manifest-hash>/objects/...
++<journal>.live-epoch/carries/epoch-XXXXXXXX.sqlite3
++<journal>.live-epoch/carries/epoch-XXXXXXXX.sqlite3.handoff.json
++<journal>.live-epoch/journals/epoch-XXXXXXXX.sqlite3
++```
++
++Never hand-edit the pointer or forge a handoff receipt. These files must be
++created from a verified snapshot, durable signed carry, clean new journal and
++properly fenced training writer. `train-live` intentionally refuses partial
++state; it cannot safely recover a locally missing carry by guesswork.
++
++## Tests
++
++```
++python -m pytest -q \
++  tests/test_epoch_* tests/test_online_generation_v41.py \
++  tests/test_live_generation_transport_v42.py \
++  tests/test_v44_low_cost_generation.py \
++  tests/test_generation_multicast_v46.py \
++  tests/test_compact_epoch_network_v46.py \
++  tests/test_live_epoch_switch_v48.py \
++  tests/test_continual_elastic.py tests/test_elastic.py
++```
++
++Expected result on this source snapshot: **111 passed**.
++
++## Performance expectations (not measurements)
++
++- Gossip fanout remains bounded to <=8 direct neighbors per peer, not a
++  complete graph; the original anti-entropy path is unchanged.
++- Warm carry resident metadata is bounded by O(origins) for cut validation
++  and O(batch size) for scanning; the per-event torch delta can be large.
++- Warm carry sends no extra mandatory all-to-all wire traffic itself. It
++  uses an existing local signed journal; actual old-event replay over peers
++  still needs integration.
++- During the handoff, the old event archive, new-generation carry and the
++  staged certified model coexist. **Disk is not strictly bounded without
++  completed, independently verified generation GC**. v52 refuses to erase
++  unrecoverable signed history merely to meet a quota.
+diff -ruN '--exclude=CHANGES_V52.patch' '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' ../kagami_v52_patch_base/kagami-v51/patchlib/elasticnet.py kagami-v52/patchlib/elasticnet.py
+--- ../kagami_v52_patch_base/kagami-v51/patchlib/elasticnet.py	2026-10-26 23:34:41.000000000 +0000
++++ kagami-v52/patchlib/elasticnet.py	2026-10-27 00:04:24.303349654 +0000
+@@ -1306,11 +1306,54 @@
+         genesis_input['muon_momentum']=getattr(args,'muon_momentum',.9)
+         genesis_input['muon_weight_decay']=getattr(args,'muon_weight_decay',0.)
+     genesis=hashlib.sha256(_canonical_json(genesis_input)).hexdigest()
++    # The root identity is immutable even after a verified hot epoch switch.
++    # The active event genesis, by contrast, changes with each certificate.
++    # NEVER open the genesis journal after a durable successor pointer exists.
++    root_genesis=genesis
++    epoch_dir=Path(str(args.journal)+'.live-epoch')
++    epoch_boot=None
++    if ((epoch_dir/'active-epoch.json').exists() or
++            (epoch_dir/'active-epoch.json').is_symlink()):
++        if not getattr(args,'generation_v1_committee',None) or not room_only:
++            raise PatchError('certified active epoch requires the pinned generation committee')
++        from .generation_committee_v43 import read_generation_committee
++        from .online_generation import GenerationLedger
++        from .epoch_trainer_boot_v52 import resolve_certified_boot
++        boot_committee,boot_keys=read_generation_committee(Path(args.generation_v1_committee))
++        for boot_peer,boot_pem in boot_keys.items():
++            store_pin(boot_peer,boot_pem,make_verifier(load_pem_public_key(boot_pem)))
++        boot_ledger=GenerationLedger(Path(str(args.journal)+'.generation.sqlite3'),
++            room=args.room_id,peer=args.peer_id,committee=boot_committee,
++            signer=signer,trusted=trusted,genesis=root_genesis)
++        try:
++            epoch_boot=resolve_certified_boot(root=epoch_dir,journal_base=Path(args.journal),
++                ledger=boot_ledger,root_genesis=root_genesis,
++                max_state_bytes=args.max_state_gb*1024**3)
++        finally:
++            boot_ledger.close()
++        if epoch_boot is None:
++            raise PatchError('committed epoch pointer disappeared during safe recovery')
++        from .shards import apply_sharded_effective_state
++        await asyncio.to_thread(apply_sharded_effective_state,
++            model,adapter,epoch_boot.manifest,epoch_boot.store,
++            model_id=adapter.model_id,revision=adapter.revision,
++            max_state_bytes=args.max_state_gb*1024**3)
++        genesis=epoch_boot.current_genesis
++        print(f'CERTIFIED EPOCH RECOVERY epoch={epoch_boot.epoch} '
++              f'manifest={epoch_boot.manifest_hash[:16]} ',flush=True)
++    journal_path=epoch_boot.journal_path if epoch_boot else Path(args.journal)
+     from .snapshot_live import journal_tip, snapshot_inventory
+     snapshot_root=Path(str(args.journal)+'.snapshots')
+     snapshot_store=snapshot_root/'objects'
+     snapshot_recv=snapshot_root/'incoming'
+-    journal=EventJournal(args.journal,genesis,max_bytes=args.max_journal_gb*1024**3,
++    if epoch_boot is not None:
++        # The new-genesis writer must have been fsynced BEFORE the pointer.
++        # Inventing an empty journal here could lose locally signed steps.
++        if journal_path.is_symlink() or not journal_path.is_file():
++            raise PatchError('certified epoch journal is missing after pointer publication')
++        if epoch_boot.source_path.is_symlink() or not epoch_boot.source_path.is_file():
++            raise PatchError('old certified source journal is missing; no local handoff proof')
++    journal=EventJournal(journal_path,genesis,max_bytes=args.max_journal_gb*1024**3,
+                          sync=getattr(args,'journal_sync','full').upper())
+     print(f'journal durability={journal.sync}; FULL=power-loss-safe, NORMAL=process-crash-safe only', flush=True)
+     from .continual import ContinualElasticEngine
+@@ -1321,8 +1364,30 @@
+                                   unsafe=args.unsafe_unsigned,max_delta_rms=args.max_delta_rms,
+                                   event_public=room_pub if room_only else None)
+     print(f'elastic optimization=FedSum+ReLoRA-mixed-async-v6 reinit_every={engine.reinit_every} local events',flush=True)
++    carry_archive=None
++    if epoch_boot is not None:
++        # Recovery order is strict: immutable certified base, durable old signed
++        # suffix, THEN events from the new-generation journal. All old bodies
++        # remain signed with their ORIGINAL genesis, never forged/relabelled.
++        from .epoch_carry_v46 import CrossEpochCarryArchive
++        from .epoch_trainer_boot_v52 import verify_boot_carry
++        old_source=EventJournal(epoch_boot.source_path,epoch_boot.previous_genesis,
++            max_bytes=0,sync=getattr(args,'journal_sync','full').upper())
++        try:
++            carry_archive=CrossEpochCarryArchive(epoch_boot.carry_path,
++                source_genesis=epoch_boot.previous_genesis,
++                target_genesis=genesis,
++                certified_manifest=epoch_boot.manifest_hash,
++                epoch=epoch_boot.epoch,cutoffs=epoch_boot.proposal['cutoffs'])
++            verify_boot_carry(epoch_boot,carry_archive,old_journal=old_source)
++            print(f'CERTIFIED CARRY RECOVERY count={carry_archive.replay(engine)}',flush=True)
++        finally:
++            old_source.close()
+     engine.replay()
+-    print(f'elastic peer={args.peer_id} genesis={genesis} recovered={journal.count()} events; log={args.journal}',flush=True)
++    if epoch_boot is not None:
++        with journal.db:
++            journal.db.execute("INSERT OR REPLACE INTO meta(name,value) VALUES('initial_ready','1')")
++    print(f'elastic peer={args.peer_id} genesis={genesis} recovered={journal.count()} events; log={journal.path}',flush=True)
+     # Epoch-v2 signed crash-fault agreement PROBE. This is deliberately
+     # isolated from v1 optimization: no v1 delta may be reinterpreted as an
+     # epoch-anchored v2 proposal. A genuine v2 trainer requires pinned local
+@@ -1392,7 +1457,7 @@
+             return False
+         generation_ledger=GenerationLedger(Path(str(args.journal)+'.generation.sqlite3'),
+             room=args.room_id,peer=args.peer_id,committee=generation_committee,
+-            signer=signer,trusted=trusted,genesis=genesis)
++            signer=signer,trusted=trusted,genesis=root_genesis)
+         def has_snapshot(manifest_sha):
+             # A verified content-addressed download survives reconnects.
+             path=snapshot_recv/(manifest_sha+'.fmanifest')
+@@ -1420,7 +1485,7 @@
+         from .epoch_runtime_v43 import EpochRuntimeV43
+         local_ledger=GenerationLedger(Path(str(args.journal)+'.generation.sqlite3'),
+             room=args.room_id,peer=args.peer_id,committee=generation_committee,
+-            signer=signer,trusted=trusted,genesis=genesis)
++            signer=signer,trusted=trusted,genesis=root_genesis)
+         try:
+             runtime=EpochRuntimeV43(Path(str(args.journal)+'.generation-state'),local_ledger)
+             try:return runtime.poll()
+@@ -1827,7 +1892,7 @@
+                     on_authenticated=accept_authenticated_peer if room_only else None,
+                     snapshot_store=snapshot_store if room_only else None,
+                     enable_generation=generation_committee is not None,
+-                    generation_root=genesis if generation_committee is not None else None,
++                    generation_root=root_genesis if generation_committee is not None else None,
+                     snapshot_recv=snapshot_recv if room_only else None,
+                     snapshot_limit=args.max_state_gb*1024**3)
+                 node.lookup_requested_event=journal.get
+@@ -2045,7 +2110,8 @@
+     from .async_ingest import AsyncInboundPipeline
+     engine.max_wire_bytes=args.max_patch_mb*1024**2
+     inbound_pipeline=AsyncInboundPipeline(engine,inbound_committed,
+-        max_queue=getattr(args,'inbound_queue',32),commit_lock=inbound_commit_lock)
++        max_queue=getattr(args,'inbound_queue',32),commit_lock=inbound_commit_lock,
++        carry_archive=carry_archive)
+ 
+     async def network_receiver_loop():
+         # The trainer awaits model forward/backward in a worker thread.  This
+@@ -2821,3 +2887,5 @@
+         if generation_gc_runtime is not None:generation_gc_runtime.close()
+         if generation_ledger is not None:generation_ledger.close()
+         journal.close()
++        if carry_archive is not None:
++            carry_archive.close()
+diff -ruN '--exclude=CHANGES_V52.patch' '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' ../kagami_v52_patch_base/kagami-v51/patchlib/epoch_live_rebase_v52.py kagami-v52/patchlib/epoch_live_rebase_v52.py
+--- ../kagami_v52_patch_base/kagami-v51/patchlib/epoch_live_rebase_v52.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v52/patchlib/epoch_live_rebase_v52.py	2026-10-27 00:09:23.532885280 +0000
+@@ -0,0 +1,262 @@
++"""v52: bounded, exact and crash-replayable warm carry for a certified epoch.
++
++This module does NOT decide that a checkpoint represents a journal cut. That
++must be verified independently by the quorum validators. It verifies the
++complete locally available signed-index cut, and incrementally transfers every
++uncovered old-generation event to a durable carry archive while old training
++and WebRTC traffic continue. Only ``finish_under_ingress_barrier`` may attest a
++complete local suffix; the caller must prevent ALL further old-genesis inbound
++commits/publications until the new data plane is installed.
++
++No O(events) Python lists, no SQL OFFSET, no forced worldwide stop-the-world,
++no time-based history deletion. Missing cut events fail closed.
++"""
++from __future__ import annotations
++
++import asyncio
++import hashlib
++import json
++import os
++from pathlib import Path
++from dataclasses import dataclass
++
++from .core import PatchError, _canonical_json
++
++
++@dataclass(frozen=True)
++class CarryProgress:
++    scanned: int
++    carried: int
++    bytes_carried: int
++    cursor: int
++    caught_up: bool
++
++
++def verify_certified_cut(journal, cutoffs: dict[str, int], digest: str) -> tuple[int, int]:
++    """O(number of origins) RAM, O(events) sequential indexed read.
++
++    The canonical digest covers EVERY included (origin,sequence,event-digest),
++    not just the greatest sequence seen. Missing/extra events in the cut and
++    accidental equivocation are detectable. Rows are scanned by the composite
++    index, with no unbounded OFFSET pagination.
++    """
++    if (not isinstance(cutoffs, dict) or len(cutoffs) > 200_000 or
++            not isinstance(digest, str) or len(digest) != 64 or
++            any(c not in '0123456789abcdef' for c in digest) or
++            any(not isinstance(p, str) or not 1 <= len(p) <= 128 or
++                type(seq) is not int or seq < 0 or seq >= 2**63
++                for p, seq in cutoffs.items())):
++        raise PatchError('invalid certified cut metadata')
++    sha = hashlib.sha256()
++    count = 0
++    previous = None
++    last = {}
++    max_rowid = 0
++    for rowid, origin, seq, stored_digest in journal.db.execute(
++            'SELECT rowid,origin,seq,digest FROM events ORDER BY origin,seq'):
++        if (not isinstance(origin, str) or type(seq) is not int or
++                not isinstance(stored_digest, str) or len(stored_digest) != 64 or
++                any(c not in '0123456789abcdef' for c in stored_digest) or
++                (previous is not None and (origin,seq) <= previous)):
++            raise PatchError('corrupt or unordered source journal')
++        previous = origin,seq
++        max_rowid = max(max_rowid,rowid)
++        if seq <= cutoffs.get(origin,0):
++            # A per-origin high-water cut must be a COMPLETE prefix; a v1
++            # frontier cannot represent missing middle sequences correctly.
++            if seq != last.get(origin,0)+1:
++                raise PatchError('certified cut has a missing signed sequence')
++            sha.update(_canonical_json([origin,seq,stored_digest])+b'\n')
++            count += 1
++            last[origin] = seq
++    if sha.hexdigest() != digest or any(last.get(origin,0) < seq for origin,seq in cutoffs.items()):
++        raise PatchError('not all certified-cut events are available locally')
++    return count,max_rowid
++
++
++class StreamingCertifiedRebase:
++    """Warm-stage signed suffix with incremental disk usage and zero DB offsets.
++
++    ``archive`` must be a CrossEpochCarryArchive already replayed onto a
++    NEW, clean certified base. It commits old signed bytes durably BEFORE
++    applying their effects. A crash requires a clean-base reload followed by
++    the archive's deterministic replay; it is unsafe to reuse partially
++    modified shadow model in-process on error.
++    """
++    def __init__(self, source, archive, engine, proposal: dict, *, batch_limit=16,
++                 max_batch_bytes=16 * 1024**2):
++        if (not 1 <= batch_limit <= 128 or not 64*1024 <= max_batch_bytes <= 256*1024**2):
++            raise ValueError('invalid carry memory budget')
++        if (not isinstance(proposal,dict) or not isinstance(proposal.get('cutoffs'),dict)
++                or not isinstance(proposal.get('cut'),str)):
++            raise PatchError('missing certified journal cut')
++        if (archive.source_genesis != source.genesis or
++                archive.target_genesis != engine.genesis or
++                archive.certified_manifest != proposal.get('manifest') or
++                archive.epoch != proposal.get('epoch') or
++                archive.cutoffs != proposal['cutoffs']):
++            raise PatchError('carry archive does not match certified boundary')
++        if not getattr(archive,'_replayed',False):
++            raise PatchError('replay carry archive on clean base before staging')
++        self.source = source
++        self.archive = archive
++        self.engine = engine
++        self.proposal = proposal
++        self.batch_limit=batch_limit
++        self.max_batch_bytes=max_batch_bytes
++        self.cursor=0
++        self.scanned=0
++        self.carried=0
++        self.bytes_carried=0
++        self._validated=False
++        self._poisoned=False
++
++    def validate_cut(self):
++        if self._poisoned:raise PatchError('poisoned shadow, reload clean checkpoint')
++        result=verify_certified_cut(self.source,self.proposal['cutoffs'],self.proposal['cut'])
++        self._validated=True
++        return result
++
++    async def tick(self) -> CarryProgress:
++        """Do bounded work; the trainer can run steps between ticks.
++
++        Each new event row has a monotonically increasing rowid, even when an
++        offline peer supplies a much older (origin,seq). A keyset cursor thus
++        cannot accidentally skip a newly discovered post-cut event.
++        """
++        if self._poisoned:
++            raise PatchError('poisoned shadow, reload clean certified checkpoint')
++        if not self._validated:
++            raise PatchError('rebase requires a validated cut and clean shadow')
++        # Query only indexed event metadata, keeping huge payloads outside SQL.
++        # A row may itself exceed the byte budget; refuse it before allocation.
++        rows = self.source.db.execute(
++            'SELECT rowid,origin,seq,wire_len,digest FROM events WHERE rowid>? '
++            'ORDER BY rowid LIMIT ?', (self.cursor,self.batch_limit)).fetchall()
++        spent=0
++        try:
++            for rowid,origin,seq,wire_len,wire_digest in rows:
++                if (type(wire_len) is not int or wire_len <= 0 or
++                        wire_len > self.max_batch_bytes):
++                    raise PatchError('carry event exceeds configured byte cap')
++                if spent and spent + wire_len > self.max_batch_bytes:
++                    break
++                if seq > self.proposal['cutoffs'].get(origin,0):
++                    # An interrupted attempt can resume after reconstructing
++                    # a clean shadow and replaying its durable carry archive.
++                    # Avoid decoding/allocating tens of millions of already
++                    # authenticated factor deltas on a long-lived peer.
++                    existing=self.archive.journal.has(origin,seq)
++                    if existing is not None:
++                        if existing[0]!=wire_digest:
++                            raise PatchError('conflicting source event in durable carry')
++                        spent+=wire_len
++                        self.cursor=rowid
++                        self.scanned+=1
++                        continue
++                    wire=self.source.get(origin,seq)
++                    if not isinstance(wire,bytes) or len(wire)!=wire_len:
++                        raise PatchError('source carry body missing')
++                    # Signature validation and expensive factor decoding can
++                    # safely run off the WebRTC event loop.
++                    info,parts=await asyncio.to_thread(self.archive._check,self.engine,wire)
++                    if (info.origin,info.seq)!=(origin,seq):
++                        raise PatchError('source index differs from signed update')
++                    if await self.archive.accept_prechecked(self.engine,wire,info,parts):
++                        self.carried+=1
++                        self.bytes_carried+=wire_len
++                spent+=wire_len
++                self.cursor=rowid
++                self.scanned+=1
++        except BaseException:
++            # Applying a delta may fail after an earlier destination tensor
++            # changed. Never admit training on the shadow after such an error.
++            self._poisoned=True
++            raise
++        consumed = self.cursor == rows[-1][0] if rows else True
++        return CarryProgress(self.scanned,self.carried,self.bytes_carried,self.cursor,
++                             consumed and len(rows)<self.batch_limit)
++
++    def archive_inventory_digest(self):
++        """O(1) resident memory, exact authenticated archive-index commitment."""
++        sha=hashlib.sha256()
++        count=0
++        for origin,seq,digest in self.archive.journal.db.execute(
++                'SELECT origin,seq,digest FROM events ORDER BY origin,seq'):
++            sha.update(_canonical_json([origin,seq,digest])+b'\n')
++            count+=1
++        return count,sha.hexdigest()
++
++    def _receipt_path(self):
++        return Path(str(self.archive.journal.path)+'.handoff.json')
++
++    def verify_handoff_receipt(self):
++        """Proof of locally archived bytes, NOT authorization to GC old history."""
++        path=self._receipt_path()
++        if not path.is_file() or path.is_symlink() or path.stat().st_size>4096:
++            raise PatchError('missing or unsafe local carry handoff receipt')
++        data=json.loads(path.read_bytes())
++        if (not isinstance(data,dict) or data.get('format')!='kagami-local-carry-attestation-v1'
++                or data.get('source_genesis')!=self.source.genesis
++                or data.get('target_genesis')!=self.engine.genesis
++                or data.get('certified_manifest')!=self.proposal['manifest']
++                or data.get('epoch')!=self.proposal['epoch']
++                or data.get('archive_genesis')!=self.archive.genesis):
++            raise PatchError('receipt belongs to another certified epoch')
++        count,digest=self.archive_inventory_digest()
++        if (type(data.get('total_archived')) is not int or
++                data['total_archived']!=count or data.get('archive_digest')!=digest):
++            raise PatchError('carry archive differs from durable local handoff receipt')
++        return data
++
++    def _durable_receipt(self,record):
++        """Atomic/fsynced local receipt after source has been frozen + drained."""
++        path=self._receipt_path()
++        if path.is_symlink():raise PatchError('unsafe handoff receipt symlink')
++        raw=_canonical_json(record)
++        if len(raw)>4096:raise PatchError('handoff receipt too large')
++        tmp=path.with_name(path.name+'.tmp-'+os.urandom(8).hex())
++        fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
++        try:
++            with os.fdopen(fd,'wb') as writer:
++                writer.write(raw);writer.flush();os.fsync(writer.fileno())
++            os.replace(tmp,path)
++            directory=os.open(path.parent,os.O_DIRECTORY)
++            try:os.fsync(directory)
++            finally:os.close(directory)
++        finally:
++            tmp.unlink(missing_ok=True)
++
++    async def finish_under_ingress_barrier(self):
++        """Final small carry after caller has drained and FROZEN old writers.
++
++        A producer inserting later into ``source`` INVALIDATES this attestation.
++        The caller must hold its old generation's ingest + local seal barrier
++        until the durable epoch pointer and replacement transport are live.
++        This method cannot enforce that external ownership requirement.
++        """
++        if not self._validated:raise PatchError('unvalidated cut')
++        while True:
++            before=self.cursor
++            progress=await self.tick()
++            if progress.caught_up:
++                break
++            if before==self.cursor:
++                raise PatchError('no progress processing certified suffix')
++        # Revalidate that no claimed cut row was lost or modified by a writer
++        # racing snapshot staging. This is deliberately an epoch-only scan.
++        self.validate_cut()
++        final_rowid=self.source.db.execute('SELECT COALESCE(MAX(rowid),0) FROM events').fetchone()[0]
++        if final_rowid > self.cursor:
++            raise PatchError('old journal grew during final carry; ingress is not frozen')
++        count,digest=self.archive_inventory_digest()
++        receipt={'format':'kagami-local-carry-attestation-v1',
++                'source_genesis':self.source.genesis,
++                'target_genesis':self.engine.genesis,
++                'certified_manifest':self.proposal['manifest'],
++                'epoch':self.proposal['epoch'],'source_rowid':final_rowid,
++                'archived_events_this_run':self.carried,
++                'total_archived':count,'archive_digest':digest,
++                'archive_genesis':self.archive.genesis}
++        await asyncio.to_thread(self._durable_receipt,receipt)
++        return self.verify_handoff_receipt()
+diff -ruN '--exclude=CHANGES_V52.patch' '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' ../kagami_v52_patch_base/kagami-v51/patchlib/epoch_trainer_boot_v52.py kagami-v52/patchlib/epoch_trainer_boot_v52.py
+--- ../kagami_v52_patch_base/kagami-v51/patchlib/epoch_trainer_boot_v52.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v52/patchlib/epoch_trainer_boot_v52.py	2026-10-27 00:04:24.302977915 +0000
+@@ -0,0 +1,127 @@
++"""Safe restart from a certified v52 live trainer pointer.
++
++Runs BEFORE opening a new-generation optimizer or accepting peer traffic.
++Only locally complete, fully verified data-only checkpoints are accepted.
++The old-generation carry archive must have a durable final handoff receipt.
++Neither a remote generation-head hint nor a naked pointer is sufficient.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++import hashlib
++import json
++from pathlib import Path
++from types import SimpleNamespace
++
++from .core import PatchError
++from .live_epoch_switch_v48 import certified_genesis,verify_candidate_files
++from .epoch_live_rebase_v52 import verify_certified_cut
++
++
++@dataclass(frozen=True)
++class CertifiedEpochBoot:
++    epoch: int
++    current_genesis: str
++    previous_genesis: str
++    manifest_hash: str
++    proposal: dict
++    manifest: Path
++    store: Path
++    journal_path: Path
++    carry_path: Path
++    source_path: Path
++
++
++def read_durable_epoch_pointer(path: Path):
++    path=Path(path)
++    if path.is_symlink():
++        raise PatchError('unsafe committed epoch pointer symlink')
++    if not path.exists():return None
++    if not path.is_file() or path.stat().st_size > 4096:
++        raise PatchError('unsafe committed epoch pointer')
++    try:data=json.loads(path.read_bytes())
++    except (ValueError, UnicodeError) as exc:
++        raise PatchError('corrupt committed epoch pointer') from exc
++    def hex64(s):return isinstance(s,str) and len(s)==64 and all(c in '0123456789abcdef' for c in s)
++    if (not isinstance(data,dict) or set(data)!={'format','epoch','genesis','checkpoint'}
++            or data['format']!='kagami-hot-pointer-v1' or
++            type(data['epoch']) is not int or not 1<=data['epoch']<2**32 or
++            not hex64(data['genesis']) or not hex64(data['checkpoint'])):
++        raise PatchError('invalid committed epoch pointer')
++    return data
++
++
++def resolve_certified_boot(*, root:Path, journal_base:Path, ledger,
++                           root_genesis:str, max_state_bytes=2*1024**4):
++    """Resolve local bytes for a committed epoch, refusing missing quorum links.
++
++    Expected disk layout is stable across process restart. A staging worker
++    stores hardlinked content-addressed checkpoints under
++    ``root/checkpoints/views/<manifest-hash>``.
++    """
++    root=Path(root);journal_base=Path(journal_base)
++    pointer=read_durable_epoch_pointer(root/'active-epoch.json')
++    if pointer is None:return None
++    epoch=pointer['epoch']
++    cert=ledger.certified_epoch(epoch)
++    if cert is None:
++        raise PatchError('active epoch pointer has no locally verified quorum certificate')
++    p=cert['proposal']
++    if (p.get('epoch')!=epoch or p.get('manifest')!=pointer['checkpoint'] or
++            certified_genesis(p)!=pointer['genesis']):
++        raise PatchError('pointer does not identify the certified epoch')
++    prev_cert=ledger.certified_epoch(epoch-1) if epoch>1 else None
++    if epoch>1 and prev_cert is None:
++        raise PatchError('missing prior epoch certificate for carry validation')
++    previous=certified_genesis(prev_cert['proposal']) if prev_cert else root_genesis
++    if p.get('parent') != (ledger.genesis if epoch==1 else __digest(prev_cert['proposal'])):
++        raise PatchError('broken certified epoch parent chain')
++    view=root/'checkpoints'/'views'/p['manifest']
++    manifest=view/'checkpoint.fmanifest'
++    verify_candidate_files(SimpleNamespace(manifest=manifest,store=view),p,
++                           max_state_bytes=max_state_bytes)
++    return CertifiedEpochBoot(epoch,pointer['genesis'],previous,p['manifest'],p,
++        manifest,view,root/'journals'/f'epoch-{epoch:08d}.sqlite3',
++        root/'carries'/f'epoch-{epoch:08d}.sqlite3',
++        journal_base if epoch==1 else root/'journals'/f'epoch-{epoch-1:08d}.sqlite3')
++
++
++def __digest(p):
++    from .online_generation import _digest
++    return _digest(p)
++
++
++def verify_boot_carry(boot:CertifiedEpochBoot, archive, *, old_journal):
++    """Reject restart if the source writer made any update after handoff.
++
++    This is a *local* recovery gate, not a proof that every offline peer has
++    migrated. Their old signed events still require carry-lane anti-entropy.
++    """
++    path=Path(str(archive.journal.path)+'.handoff.json')
++    if path.is_symlink() or not path.is_file() or path.stat().st_size>4096:
++        raise PatchError('missing durable final carry receipt')
++    try:receipt=json.loads(path.read_bytes())
++    except (ValueError,UnicodeError) as exc:
++        raise PatchError('malformed final carry receipt') from exc
++    if (not isinstance(receipt,dict) or receipt.get('format')!='kagami-local-carry-attestation-v1'
++            or receipt.get('epoch')!=boot.epoch or
++            receipt.get('source_genesis')!=boot.previous_genesis or
++            receipt.get('target_genesis')!=boot.current_genesis or
++            receipt.get('certified_manifest')!=boot.manifest_hash or
++            receipt.get('archive_genesis')!=archive.genesis):
++        raise PatchError('durable carry receipt mismatches certified epoch')
++    if type(receipt.get('source_rowid')) is not int or receipt['source_rowid']<0:
++        raise PatchError('invalid certified old-writer boundary')
++    cut_count,old_max=verify_certified_cut(old_journal,boot.proposal['cutoffs'],boot.proposal['cut'])
++    if old_max!=receipt['source_rowid']:
++        raise PatchError('old journal changed after committed epoch handoff')
++    total=0;sha=hashlib.sha256()
++    from .core import _canonical_json
++    for origin,seq,digest in archive.journal.db.execute(
++            'SELECT origin,seq,digest FROM events ORDER BY origin,seq'):
++        sha.update(_canonical_json([origin,seq,digest])+b'\n')
++        total+=1
++    if (type(receipt.get('total_archived')) is not int or receipt['total_archived']!=total
++            or receipt.get('archive_digest')!=sha.hexdigest()):
++        raise PatchError('carried signed updates differ from final handoff receipt')
++    return True
+diff -ruN '--exclude=CHANGES_V52.patch' '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' ../kagami_v52_patch_base/kagami-v51/patchlib/live_epoch_switch_v48.py kagami-v52/patchlib/live_epoch_switch_v48.py
+--- ../kagami_v52_patch_base/kagami-v51/patchlib/live_epoch_switch_v48.py	2026-10-26 23:30:51.000000000 +0000
++++ kagami-v52/patchlib/live_epoch_switch_v48.py	2026-10-27 00:05:53.287448963 +0000
+@@ -75,6 +75,9 @@
+     generation: TrainerGeneration
+     manifest: Path
+     store: Path
++    # Optional v52 streaming suffix staging, backed by a durable carry archive.
++    # This is LOCAL state and never transmitted in a signed certificate.
++    rebaser: Any = None
+ 
+ 
+ class LiveEpochSwitchService:
+@@ -98,7 +101,8 @@
+                  attest_journal: Callable[[TrainerGeneration,dict], Any],
+                  validate_shards: bool = True, checkpoint_stager=None,
+                  checkpoint_lifecycle=None, gc_runtime_factory=None,
+-                 gc_interval=60.0):
++                 gc_interval=60.0, old_ingress_frozen=None,
++                 warm_carry_batches_per_poll=8):
+         self.ledger = ledger
+         self.router = router
+         self.root = Path(root)
+@@ -119,6 +123,11 @@
+         self._lock = asyncio.Lock()
+         self._retry_at = 0.0
+         self._failures = 0
++        if not 1 <= warm_carry_batches_per_poll <= 128:
++            raise ValueError('invalid warm carry budget')
++        self.warm_carry_batches_per_poll=warm_carry_batches_per_poll
++        self.old_ingress_frozen=old_ingress_frozen
++        self._pending_shadow=None
+         self.pointer = self.root/'active-epoch.json'
+         if checkpoint_stager is not None:
+             if checkpoint_lifecycle is None:
+@@ -199,9 +208,17 @@
+             # local updates. Recover the missing certificate first.
+             if proposal['epoch']!=self.router.current.epoch+1:
+                 raise PatchError('missing intermediate generation; fetch certified chain')
+-            if self.checkpoint_stager is None:
++            from .online_generation import _digest as _proposal_digest
++            pending=self._pending_shadow
++            if pending is not None and pending[0]!=_proposal_digest(proposal):
++                # Never reuse a partially rebased model for a DIFFERENT cut.
++                self._pending_shadow=None
++                pending=None
++            if pending is not None:
++                prepared=pending[1]
++            elif self.checkpoint_stager is None:
+                 prepared=await self._build(proposal)
+-            else:
++            elif pending is None:
+                 if self.checkpoint_lifecycle is not None:
+                     await self.checkpoint_lifecycle.sweep_superseded(proposal['epoch'])
+                     checkpoint=await self.checkpoint_lifecycle.stage(proposal)
+@@ -230,11 +247,45 @@
+                 if fresh is None or fresh.get('proposal')!=proposal:
+                     return False
+                 return self._verify(prepared,proposal) is True
+-            if self.validate_shards:
+-                await asyncio.to_thread(verify_candidate_files,prepared,proposal)
+-            if not checked(prepared.generation):
+-                raise PatchError('candidate checkpoint not locally verified')
++            # A million-event warm carry may need many polls. Do not hash a
++            # multi-terabyte checkpoint again on EVERY one of those polls.
++            # Verify when first staged, and AGAIN just before the final swap.
++            if pending is None:
++                if self.validate_shards:
++                    await asyncio.to_thread(verify_candidate_files,prepared,proposal)
++                if not checked(prepared.generation):
++                    raise PatchError('candidate checkpoint not locally verified')
++            if prepared.rebaser is not None:
++                # Stage old signed suffix incrementally in the background while
++                # the old optimizer and WebRTC relay keep running. Unlike an
++                # O(events) one-shot stage, this advances at most a bounded
++                # number of events per certificate poll.
++                rebaser=prepared.rebaser
++                if pending is None:
++                    rebaser.validate_cut()
++                for _ in range(self.warm_carry_batches_per_poll):
++                    progress=await rebaser.tick()
++                    if progress.caught_up:
++                        break
++                if not progress.caught_up:
++                    self._pending_shadow=(_proposal_digest(proposal),prepared)
++                    return False
++                # The final suffix sweep MUST be done after the caller's
++                # flush callback has frozen + drained old-genesis ingress.
++                if self.old_ingress_frozen is None:
++                    raise PatchError('streaming epoch adoption requires an old writer fence')
++                # The cached model has changed under signed old suffix replay
++                # since preparation. Re-verify all immutable checkpoint shards
++                # before attempting the short final writer barrier.
++                if self.validate_shards:
++                    await asyncio.to_thread(verify_candidate_files,prepared,proposal)
++                if not checked(prepared.generation):
++                    raise PatchError('certificate/checkpoint changed during warm carry')
+             async def carry(old,new):
++                if prepared.rebaser is not None:
++                    if await _await(self.old_ingress_frozen(old)) is not True:
++                        raise PatchError('old epoch writers are not frozen after sealing')
++                    await prepared.rebaser.finish_under_ingress_barrier()
+                 # Critical: the archive is durable before changing any route;
+                 # old-genesis events after certified cut must be accounted for.
+                 await _await(self._carry(old,new,proposal))
+@@ -251,6 +302,7 @@
+             await self.router.switch(prepared.generation, verified=checked,
+                 flush_old=self._flush,carry_old=carry,attest_new=attest,
+                 pointer=self.pointer,activate_new=publish_network)
++            self._pending_shadow=None
+             if self.checkpoint_lifecycle is not None:
+                 await self.checkpoint_lifecycle.published(proposal)
+             return True
+@@ -270,6 +322,8 @@
+                     await self.activate_next()
+                     if (self.gc_runtime_factory is not None and
+                             self.checkpoint_lifecycle is not None and
++                            self.router.current.epoch > 0 and
++                            self.pointer.is_file() and
+                             time.monotonic()>=self._next_gc):
+                         # EpochRuntimeV43 proves that no signed carry or
+                         # live old writer is lost, then deletes the old log.
+diff -ruN '--exclude=CHANGES_V52.patch' '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' ../kagami_v52_patch_base/kagami-v51/tests/test_epoch_live_rebase_v52.py kagami-v52/tests/test_epoch_live_rebase_v52.py
+--- ../kagami_v52_patch_base/kagami-v51/tests/test_epoch_live_rebase_v52.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v52/tests/test_epoch_live_rebase_v52.py	2026-10-27 00:09:40.369589240 +0000
+@@ -0,0 +1,225 @@
++"""Real signed LoHA + SQLite archive tests of the bounded live carry stage."""
++import asyncio
++from copy import deepcopy
++import hashlib
++import pytest
++import torch
++
++from patchlib.core import PatchError, UniversalAdapter, _canonical_json
++from patchlib.continual import ContinualElasticEngine
++from patchlib.elastic import EventJournal
++from patchlib.identity import generate_keypair,signer_from_pem,verifier_from_pem
++from patchlib.epoch_carry_v46 import CrossEpochCarryArchive
++from patchlib.epoch_live_rebase_v52 import StreamingCertifiedRebase,verify_certified_cut
++
++
++class Net(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.layer = torch.nn.Linear(4,4,bias=False)
++    def forward(self):
++        return self.layer(torch.ones(4)).square().sum()
++
++
++def setup(tmp_path):
++    torch.manual_seed(42)
++    base=Net()
++    private=tmp_path/'p.key';public=tmp_path/'p.pub'
++    generate_keypair(private,public)
++    signer=signer_from_pem(private)
++    trusted={'alice':verifier_from_pem(public)}
++    def engine(name,g,peer,sign=None):
++        model=deepcopy(base)
++        adapter=UniversalAdapter(model,'tiny','v1',kind='loha',rank=2)
++        journal=EventJournal(tmp_path/f'{name}.db',g,max_bytes=0)
++        e=ContinualElasticEngine(adapter,peer,g,journal,trusted=trusted,unsafe=False,signer=sign)
++        return e
++    original=engine('source','a'*64,'alice',signer)
++    target=engine('target','b'*64,'bob')
++    def emit():
++        opt=torch.optim.AdamW(original.adapter.trainable_parameters(),lr=.01)
++        original.adapter.model().backward();opt.step();opt.zero_grad()
++        return original.seal_local(1)
++    return original,target,emit,engine
++
++
++def proposal(cutoffs,cut,manifest='c'*64):
++    return {'epoch':1,'manifest':manifest,'cutoffs':cutoffs,'cut':cut}
++
++
++def digest(entries):
++    h=hashlib.sha256()
++    for origin,seq,digest in sorted(entries):
++        h.update(_canonical_json([origin,seq,digest])+b'\n')
++    return h.hexdigest()
++
++
++@pytest.mark.asyncio
++async def test_warm_signed_carry_and_disconnect_recovery(tmp_path):
++    source,target,emit,maker=setup(tmp_path)
++    first=emit()
++    p=proposal({'alice':1},digest([('alice',1,hashlib.sha256(first).hexdigest())]))
++    archive=CrossEpochCarryArchive(tmp_path/'carry.db',source_genesis=source.genesis,
++        target_genesis=target.genesis,certified_manifest=p['manifest'],epoch=1,cutoffs=p['cutoffs'])
++    assert archive.replay(target)==0
++    runner=StreamingCertifiedRebase(source.journal,archive,target,p,batch_limit=1)
++    runner.validate_cut()
++    assert (await runner.tick()).carried==0  # certified checkpoint covers seq 1
++    second=emit()
++    assert (await runner.tick()).carried==1  # training continued during staging
++    third=emit()
++    attestation=await runner.finish_under_ingress_barrier()
++    assert attestation['total_archived']==2
++    assert runner.verify_handoff_receipt()==attestation
++    final=target.adapter.model.layer.parametrizations.weight.original.detach().clone()
++    assert archive.journal.count()==2
++    assert (await runner.tick()).carried==2
++    # Recreating the shadow from the same certified baseline + archive retains
++    # the exact already-carried old deltas, even after a process interruption.
++    archive.close();target.journal.close()
++    recovered=maker('recovered','b'*64,'bob')
++    restored=CrossEpochCarryArchive(tmp_path/'carry.db',source_genesis=source.genesis,
++        target_genesis=recovered.genesis,certified_manifest=p['manifest'],epoch=1,cutoffs=p['cutoffs'])
++    assert restored.replay(recovered)==2
++    assert torch.allclose(recovered.adapter.model.layer.parametrizations.weight.original,final,atol=1e-6)
++    restored.close();recovered.journal.close();source.journal.close()
++
++
++@pytest.mark.asyncio
++async def test_missing_or_forged_cut_never_applied(tmp_path):
++    source,target,emit,_=setup(tmp_path)
++    wire=emit()
++    p=proposal({'alice':2},digest([('alice',1,hashlib.sha256(wire).hexdigest())]))
++    archive=CrossEpochCarryArchive(tmp_path/'carry.db',source_genesis=source.genesis,
++        target_genesis=target.genesis,certified_manifest=p['manifest'],epoch=1,cutoffs=p['cutoffs'])
++    archive.replay(target)
++    runner=StreamingCertifiedRebase(source.journal,archive,target,p)
++    with pytest.raises(PatchError,match='certified-cut'):
++        runner.validate_cut()
++    with pytest.raises(PatchError,match='validated'):
++        await runner.tick()
++    assert archive.journal.count()==0
++    archive.close();target.journal.close();source.journal.close()
++
++
++@pytest.mark.asyncio
++async def test_bounded_incremental_scan_and_poison_fail_closed(tmp_path):
++    source,target,emit,_=setup(tmp_path)
++    emit();emit();emit()
++    p=proposal({},hashlib.sha256(b'').hexdigest())
++    archive=CrossEpochCarryArchive(tmp_path/'carry.db',source_genesis=source.genesis,
++        target_genesis=target.genesis,certified_manifest=p['manifest'],epoch=1,cutoffs={})
++    archive.replay(target)
++    # Small batch allows the active trainer to run between one old signed
++    # update and the next, without O(n) auxiliary data or global barrier.
++    runner=StreamingCertifiedRebase(source.journal,archive,target,p,batch_limit=1)
++    runner.validate_cut()
++    assert (await runner.tick()).carried==1
++    assert (await runner.tick()).carried==2
++    assert (await runner.tick()).carried==3
++    assert (await runner.tick()).caught_up
++    archive.close();target.journal.close();source.journal.close()
++
++@pytest.mark.asyncio
++async def test_service_real_signed_epoch_handoff_and_final_flush(tmp_path):
++    """One fully local end-to-end epoch migration with REAL torch/LoHA/events.
++
++    Consensus is provided by a pinned fake ledger with a fixed certificate;
++    this test does not pretend to validate real committee networking.
++    """
++    from types import SimpleNamespace
++    from patchlib.shards import export_state_sharded,read_manifest,semantic_shard_sha256
++    from patchlib.epoch_hot_swap_v45 import TrainerGeneration,TrainerStepRouter
++    from patchlib.live_epoch_switch_v48 import LiveEpochSwitchService,PreparedEpoch,certified_genesis
++    from patchlib.online_generation import _digest
++    source,unused,emit,maker=setup(tmp_path)
++    unused.journal.close()
++    manifest=tmp_path/'certified.fmanifest';store=tmp_path/'objects'
++    export_state_sharded(source.adapter.model,store,manifest,model_id='tiny',revision='v1',
++                         peer_id='alice',seq=0,adapter=source.adapter,shard_bytes=65536)
++    manifest_sha=hashlib.sha256(manifest.read_bytes()).hexdigest()
++    p={'epoch':1,'manifest':manifest_sha,'semantic':semantic_shard_sha256(read_manifest(manifest)),
++       'room':'lab','parent':'d'*64,'cut':hashlib.sha256(b'').hexdigest(),
++       'cutoffs':{},'replicas':['alice','bob']}
++    fresh_genesis=certified_genesis(p)
++    target=maker('next',fresh_genesis,'bob')
++    archive=CrossEpochCarryArchive(tmp_path/'live-carry.db',source_genesis=source.genesis,
++        target_genesis=target.genesis,certified_manifest=p['manifest'],epoch=1,cutoffs={})
++    assert archive.replay(target)==0
++    rebaser=StreamingCertifiedRebase(source.journal,archive,target,p,batch_limit=1)
++    old_optimizer=torch.optim.AdamW(source.adapter.trainable_parameters(),lr=.001)
++    new_optimizer=torch.optim.AdamW(target.adapter.trainable_parameters(),lr=.001)
++    old=TrainerGeneration(0,source.genesis,'e'*64,source.adapter.model,source.adapter,
++                          old_optimizer,source.journal)
++    new=TrainerGeneration(1,fresh_genesis,manifest_sha,target.adapter.model,target.adapter,
++                          new_optimizer,target.journal)
++    class Ledger:
++        def latest(self):return {'proposal':p}
++        def certified_epoch(self,epoch):return {'proposal':p} if epoch==1 else None
++    frozen=False
++    def flush(old):
++        nonlocal frozen
++        assert old is source_gen
++        emit()   # final unsealed old update, AFTER the warm carry finished
++        frozen=True
++    source_gen=old
++    async def shadow(proposal):
++        return PreparedEpoch(1,_digest(proposal),manifest_sha,new,manifest,store,rebaser)
++    def attest(newg,proposal):
++        assert newg.journal.genesis==fresh_genesis
++        return archive.journal.count()==3
++    service=LiveEpochSwitchService(ledger=Ledger(),router=TrainerStepRouter(old),
++        root=tmp_path/'epoch-pointer',build_shadow=shadow,
++        verify_local=lambda prepared,proposal: True,flush_unpublished=flush,
++        carry_suffix=lambda *_:None,attest_journal=attest,
++        transport_handoff=lambda *_:True,
++        old_ingress_frozen=lambda _:frozen,
++        warm_carry_batches_per_poll=1,validate_shards=True)
++    emit();emit()
++    # First two polls make bounded progress WITHOUT changing active model.
++    assert not await service.activate_next()
++    assert service.router.current is old
++    assert not await service.activate_next()
++    assert service.router.current is old
++    await service.activate_next()  # the final flush emits one additional signed event
++    assert service.router.current is new
++    assert archive.journal.count()==3
++    assert rebaser.verify_handoff_receipt()['total_archived']==3
++    assert (tmp_path/'epoch-pointer'/'active-epoch.json').is_file()
++    after=target.adapter.model.layer.parametrizations.weight.original.detach().clone()
++    assert not new_optimizer.state
++    # Crash-restart replay reconstructs all three original signed old events.
++    archive.close();target.journal.close()
++    restart=maker('restart',fresh_genesis,'bob')
++    archived=CrossEpochCarryArchive(tmp_path/'live-carry.db',source_genesis=source.genesis,
++        target_genesis=restart.genesis,certified_manifest=manifest_sha,epoch=1,cutoffs={})
++    assert archived.replay(restart)==3
++    assert torch.allclose(restart.adapter.model.layer.parametrizations.weight.original,after,atol=1e-5)
++    archived.close();restart.journal.close();source.journal.close()
++
++
++@pytest.mark.asyncio
++async def test_invalid_source_bytes_poison_shadow_not_active_trainer(tmp_path):
++    source,target,emit,_=setup(tmp_path)
++    # SQLite checksum alone is not an authenticated signed LoHA update.
++    source.journal.append('alice',1,b'corrupt-wire-without-a-signature')
++    p=proposal({},hashlib.sha256(b'').hexdigest())
++    archive=CrossEpochCarryArchive(tmp_path/'carry.db',source_genesis=source.genesis,
++        target_genesis=target.genesis,certified_manifest=p['manifest'],epoch=1,cutoffs={})
++    archive.replay(target)
++    runner=StreamingCertifiedRebase(source.journal,archive,target,p)
++    runner.validate_cut()
++    with pytest.raises(PatchError):await runner.tick()
++    with pytest.raises(PatchError,match='poisoned'):
++        await runner.tick()
++    assert archive.journal.count()==0
++    archive.close();target.journal.close();source.journal.close()
++
++
++def test_certified_cut_cannot_claim_sparse_origin_prefix(tmp_path):
++    source,target,emit,_=setup(tmp_path)
++    source.journal.append('alice',2,b'stored-but-missing-sequence-one')
++    fake_cut=digest([('alice',2,hashlib.sha256(b'stored-but-missing-sequence-one').hexdigest())])
++    with pytest.raises(PatchError,match='missing signed sequence'):
++        verify_certified_cut(source.journal,{'alice':2},fake_cut)
++    target.journal.close();source.journal.close()
+diff -ruN '--exclude=CHANGES_V52.patch' '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' ../kagami_v52_patch_base/kagami-v51/tests/test_epoch_trainer_boot_v52.py kagami-v52/tests/test_epoch_trainer_boot_v52.py
+--- ../kagami_v52_patch_base/kagami-v51/tests/test_epoch_trainer_boot_v52.py	1970-01-01 00:00:00.000000000 +0000
++++ kagami-v52/tests/test_epoch_trainer_boot_v52.py	2026-10-27 00:04:24.481407164 +0000
+@@ -0,0 +1,78 @@
++import hashlib
++import pytest
++
++from patchlib.core import PatchError
++from patchlib.epoch_hot_swap_v45 import durable_pointer
++from patchlib.epoch_trainer_boot_v52 import resolve_certified_boot,verify_boot_carry
++from patchlib.epoch_carry_v46 import CrossEpochCarryArchive
++from patchlib.epoch_live_rebase_v52 import StreamingCertifiedRebase
++from patchlib.live_epoch_switch_v48 import certified_genesis
++from patchlib.shards import export_state_sharded,read_manifest,semantic_shard_sha256
++from test_epoch_live_rebase_v52 import setup
++
++
++@pytest.mark.asyncio
++async def test_real_certified_restart_requires_complete_signed_handoff(tmp_path):
++    source,unused,emit,maker=setup(tmp_path)
++    unused.journal.close()
++    root=tmp_path/'live-epoch'
++    temp=tmp_path/'prepared.fmanifest'
++    export_state_sharded(source.adapter.model,tmp_path/'temp-objects',temp,
++        model_id='tiny',revision='v1',peer_id='alice',seq=0,
++        adapter=source.adapter,shard_bytes=65536)
++    sha=hashlib.sha256(temp.read_bytes()).hexdigest()
++    view=root/'checkpoints'/'views'/sha
++    view.mkdir(parents=True)
++    import shutil
++    shutil.copy2(temp,view/'checkpoint.fmanifest')
++    shutil.copytree(tmp_path/'temp-objects'/'objects',view/'objects')
++    p={'room':'room','epoch':1,'parent':source.genesis,
++       'manifest':sha,'semantic':semantic_shard_sha256(read_manifest(temp)),
++       'cut':hashlib.sha256(b'').hexdigest(),'cutoffs':{},'replicas':['alice','bob']}
++    gen=certified_genesis(p)
++    target=maker('next',gen,'bob')
++    carry=root/'carries'/'epoch-00000001.sqlite3'
++    archive=CrossEpochCarryArchive(carry,source_genesis=source.genesis,
++        target_genesis=gen,certified_manifest=sha,epoch=1,cutoffs={})
++    assert archive.replay(target)==0
++    emit();emit()
++    reb=StreamingCertifiedRebase(source.journal,archive,target,p)
++    reb.validate_cut()
++    assert (await reb.finish_under_ingress_barrier())['total_archived']==2
++    durable_pointer(root/'active-epoch.json',epoch=1,genesis=gen,checkpoint_hash=sha)
++    class Ledger:
++        genesis=source.genesis
++        def certified_epoch(self,i):return {'proposal':p} if i==1 else None
++    boot=resolve_certified_boot(root=root,journal_base=source.journal.path,
++        ledger=Ledger(),root_genesis=source.genesis)
++    assert boot is not None
++    assert boot.journal_path==root/'journals'/'epoch-00000001.sqlite3'
++    assert verify_boot_carry(boot,archive,old_journal=source.journal)
++    emit() # An old writer continuing after pointer would be a safety violation
++    with pytest.raises(PatchError,match='old journal changed'):
++        verify_boot_carry(boot,archive,old_journal=source.journal)
++    archive.close();target.journal.close();source.journal.close()
++
++
++@pytest.mark.asyncio
++async def test_restart_rejects_unbacked_pointer(tmp_path):
++    root=tmp_path/'live-epoch'
++    durable_pointer(root/'active-epoch.json',epoch=1,genesis='a'*64,checkpoint_hash='b'*64)
++    class Ledger:
++        genesis='c'*64
++        def certified_epoch(self,i):return None
++    with pytest.raises(PatchError,match='quorum certificate'):
++        resolve_certified_boot(root=root,journal_base=tmp_path/'old.db',
++            ledger=Ledger(),root_genesis='c'*64)
++
++
++def test_broken_symlink_pointer_is_not_treated_as_genesis(tmp_path):
++    root=tmp_path/'live-epoch'
++    root.mkdir()
++    (root/'active-epoch.json').symlink_to('nonexistent-durable-epoch-pointer')
++    class Ledger:
++        genesis='c'*64
++        def certified_epoch(self,i):return None
++    with pytest.raises(PatchError,match='symlink'):
++        resolve_certified_boot(root=root,journal_base=tmp_path/'old.db',
++            ledger=Ledger(),root_genesis='c'*64)
+diff -ruN '--exclude=CHANGES_V52.patch' '--exclude=__pycache__' '--exclude=.pytest_cache' '--exclude=*.pyc' ../kagami_v52_patch_base/kagami-v51/tests/test_live_epoch_switch_v48.py kagami-v52/tests/test_live_epoch_switch_v48.py
+--- ../kagami_v52_patch_base/kagami-v51/tests/test_live_epoch_switch_v48.py	2026-10-26 16:48:06.000000000 +0000
++++ kagami-v52/tests/test_live_epoch_switch_v48.py	2026-10-26 23:54:05.180929496 +0000
+@@ -266,3 +266,65 @@
+         LiveEpochSwitchService(ledger=Ledger(),router=TrainerStepRouter(make_gen(0)),root=tmp_path,
+             build_shadow=lambda _:None,verify_local=lambda *_:True,flush_unpublished=lambda *_:None,
+             carry_suffix=lambda *_:None,transport_handoff=lambda *_:True,attest_journal=lambda *_:True)
++
++@pytest.mark.asyncio
++async def test_v52_warm_carry_is_bounded_and_requires_writer_fence(tmp_path):
++    # A certified epoch can warm a persistent, independently prepared new
++    # trainer while the old trainer keeps running, then finalize at a barrier.
++    p={'epoch':1,'manifest':'a'*64,'semantic':'b'*64,'cut':'c'*64,
++       'room':'test','parent':'d'*64}
++    ledger=Ledger();ledger.proposal=p
++    old=make_gen(0)
++    after=make_gen(1)
++    after=TrainerGeneration(1,certified_genesis(p),p['manifest'],
++        after.model,after.adapter,after.optimizer,SimpleNamespace(genesis=certified_genesis(p)))
++    class Warm:
++        def __init__(self):self.i=0;self.validations=0;self.finished=0
++        def validate_cut(self):self.validations+=1
++        async def tick(self):
++            self.i+=1
++            return SimpleNamespace(caught_up=self.i>=4)
++        async def finish_under_ingress_barrier(self):self.finished+=1
++    warm=Warm();builders=[];frozen=False
++    async def shadow(proposal):
++        builders.append('new')
++        return PreparedEpoch(1,_digest(proposal),p['manifest'],after,tmp_path/'m',tmp_path/'store',warm)
++    async def flush(_):
++        nonlocal frozen
++        frozen=True
++    service=LiveEpochSwitchService(ledger=ledger,router=TrainerStepRouter(old),
++        root=tmp_path,build_shadow=shadow,verify_local=lambda *_:True,
++        flush_unpublished=flush,carry_suffix=lambda *_:None,
++        attest_journal=lambda *_:True,transport_handoff=lambda *_:True,
++        old_ingress_frozen=lambda _:frozen,warm_carry_batches_per_poll=2,
++        validate_shards=False)
++    assert await service.activate_next() is False
++    assert service.router.current is old
++    assert not service.pointer.exists()
++    assert await service.activate_next() is True
++    assert builders==['new'] and warm.validations==1 and warm.finished==1
++    assert service.router.current is after
++
++
++@pytest.mark.asyncio
++async def test_v52_missing_writer_barrier_refuses_streamed_epoch(tmp_path):
++    p={'epoch':1,'manifest':'a'*64,'semantic':'b'*64,
++       'room':'test','parent':'d'*64}
++    ledger=Ledger();ledger.proposal=p
++    old=make_gen(0);after=make_gen(1)
++    after=TrainerGeneration(1,certified_genesis(p),p['manifest'],
++        after.model,after.adapter,after.optimizer,SimpleNamespace(genesis=certified_genesis(p)))
++    class Warm:
++        def validate_cut(self):pass
++        async def tick(self):return SimpleNamespace(caught_up=True)
++        async def finish_under_ingress_barrier(self):raise AssertionError('must not apply')
++    async def shadow(p):
++        return PreparedEpoch(1,_digest(p),p['manifest'],after,tmp_path/'m',tmp_path/'store',Warm())
++    service=LiveEpochSwitchService(ledger=ledger,router=TrainerStepRouter(old),
++        root=tmp_path,build_shadow=shadow,verify_local=lambda *_:True,
++        flush_unpublished=lambda *_:None,carry_suffix=lambda *_:None,
++        attest_journal=lambda *_:True,transport_handoff=lambda *_:True,
++        old_ingress_frozen=lambda _:False,validate_shards=False)
++    with pytest.raises(PatchError,match='old epoch writers'):
++        await service.activate_next()
++    assert service.router.current is old and not service.pointer.exists()

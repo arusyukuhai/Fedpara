@@ -186,49 +186,85 @@ def shard_map(meta: dict) -> dict[str,int]:
 def export_state_sharded(model, store: Path, output: Path, *, model_id: str,
                          revision: str, peer_id: str, seq: int = 0,
                          adapter=None, shard_bytes: int = DEFAULT_SHARD_BYTES,
-                         max_state_bytes: int = 32*1024**3) -> dict:
+                         max_state_bytes: int = 32*1024**3,
+                         frozen_base_sources=None) -> dict:
     """Export live PyTorch state directly into shards, with no intermediate .fstate.
 
     Includes effective LoRA/LoHA-adapted weights, embeddings, and buffers.
     CUDA tensors are moved to CPU in individually bounded blocks.
     """
     import torch
+    # A sparse page COW engine deliberately leaves the raw nn.Parameter at
+    # immutable genesis values. Exporting it without materializing would
+    # silently certify INCORRECT weights, so require an explicit full export.
+    manager=getattr(model,'_fedpara_lazy_mutable_weights',None)
+    if manager is not None and getattr(manager,'stores',None):
+        raise PatchError('paged COW needs explicit manager.materialize_all(adapter) before full-state export')
+    # The factor ledger supports direct bounded sharded export; the immutable
+    # original Parameter alone is NOT the effective model.  Thread-local scope
+    # suppresses its state_dict hook only for this controlled serialization.
     if type(shard_bytes) is not int or not MIN_SHARD_BYTES <= shard_bytes <= MAX_SHARD_BYTES:
         raise PatchError('invalid shard_bytes')
     if not isinstance(model_id,str) or not model_id or not isinstance(revision,str) or not revision:
         raise PatchError('model_id and revision required')
     if not isinstance(peer_id,str) or not PEER_ID.fullmatch(peer_id) or type(seq) is not int or seq < 0:
         raise PatchError('invalid peer_id/seq')
-    tensors = _state_items(model,adapter)
-    if not 0 < len(tensors) <= MAX_TENSORS:
-        raise PatchError('invalid number of registered tensors')
-    meta = {'format':FORMAT,'version':VERSION,'model_id':model_id,'revision':revision,
-            'peer_id':peer_id,'seq':seq,'shard_bytes':shard_bytes,
-            'total_tensor_bytes':0,'tensors':[]}
-    for idx, (name,tensor) in enumerate(sorted(tensors.items())):
-        if not _valid_name(name) or not isinstance(tensor,torch.Tensor):
-            raise PatchError('unsupported state entry')
-        if str(tensor.dtype) not in DTYPES:
-            raise PatchError('unsupported tensor dtype: '+str(tensor.dtype))
-        size = _nbytes(list(tensor.shape),str(tensor.dtype))
-        meta['total_tensor_bytes'] += size
-        if meta['total_tensor_bytes'] > max_state_bytes:
-            raise PatchError('state exceeds max_state_bytes')
-        spec = {'name':name,'entry':f'tensors/{idx:06d}.bin',
-                'shape':list(tensor.shape),'dtype':str(tensor.dtype),
-                'bytes':size,'shards':[]}
-        tensor_hash = hashlib.sha256()
-        written = 0
-        for data in _tensor_chunks(tensor,chunk_bytes=shard_bytes):
-            written += len(data)
-            tensor_hash.update(data)
-            digest = _sha(data)
-            put_object(store,digest,data)
-            spec['shards'].append({'sha256':digest,'size':len(data)})
-        if written != size:
-            raise PatchError('unexpected tensor byte count')
-        spec['sha256'] = tensor_hash.hexdigest()
-        meta['tensors'].append(spec)
+    from .shard_runtime import effective_chunks, effective_state_sources
+    import torch
+    # Access the *original* parametrized weight, never the effective .weight
+    # property (which eagerly allocates an entire dense LoHa/LoRA weight).
+    guard = adapter.lock if adapter is not None else None
+    from contextlib import nullcontext
+    ledger=(manager if getattr(manager,'_fedpara_is_factor_ledger',False) else None)
+    with guard if guard is not None else nullcontext(), torch.no_grad(), (ledger.export_context() if ledger is not None else nullcontext()):
+        if ledger is not None:ledger._healthy()
+        sources_by_alias=(frozen_base_sources if frozen_base_sources is not None
+                          else ({alias:ledger.sources[g.canonical]
+                          for g in adapter.groups for alias in g.aliases
+                          if g.canonical in ledger.sources} if ledger is not None else {}))
+        if frozen_base_sources is not None and ledger is None:
+            raise PatchError('frozen factor ledger sources require a factor-ledger manager')
+        tensors = effective_state_sources(model, adapter)
+        if not 0 < len(tensors) <= MAX_TENSORS:
+            raise PatchError('invalid number of registered tensors')
+        meta = {'format':FORMAT,'version':VERSION,'model_id':model_id,'revision':revision,
+                'peer_id':peer_id,'seq':seq,'shard_bytes':shard_bytes,
+                'total_tensor_bytes':0,'tensors':[]}
+        for idx, (name, (tensor, overlay)) in enumerate(sorted(tensors.items())):
+            if not _valid_name(name) or not isinstance(tensor,torch.Tensor):
+                raise PatchError('unsupported state entry')
+            if str(tensor.dtype) not in DTYPES:
+                raise PatchError('unsupported tensor dtype: '+str(tensor.dtype))
+            size = _nbytes(list(tensor.shape),str(tensor.dtype))
+            meta['total_tensor_bytes'] += size
+            if meta['total_tensor_bytes'] > max_state_bytes:
+                raise PatchError('state exceeds max_state_bytes')
+            spec = {'name':name,'entry':f'tensors/{idx:06d}.bin',
+                    'shape':list(tensor.shape),'dtype':str(tensor.dtype),
+                    'bytes':size,'shards':[]}
+            tensor_hash=hashlib.sha256()
+            buffer=bytearray()
+            written=0
+            for piece in effective_chunks(tensor,overlay,chunk_bytes=shard_bytes,
+                                          base_source=sources_by_alias.get(name)):
+                tensor_hash.update(piece)
+                written += len(piece)
+                buffer.extend(piece)
+                while len(buffer) >= shard_bytes:
+                    data=bytes(buffer[:shard_bytes])
+                    del buffer[:shard_bytes]
+                    digest=_sha(data)
+                    put_object(store,digest,data)
+                    spec['shards'].append({'sha256':digest,'size':len(data)})
+            if buffer:
+                data=bytes(buffer)
+                digest=_sha(data)
+                put_object(store,digest,data)
+                spec['shards'].append({'sha256':digest,'size':len(data)})
+            if written != size:
+                raise PatchError('unexpected tensor byte count')
+            spec['sha256'] = tensor_hash.hexdigest()
+            meta['tensors'].append(spec)
     payload = manifest_bytes(meta)
     parse_manifest(payload,max_state_bytes=max_state_bytes)
     _atomic_write(Path(output),payload)
@@ -318,3 +354,133 @@ def assemble_state(manifest: Path, store: Path, output: Path, *,
         return legacy
     finally:
         temp.unlink(missing_ok=True)
+
+
+def _sharded_destinations(model, adapter=None):
+    """Raw destination tensors, without accessing dense parametrized weights."""
+    from .shard_runtime import effective_state_sources
+    return {name: pair[0] for name,pair in effective_state_sources(model,adapter).items()}
+
+
+def _install_verified_shards(meta, store, destinations, *, chunk_bytes=4*1024*1024):
+    """Copy a PRE-VERIFIED snapshot into preallocated parameters without assembly.
+
+    This mutates weights as it progresses. Call only at a quiescent boundary or
+    on a newly constructed model; a device failure during install may leave a
+    partially installed model and must be treated as fatal.
+    """
+    import torch
+    if type(chunk_bytes) is not int or not 64*1024 <= chunk_bytes <= MAX_SHARD_BYTES:
+        raise ValueError('invalid bounded read size')
+    if set(destinations) != {spec['name'] for spec in meta['tensors']}:
+        raise PatchError('sharded snapshot tensor names differ from local model')
+    # Every tied alias must represent the SAME bytes. Fail before mutation.
+    tied = {}
+    for spec in meta['tensors']:
+        t=destinations[spec['name']]
+        if (not isinstance(t,torch.Tensor) or t.device.type=='meta'
+            or tuple(t.shape)!=tuple(spec['shape']) or str(t.dtype)!=spec['dtype']):
+            raise PatchError('sharded snapshot destination shape/dtype mismatch: '+spec['name'])
+        key=(t.untyped_storage().data_ptr(),t.storage_offset(),tuple(t.shape),tuple(t.stride()))
+        if key in tied and tied[key] != spec['sha256']:
+            raise PatchError('shared/tied snapshot weights disagree')
+        tied[key]=spec['sha256']
+    verify_shards(meta,store)  # All referenced data is checked before first write.
+    with torch.no_grad():
+        already=set()
+        for spec in meta['tensors']:
+            target=destinations[spec['name']]
+            key=(target.untyped_storage().data_ptr(),target.storage_offset(),tuple(target.shape),tuple(target.stride()))
+            if key in already:
+                continue
+            already.add(key)
+            flat=target.view(-1) if target.is_contiguous() else None
+            def store_range(start,values):
+                if flat is not None:
+                    flat[start:start+values.numel()].copy_(values)
+                    return
+                coords=[]
+                indices=torch.arange(start,start+values.numel(),device=target.device,dtype=torch.long)
+                for dim in reversed(tuple(target.shape)):
+                    coords.append(indices.remainder(dim))
+                    indices=torch.div(indices,dim,rounding_mode='floor')
+                target[tuple(reversed(coords))]=values
+            offset=0
+            full_hash=hashlib.sha256()
+            for chunk in spec['shards']:
+                path=_blob_path(store,chunk['sha256'])
+                with path.open('rb') as src:
+                    remaining=chunk['size']
+                    while remaining:
+                        amount=min(chunk_bytes,remaining)
+                        # Respect tensor element boundaries even across file reads.
+                        amount-=amount % target.element_size()
+                        if not amount:
+                            raise PatchError('unaligned tensor shard')
+                        data=src.read(amount)
+                        if len(data)!=amount:
+                            raise PatchError('unexpected EOF in verified shard')
+                        full_hash.update(data)
+                        raw=torch.frombuffer(bytearray(data),dtype=torch.uint8).view(target.dtype)
+                        count=amount//target.element_size()
+                        store_range(offset,raw.to(target.device))
+                        offset+=count
+                        remaining-=amount
+                    if src.read(1):
+                        raise PatchError('trailing shard data')
+            if offset!=target.numel() or full_hash.hexdigest()!=spec['sha256']:
+                raise PatchError('tensor digest changed while applying: '+spec['name'])
+
+
+def apply_sharded_state(model, manifest: Path, store: Path, *, model_id: str,
+                        revision: str, max_state_bytes: int = 32*1024**3,
+                        chunk_bytes: int = 4*1024*1024):
+    """Load data-only sharded state directly into an EXISTING model, no ZIP.
+
+    Does not construct a model or offload its base weights; the model still
+    needs adequate CPU/device memory (or an external offload-capable backend).
+    """
+    manager=getattr(model,'_fedpara_lazy_mutable_weights',None)
+    if manager is not None and (getattr(manager,'stores',None) or getattr(manager,'sources',None)):
+        raise PatchError('cannot import into a virtual base; materialize all first')
+    meta=read_manifest(manifest,max_state_bytes=max_state_bytes)
+    if (meta['model_id'],meta['revision'])!=(model_id,revision):
+        raise PatchError('sharded snapshot model identity/revision mismatch')
+    _install_verified_shards(meta,store,_sharded_destinations(model),chunk_bytes=chunk_bytes)
+    return meta
+
+
+def apply_sharded_effective_state(model, adapter, manifest: Path, store: Path, *,
+                                  model_id: str, revision: str,
+                                  max_state_bytes: int = 32*1024**3,
+                                  chunk_bytes: int = 4*1024*1024):
+    """Direct cold-join import, preserving tied weights and continual anchors."""
+    import torch
+    meta=read_manifest(manifest,max_state_bytes=max_state_bytes)
+    if (meta['model_id'],meta['revision'])!=(model_id,revision):
+        raise PatchError('sharded snapshot model identity/revision mismatch')
+    with adapter.lock:
+        # v60: cold-join / shadow installation must never write through a
+        # read-only safetensors genesis mapping. Prepare private scratch first.
+        from .lazy_mutable_weights_v60 import materialize_all
+        materialize_all(adapter)
+        _install_verified_shards(meta,store,_sharded_destinations(model,adapter),
+                                 chunk_bytes=chunk_bytes)
+        from .relora import _refresh_spec
+        with torch.no_grad():
+            for group in adapter.groups:
+                factor=group.overlay.local
+                _refresh_spec(factor)
+                if hasattr(group.overlay,'anchor'):
+                    for i,part in enumerate(factor.parts):
+                        getattr(group.overlay.anchor,f'part{i}').copy_(part.detach())
+                group.overlay.remotes.clear()
+                group.overlay._peer_ids.clear()
+    return meta
+
+
+def semantic_shard_sha256(meta: dict) -> str:
+    """Identity digest matching semantic_state_sha256 on assembled .fstate."""
+    tensors=[{k:spec[k] for k in ('name','dtype','shape','sha256')} for spec in meta['tensors']]
+    return hashlib.sha256(_canonical_json({'model_id':meta['model_id'],
+                      'revision':meta['revision'],'tensors':tensors})).hexdigest()

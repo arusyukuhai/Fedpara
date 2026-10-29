@@ -1,0 +1,694 @@
+--- /dev/null
++++ b/README_V83_MODEL_TYPE.md
+@@ -0,0 +1,73 @@
++# Kagami v83 — Explicit `model_type` in Hugging Face `config.json`
++
++Hugging Face Transformers can reject a model with a message similar to
++`Should have a model_type key in its config.json`.  Kagami room descriptors
++(`manifest.json` / `design.model_type`) are **not** a substitute for the
++Hugging Face model's own `config.json`.
++
++## What changed
++
++1. `patchlib/hf_config_v83.py` provides a built-in-only compatibility loader.
++   It reads valid `model_type` unchanged. For *legacy config.json without that
++   key* it accepts **only** a known, unambiguous built-in model class from
++   `architectures` (such as `GPT2LMHeadModel`, `LlamaForCausalLM`,
++   `GPTNeoForCausalLM`) and constructs its corresponding config. An unknown or
++   ambiguous architecture fails with a clear diagnostic. **The source model
++   files are never edited on load.** A declared unknown model_type still fails.
++2. Kagami's CLI train/pretrained loading, streaming base loading, GUI config
++   discovery, code/architecture initializers, direct inference and trained
++   snapshot inference use the compatible loader. Pretrained weights loading
++   receives the verified config explicitly rather than causing Transformers to
++   try reading the same missing `model_type` a second time.
++3. Temporary Hugging Face safetensors exports used by trained evaluation and
++   ordinary merged model exports now enforce an explicit `model_type` key.
++   Conflicting existing keys are rejected, never overwritten silently.
++4. The offline diagnostic no longer says a missing/unknown model identity is
++   a trainable streaming candidate. Where safely inferable, it shows the
++   inferred architecture and a warning.
++
++## Repairing a *local* legacy model (only when desired)
++
++First inspect without writing:
++
++```bash
++python scripts/fix_hf_model_type_v83.py /path/to/local/model
++```
++
++If the known built-in `architectures` field unambiguously identifies the type,
++repair the local `config.json`:
++
++```bash
++python scripts/fix_hf_model_type_v83.py /path/to/local/model --write
++```
++
++When **you know** the architecture but the JSON has no usable `architectures`
++field, you may specify a built-in model type explicitly:
++
++```bash
++python scripts/fix_hf_model_type_v83.py /path/to/local/model --model-type gpt_neo --write
++```
++
++The script makes `config.json.before-v83.bak` before modifying `config.json`.
++It never modifies weights. Editing a signed or hash-pinned model's config
++invalidates its original commitment: publish a new authenticated revision.
++Do **not** set `model_type` to a guessed value, because a mismatched
++architecture can cause load failures or unsafe/inaccurate inference.
++
++## LoHA/PPO replay implications
++
++This v83 patch does **not** rewrite KCP82/KTR82, actor signatures, frozen-base
++SHA-256 manifests, adapters or checkpoint tensor bytes. A local legacy config
++repair must be treated as a *new* model identity/revision if config is part
++of a signed genesis commitment. Missing `model_type` is a model architecture
++metadata issue, not a LoHA factor-replay correctness issue.
++
++## Verification
++
++```bash
++PYTHONPATH=. pytest -q tests/test_hf_config_v83.py tests/test_hf_compat_v63.py tests/test_kagami_v32.py tests/test_cli.py
++```
++
++Tests run offline with stub Transformers config factories. This environment
++has no `transformers` installation; a real AutoConfig/weights integration
++smoke test still needs the target Transformers version and model files.
+--- a/patchlib/cli.py
++++ b/patchlib/cli.py
+@@ -185,11 +185,11 @@
+         cls = getattr(transformers,clsname)
+         custom = bool(getattr(args,'trust_remote_code',False))
+         if streaming:
+-            from transformers import AutoConfig
++            from .hf_config_v83 import load_hf_config
+             from .streaming_base import materialize_meta_from_safetensors
+             # The HF model factory must support meta construction without
+             # eagerly materializing its own base weights.
+-            cfg=AutoConfig.from_pretrained(args.model,revision=args.revision,
++            cfg=load_hf_config(args.model,revision=args.revision,
+                        trust_remote_code=custom,local_files_only=custom)
+             from .hf_compat_v63 import validate_training_config
+             validate_training_config(cfg, args.model, streaming=True)
+@@ -212,8 +212,10 @@
+             from .hf_compat_v63 import validate_training_config
+             # Give actionable errors for unsupported DeepSeek FP8/MoE families.
+             auto_config=getattr(transformers,'AutoConfig',None)
++            config = None
+             if auto_config is not None:
+-                config = auto_config.from_pretrained(args.model,revision=args.revision,
++                from .hf_config_v83 import load_hf_config
++                config = load_hf_config(args.model,revision=args.revision,
+                     trust_remote_code=custom,local_files_only=custom)
+                 validate_training_config(config, args.model, streaming=False)
+             # v4 calls this torch_dtype; v5 calls it dtype. Avoid loading a
+@@ -224,7 +226,8 @@
+             mdl = cls.from_pretrained(args.model, revision=args.revision,
+                         trust_remote_code=custom,
+                         local_files_only=custom,
+-                        use_safetensors=not args.allow_legacy_bin,**dtype_arg)
++                        use_safetensors=not args.allow_legacy_bin,
++                        **({'config':config} if config is not None else {}), **dtype_arg)
+         revision = getattr(mdl.config,'_commit_hash',None) or args.revision
+     device = resolve_device(args.device)
+     if not streaming:
+@@ -753,7 +756,7 @@
+                 except asyncio.TimeoutError: pass
+         if args.merged_output:
+             adapter.merge_into_base()
+-            model.save_pretrained(args.merged_output, safe_serialization=True)
++            save_model(model,args.merged_output)
+             print('saved merged model:',args.merged_output)
+     finally:
+         net.cancel()
+@@ -818,6 +821,13 @@
+     folder = Path(folder); folder.mkdir(parents=True, exist_ok=True)
+     if hasattr(model,'save_pretrained'):
+         model.save_pretrained(str(folder),safe_serialization=True)
++        # HF models normally write this themselves; enforce it on all Kagami
++        # merged checkpoint exports, including third-party config serializers.
++        config = getattr(model, 'config', None)
++        if (config is not None and hasattr(config, 'save_pretrained')
++                and isinstance(getattr(config, 'model_type', None), str)):
++            from .hf_config_v83 import save_hf_config_with_model_type
++            save_hf_config_with_model_type(config, folder)
+     else:
+         from safetensors.torch import save_file
+         weights = {name: param.detach().cpu().clone() for name,param in model.state_dict().items()}
+--- a/patchlib/hf_compat_v63.py
++++ b/patchlib/hf_compat_v63.py
+@@ -7,7 +7,9 @@
+ from __future__ import annotations
+ 
+ def validate_training_config(config, model_id, *, streaming=False):
+-    model_type=str(getattr(config,'model_type','')).lower().replace('-','_')
++    model_type=str(getattr(config,'model_type','') or '').lower().replace('-','_')
++    if not model_type:
++        raise ValueError('Missing model_type: Hugging Face config.json must declare the model architecture')
+     quant=getattr(config,'quantization_config',None)
+     name=str(model_id).lower()
+     # Architecture, not merely repository brand, decides compatibility.
+@@ -55,8 +57,17 @@
+     cfg=json.loads(config_path.read_text(encoding='utf8'))
+     if not isinstance(cfg,dict):
+         raise ValueError('invalid Hugging Face config.json')
++    from .hf_config_v83 import checked_model_type, MissingModelTypeError
++    identity_error = None
++    inferred = False
++    try:
++        detected_type = checked_model_type(cfg, source=str(model_id))
++        inferred = not bool(cfg.get('model_type'))
++    except MissingModelTypeError as exc:
++        detected_type = None
++        identity_error = str(exc)
+     report={'model':str(model_id), 'revision':revision,
+-            'model_type':cfg.get('model_type'), 'architectures':cfg.get('architectures'),
++            'model_type':detected_type, 'architectures':cfg.get('architectures'),
+             'checkpoint_present':False, 'streaming_candidate':False,
+             'notes':[]}
+     if source is not None:
+@@ -65,8 +76,13 @@
+         report['local_safetensors_bytes']=sum(p.stat().st_size for p in source.glob('*.safetensors'))
+         if not report['checkpoint_present']:
+             report['notes'].append('Expected model.safetensors or sharded model.safetensors.index.json; .bin/pickle not supported in safe streaming mode')
++    if identity_error:
++        report['notes'].append(identity_error)
++        return report
++    if inferred:
++        report['notes'].append('model_type inferred from unique built-in architectures; Kagami can normalize it on export without modifying the original')
+     try:
+-        validate_training_config(SimpleNamespace(**cfg),model_id,streaming=True)
++        validate_training_config(SimpleNamespace(**(cfg | {'model_type':detected_type})),model_id,streaming=True)
+     except ValueError as exc:
+         report['notes'].append(str(exc))
+     else:
+--- /dev/null
++++ b/patchlib/hf_config_v83.py
+@@ -0,0 +1,160 @@
++"""Audited Hugging Face configuration identity handling (Kagami v83).
++
++A peer must never guess the architecture of a model from its weights or its
++repository name.  The only supported legacy recovery is an unambiguous,
++recognized *built-in* ``architectures`` declaration in config.json.  We never
++execute remote model code or modify a cached/remote checkpoint on load.
++"""
++from __future__ import annotations
++
++import json
++import os
++import secrets
++from pathlib import Path
++
++# Deliberately small, audited list, not arbitrary attribute lookup/imports.
++# The keys here are HF built-in model class names, not descriptions or model IDs.
++_BUILTIN_ARCHITECTURES = {
++    'GPT2Model': 'gpt2', 'GPT2LMHeadModel': 'gpt2',
++    'GPT2ForSequenceClassification': 'gpt2',
++    'GPTNeoModel': 'gpt_neo', 'GPTNeoForCausalLM': 'gpt_neo',
++    'GPTNeoXModel': 'gpt_neox', 'GPTNeoXForCausalLM': 'gpt_neox',
++    'LlamaModel': 'llama', 'LlamaForCausalLM': 'llama',
++    'LlamaForSequenceClassification': 'llama',
++    'MistralModel': 'mistral', 'MistralForCausalLM': 'mistral',
++    'Qwen2Model': 'qwen2', 'Qwen2ForCausalLM': 'qwen2',
++    'GemmaModel': 'gemma', 'GemmaForCausalLM': 'gemma',
++    'Gemma2Model': 'gemma2', 'Gemma2ForCausalLM': 'gemma2',
++    'Phi3Model': 'phi3', 'Phi3ForCausalLM': 'phi3',
++    'OPTModel': 'opt', 'OPTForCausalLM': 'opt',
++    'BloomModel': 'bloom', 'BloomForCausalLM': 'bloom',
++    'BertModel': 'bert', 'BertForMaskedLM': 'bert',
++    'BertForSequenceClassification': 'bert',
++    'T5Model': 't5', 'T5ForConditionalGeneration': 't5',
++    'BartModel': 'bart', 'BartForConditionalGeneration': 'bart',
++}
++
++
++class MissingModelTypeError(ValueError):
++    """A repository config has no verifiable architecture identity."""
++
++
++def checked_model_type(data: dict, *, source: str = 'config.json') -> str:
++    """Return declared model_type, or infer it only from unambiguous HF classes.
++
++    Never infer from path/name (Transformers' historic fallback does that) and
++    never choose the first architecture when multiple candidates conflict.
++    """
++    if not isinstance(data, dict):
++        raise MissingModelTypeError(f'{source}: config.json must contain a JSON object')
++    supplied = data.get('model_type')
++    if isinstance(supplied, str) and supplied.strip():
++        return supplied
++    if supplied is not None:
++        raise MissingModelTypeError(f'{source}: model_type must be a nonempty string')
++    names = data.get('architectures', [])
++    if isinstance(names, list) and names and all(isinstance(x, str) for x in names):
++        inferred = {_BUILTIN_ARCHITECTURES.get(x) for x in names}
++        if None not in inferred and len(inferred) == 1:
++            return inferred.pop()
++    raise MissingModelTypeError(
++        f'{source}: missing model_type in config.json and no unambiguous recognized '
++        'built-in architectures. Set model_type to the actual Hugging Face '
++        'architecture (e.g. gpt2, gpt_neo, llama, qwen2); never guess from the '
++        'repository name. Custom architectures require a separately audited loader.'
++    )
++
++
++def _read_checkpoint_config(model_id: str, revision: str, *, local_files_only: bool) -> dict:
++    local = Path(model_id).expanduser()
++    if local.is_dir():
++        path = local / 'config.json'
++    else:
++        from huggingface_hub import hf_hub_download
++        path = Path(hf_hub_download(model_id, 'config.json', revision=revision,
++                                    local_files_only=local_files_only))
++    if not path.is_file():
++        raise FileNotFoundError(f'No config.json in {model_id}')
++    raw = path.read_bytes()
++    if len(raw) > 16 * 1024 * 1024:
++        raise ValueError('config.json is over the 16 MiB safety limit')
++    data = json.loads(raw)
++    if not isinstance(data, dict):
++        raise MissingModelTypeError(f'{model_id}: config.json must be a JSON object')
++    return data
++
++
++def load_hf_config(model_id, *, revision='main', trust_remote_code=False,
++                   local_files_only=False):
++    """Load model config; recover only missing model_type from built-in metadata.
++
++    Custom remote code is never executed in this compatibility path. For normal
++    configs the original AutoConfig behavior (incl. remote exceptions) remains.
++    """
++    from transformers import AutoConfig
++    if trust_remote_code:
++        # Keep opt-in custom loading in the original loader, without pretending
++        # it is validated by the built-in legacy recovery procedure.
++        return AutoConfig.from_pretrained(model_id, revision=revision,
++            trust_remote_code=True, local_files_only=local_files_only)
++    try:
++        return AutoConfig.from_pretrained(model_id, revision=revision,
++            trust_remote_code=False, local_files_only=local_files_only)
++    except ValueError as original:
++        # Only recover from a demonstrably missing model_type. Other HF errors,
++        # such as an unknown explicit model_type, must remain fatal.
++        try:
++            data = _read_checkpoint_config(str(model_id), str(revision),
++                                           local_files_only=local_files_only)
++        except (OSError, ValueError, ImportError):
++            raise original
++        if data.get('model_type') is not None:
++            raise original
++        model_type = checked_model_type(data, source=str(model_id))
++        # A model's provided auto_map can point to custom executable code. An
++        # inferred built-in class is safe only when its declared class is in
++        # the fixed audited map above; checked_model_type enforces this.
++        try:
++            return AutoConfig.for_model(model_type, **{k: v for k,v in data.items()
++                                                        if k not in ('model_type', 'auto_map')})
++        except (ValueError, TypeError, KeyError) as exc:
++            raise MissingModelTypeError(
++                f'{model_id}: inferred built-in model_type={model_type!r}, '
++                'but Transformers cannot construct that configuration safely') from exc
++
++
++def save_hf_config_with_model_type(config, destination: str | Path) -> str:
++    """Save HF config with an explicit model_type key (atomic JSON correction).
++
++    Never silently replace a conflicting declared type. Called only for a
++    locally trusted config instance, not for untrusted remote JSON.
++    """
++    model_type = getattr(config, 'model_type', None)
++    if not isinstance(model_type, str) or not model_type.strip():
++        raise MissingModelTypeError('Cannot export Hugging Face config: model_type is missing')
++    folder = Path(destination)
++    folder.mkdir(parents=True, exist_ok=True)
++    config.save_pretrained(folder)
++    path = folder / 'config.json'
++    if not path.is_file():
++        raise MissingModelTypeError('save_pretrained did not create config.json')
++    data = json.loads(path.read_text(encoding='utf8'))
++    if not isinstance(data, dict):
++        raise MissingModelTypeError('Exported config.json is not a JSON object')
++    if 'model_type' in data and data['model_type'] != model_type:
++        raise MissingModelTypeError('Exported config.json model_type conflicts with config class')
++    if data.get('model_type') == model_type:
++        return model_type
++    data['model_type'] = model_type
++    temp = folder / ('.config-' + secrets.token_hex(8) + '.tmp')
++    try:
++        with temp.open('x', encoding='utf8') as output:
++            json.dump(data, output, ensure_ascii=False, indent=2, sort_keys=True,
++                      allow_nan=False)
++            output.write('\n')
++            output.flush()
++            os.fsync(output.fileno())
++        os.replace(temp, path)
++    finally:
++        temp.unlink(missing_ok=True)
++    return model_type
+--- a/patchlib/kagami_eval_worker.py
++++ b/patchlib/kagami_eval_worker.py
+@@ -141,7 +141,7 @@
+ 
+ def load_snapshot_model(options, torch, manifest):
+     """Load exact effective P2P model weights, never infer from HF base."""
+-    from transformers import AutoConfig
++    from .hf_config_v83 import load_hf_config
+     model_cls=_model_class(manifest)
+     from .model_design import create_config
+     from .shards import read_manifest, apply_sharded_state
+@@ -156,7 +156,7 @@
+     if state['total_tensor_bytes'] <= 0:
+         raise ValueError('checkpoint is empty')
+     config=(create_config(manifest) if 'design' in manifest else
+-            AutoConfig.from_pretrained(manifest['model']['id'],
++            load_hf_config(manifest['model']['id'],
+                revision=manifest['model']['revision'],trust_remote_code=False))
+     # Creating on meta avoids allocating random parameters just to overwrite.
+     with torch.device('meta'):
+@@ -248,7 +248,8 @@
+                                     max_state_bytes=2048*1024**3)
+         if (result['model_id'],result['revision'])!=(state['model_id'],state['revision']):
+             raise ValueError('checkpoint identity changed during streaming export')
+-        config.save_pretrained(destination)
++        from .hf_config_v83 import save_hf_config_with_model_type
++        save_hf_config_with_model_type(config, destination)
+         config_args['device_map']='auto'
+         config_args['low_cpu_mem_usage']=True
+         config_args['offload_folder']=str(Path(root)/'offload')
+@@ -282,7 +283,7 @@
+         if source=='trained':
+             from .model_design import create_config
+             from .shards import read_manifest
+-            from transformers import AutoConfig
++            from .hf_config_v83 import load_hf_config
+             state=read_manifest(Path(options['checkpoint']),max_state_bytes=2048*1024**3)
+             if ((state['model_id'],state['revision']) !=
+                 (manifest['model']['id'],options['checkpoint_revision'])):
+@@ -290,7 +291,7 @@
+             if state['revision']!=manifest['model']['revision']:
+                 raise ValueError('learned snapshot revision differs from selected model')
+             config=(create_config(manifest) if 'design' in manifest else
+-                    AutoConfig.from_pretrained(name,revision=revision,trust_remote_code=False))
++                    load_hf_config(name,revision=revision,trust_remote_code=False))
+             config.use_cache=True
+             if precision not in QUANTIZED and _direct_restore_eligible(state):
+                 print('Kagami: restoring verified learned weights in RAM',flush=True)
+@@ -324,7 +325,9 @@
+             if 'design' in manifest:
+                 raise ValueError('Newly initialized models have no pretrained HF base; save a checkpoint first')
+             print('Kagami: explicitly loading original HF base weights',flush=True)
+-            model=model_cls.from_pretrained(name,revision=revision,
++            from .hf_config_v83 import load_hf_config
++            config=load_hf_config(name,revision=revision,trust_remote_code=False)
++            model=model_cls.from_pretrained(name,revision=revision,config=config,
+                                   **model_options(torch,precision))
+             try:yield model
+             finally:del model
+--- a/patchlib/model_design.py
++++ b/patchlib/model_design.py
+@@ -147,9 +147,10 @@
+ def create_config(manifest):
+     """Build trusted Transformers config from immutable JSON, without code imports."""
+     from transformers import AutoConfig
++    from .hf_config_v83 import load_hf_config
+     design = validate_design(manifest['design'])
+     if design['mode'] == 'architecture':
+-        return AutoConfig.from_pretrained(manifest['model']['id'],
++        return load_hf_config(manifest['model']['id'],
+                         revision=manifest['model']['revision'], trust_remote_code=False)
+     return AutoConfig.for_model(design['model_type'], **design['kwargs'])
+ 
+--- a/patchlib/swarm_sim.py
++++ b/patchlib/swarm_sim.py
+@@ -228,7 +228,8 @@
+     torch.manual_seed(19071)
+     model = GPT2LMHeadModel(GPT2Config(vocab_size=vocab, n_positions=32, n_ctx=32,
+                             n_embd=16,n_layer=1,n_head=2, bos_token_id=1,eos_token_id=2))
+-    model.save_pretrained(model_dir,safe_serialization=True)
++    from .cli import save_model
++    save_model(model,model_dir)
+     # Do not tokenize inside the workers (and therefore avoid Hub I/O).
+     gen=torch.Generator().manual_seed(19123)
+     for i in range(24):
+--- a/patchlib/webview_controller.py
++++ b/patchlib/webview_controller.py
+@@ -215,8 +215,8 @@
+             config = dict(manifest.get('design',{}).get('kwargs') or {})
+             if not config:
+                 try:
+-                    from transformers import AutoConfig
+-                    config = AutoConfig.from_pretrained(model,revision=revision,
++                    from .hf_config_v83 import load_hf_config
++                    config = load_hf_config(model,revision=revision,
+                               local_files_only=True,trust_remote_code=False).to_dict()
+                 except (ImportError,OSError,ValueError,RuntimeError,TypeError,KeyError):
+                     pass
+@@ -349,8 +349,8 @@
+             return {'status':'unsupported','reason':'Unsupported HF model identifier','parameters':None}
+         cfg=None;parameters=None;required_disk=None
+         try:
+-            from transformers import AutoConfig
+-            config=AutoConfig.from_pretrained(name,revision=revision,
++            from .hf_config_v83 import load_hf_config
++            config=load_hf_config(name,revision=revision,
+                 local_files_only=True,trust_remote_code=False)
+             cfg=config.to_dict()
+         except (ImportError,ValueError,OSError,RuntimeError,TypeError,KeyError):
+@@ -846,8 +846,8 @@
+             except (ValueError,OSError,KeyError):pass
+         if not config:
+             try:
+-                from transformers import AutoConfig
+-                config=AutoConfig.from_pretrained(model,revision=revision,
++                from .hf_config_v83 import load_hf_config
++                config=load_hf_config(model,revision=revision,
+                           local_files_only=True,trust_remote_code=False).to_dict()
+             except (ImportError,OSError,KeyError,ValueError,RuntimeError,TypeError):pass
+         if not config:
+--- /dev/null
++++ b/scripts/fix_hf_model_type_v83.py
+@@ -0,0 +1,84 @@
++#!/usr/bin/env python3
++"""Explicit local repair of a legacy Hugging Face config.json.
++
++Usage:
++  python scripts/fix_hf_model_type_v83.py /path/to/model
++  python scripts/fix_hf_model_type_v83.py /path/to/model --write
++  python scripts/fix_hf_model_type_v83.py /path/to/model --model-type gpt2 --write
++
++This edits *only* local config.json and creates config.json.before-v83.bak once.
++Do not change signed / SHA256-pinned checkpoints: a changed file invalidates
++its original integrity commitment and should require a new revision/genesis.
++"""
++import argparse
++import json
++import os
++import secrets
++import shutil
++import sys
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++from patchlib.hf_config_v83 import checked_model_type, MissingModelTypeError, _BUILTIN_ARCHITECTURES
++
++
++def repair_local(path: Path, *, model_type: str | None=None, write=False) -> str:
++    path=Path(path).expanduser().resolve()
++    config_path=path/'config.json' if path.is_dir() else path
++    if config_path.name!='config.json' or not config_path.is_file():
++        raise FileNotFoundError('Specify a local Hugging Face model folder or config.json')
++    data=json.loads(config_path.read_text(encoding='utf8'))
++    if not isinstance(data,dict):
++        raise ValueError('config.json must be an object')
++    declared=data.get('model_type')
++    if declared is not None:
++        actual=checked_model_type(data, source=str(config_path))
++        if model_type is not None and model_type!=actual:
++            raise ValueError('Refusing to overwrite an existing different model_type')
++    elif model_type is not None:
++        # Explicit architecture selection must remain one of the built-in
++        # audited types for this repair tool (not arbitrary custom code).
++        if model_type not in _BUILTIN_ARCHITECTURES.values():
++            raise ValueError('Unrecognized built-in --model-type; choose a supported HF architecture')
++        try:
++            inferred=checked_model_type(data,source=str(config_path))
++        except MissingModelTypeError:
++            inferred=None
++        if inferred is not None and inferred!=model_type:
++            raise ValueError('Chosen model_type disagrees with declared built-in architectures')
++        actual=model_type
++    else:
++        actual=checked_model_type(data,source=str(config_path))
++    if write and declared is None:
++        backup=config_path.with_name('config.json.before-v83.bak')
++        if backup.exists():
++            raise FileExistsError('Repair backup already exists; refusing a second edit')
++        # The backup represents the exact original bytes, not JSON-reformatted.
++        shutil.copy2(config_path,backup)
++        data['model_type']=actual
++        temp=config_path.with_name('.config-'+secrets.token_hex(8)+'.tmp')
++        try:
++            with temp.open('x',encoding='utf8') as output:
++                json.dump(data,output,indent=2,sort_keys=True,ensure_ascii=False,allow_nan=False)
++                output.write('\n');output.flush();os.fsync(output.fileno())
++            os.replace(temp,config_path)
++        finally:
++            temp.unlink(missing_ok=True)
++    return actual
++
++
++def main():
++    parser=argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('folder',type=Path)
++    parser.add_argument('--model-type',help='Explicit builtin HF architecture (e.g. gpt2, llama)')
++    parser.add_argument('--write',action='store_true',help='Edit local config.json with one-time backup')
++    args=parser.parse_args()
++    try:
++        resolved=repair_local(args.folder,model_type=args.model_type,write=args.write)
++    except (OSError,ValueError,json.JSONDecodeError) as exc:
++        parser.exit(2,f'Cannot repair configuration: {exc}\n')
++    print(f'model_type={resolved} ({"written" if args.write else "dry run"})')
++
++
++if __name__=='__main__':
++    main()
+--- /dev/null
++++ b/tests/test_hf_config_v83.py
+@@ -0,0 +1,137 @@
++"""v83 regression: missing Hugging Face model_type must be actionable and safe."""
++import json
++import sys
++import types
++import pytest
++from patchlib.hf_config_v83 import (checked_model_type, load_hf_config,
++    save_hf_config_with_model_type, MissingModelTypeError)
++from patchlib.hf_compat_v63 import diagnose_hf_checkpoint, validate_training_config
++
++
++def test_explicit_model_type_takes_priority():
++    assert checked_model_type({'model_type':'gpt_neo','architectures':['GPT2LMHeadModel']})=='gpt_neo'
++
++
++@pytest.mark.parametrize('architecture,expected', [
++    ('GPT2LMHeadModel','gpt2'),('GPTNeoForCausalLM','gpt_neo'),
++    ('LlamaForCausalLM','llama'),('Qwen2ForCausalLM','qwen2'),
++    ('MistralForCausalLM','mistral'),('Gemma2ForCausalLM','gemma2'),
++])
++def test_only_unambiguous_builtin_inference(architecture, expected):
++    assert checked_model_type({'architectures':[architecture]})==expected
++
++
++@pytest.mark.parametrize('data', [
++    {}, {'model_type':''}, {'model_type':3}, {'architectures':['UntrustedModel']},
++    {'architectures':['GPT2LMHeadModel','LlamaForCausalLM']},
++    {'architectures':['GPT2LMHeadModel','EvilForCausalLM']},
++])
++def test_unsafe_missing_type_rejected(data):
++    with pytest.raises(MissingModelTypeError, match='model_type'):
++        checked_model_type(data)
++
++
++def test_missing_type_with_builtin_architecture_recovers_without_mutating_source(tmp_path,monkeypatch):
++    data={'architectures':['GPT2LMHeadModel'],'vocab_size':71,'n_embd':24}
++    path=tmp_path/'config.json';path.write_text(json.dumps(data))
++    class FakeAutoConfig:
++        @classmethod
++        def from_pretrained(cls,*a,**k):
++            raise ValueError('Should have a model_type key in config.json')
++        @classmethod
++        def for_model(cls, model_type,**options):
++            assert options['vocab_size']==71
++            return types.SimpleNamespace(model_type=model_type, **options)
++    monkeypatch.setitem(sys.modules,'transformers',types.SimpleNamespace(AutoConfig=FakeAutoConfig))
++    result=load_hf_config(str(tmp_path), local_files_only=True)
++    assert result.model_type=='gpt2'
++    assert json.loads(path.read_text())==data # no silent mutation of a pinned source
++
++
++def test_unknown_model_type_is_not_replaced_with_guess(tmp_path,monkeypatch):
++    (tmp_path/'config.json').write_text(json.dumps({'model_type':'unknown99','architectures':['GPT2LMHeadModel']}))
++    class FakeAutoConfig:
++        @classmethod
++        def from_pretrained(cls,*a,**k):raise ValueError('Unknown model type')
++        @classmethod
++        def for_model(cls,*a,**k):pytest.fail('must never substitute a different architecture')
++    monkeypatch.setitem(sys.modules,'transformers',types.SimpleNamespace(AutoConfig=FakeAutoConfig))
++    with pytest.raises(ValueError,match='Unknown model type'):
++        load_hf_config(str(tmp_path),local_files_only=True)
++
++
++def test_unsafe_config_rejected_at_diagnosis(tmp_path):
++    (tmp_path/'config.json').write_text(json.dumps({'architectures':['UnknownModel']}))
++    (tmp_path/'model.safetensors').write_bytes(b'placeholder')
++    report=diagnose_hf_checkpoint(str(tmp_path),local_files_only=True)
++    assert not report['streaming_candidate']
++    assert report['model_type'] is None
++    assert 'model_type' in '\n'.join(report['notes'])
++    assert not validate_training_config_safe(types.SimpleNamespace())
++
++
++def validate_training_config_safe(config):
++    try:
++        validate_training_config(config,'foo/bar')
++    except ValueError:
++        return False
++    return True
++
++
++def test_diagnosis_reports_safe_inference(tmp_path):
++    (tmp_path/'config.json').write_text(json.dumps({'architectures':['LlamaForCausalLM']}))
++    report=diagnose_hf_checkpoint(str(tmp_path),local_files_only=True)
++    assert report['model_type']=='llama'
++    assert report['streaming_candidate']
++    assert any('inferred' in x for x in report['notes'])
++
++
++class IncompleteSerializer:
++    model_type='gpt2'
++    def save_pretrained(self, target):
++        (target/'config.json').write_text('{"architectures":["GPT2LMHeadModel"],"vocab_size":32}')
++
++
++def test_saved_config_contains_model_type_even_if_serializer_omits_it(tmp_path):
++    assert save_hf_config_with_model_type(IncompleteSerializer(),tmp_path)=='gpt2'
++    assert json.loads((tmp_path/'config.json').read_text())['model_type']=='gpt2'
++
++
++def test_export_does_not_overwrite_conflicting_explicit_type(tmp_path):
++    class IncorrectSerializer(IncompleteSerializer):
++        def save_pretrained(self,target):
++            (target/'config.json').write_text('{"model_type":"llama"}')
++    with pytest.raises(MissingModelTypeError, match='conflicts'):
++        save_hf_config_with_model_type(IncorrectSerializer(),tmp_path)
++
++
++def test_repair_tool_explicit_backup_and_identity(tmp_path):
++    from scripts.fix_hf_model_type_v83 import repair_local
++    source={'architectures':['GPTNeoForCausalLM'],'vocab_size':101}
++    cfg=tmp_path/'config.json';cfg.write_text(json.dumps(source))
++    assert repair_local(tmp_path)=='gpt_neo'
++    assert json.loads(cfg.read_text())==source
++    assert repair_local(tmp_path,write=True)=='gpt_neo'
++    assert json.loads(cfg.read_text())['model_type']=='gpt_neo'
++    assert json.loads((tmp_path/'config.json.before-v83.bak').read_text())==source
++    with pytest.raises(ValueError,match='different'):
++        repair_local(tmp_path,model_type='gpt2',write=True)
++
++
++def test_repair_tool_never_guesses_unknown_model(tmp_path):
++    from scripts.fix_hf_model_type_v83 import repair_local
++    config=tmp_path/'config.json';config.write_text('{"architectures":["MyCustomModel"]}')
++    with pytest.raises(MissingModelTypeError):
++        repair_local(tmp_path,write=True)
++    assert not (tmp_path/'config.json.before-v83.bak').exists()
++    assert repair_local(tmp_path,model_type='llama',write=False)=='llama'
++
++
++def test_merge_export_enforces_config_model_type(tmp_path):
++    from patchlib.cli import save_model
++    class Model:
++        config = IncompleteSerializer()
++        def save_pretrained(self, folder, safe_serialization=True):
++            (tmp_path/'model.safetensors').write_bytes(b'dummy')
++    save_model(Model(),tmp_path)
++    assert json.loads((tmp_path/'config.json').read_text())['model_type']=='gpt2'

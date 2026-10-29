@@ -5,14 +5,16 @@ Usage: python -m patchlib.webview_diagnostic
 import sys
 
 HTML = '''<!doctype html><html lang="ja"><head><meta charset="utf-8">
-<style>body{font:16px system-ui;padding:25px;background:#15223a;color:white}
-button,input{font:inherit;padding:10px;margin:8px 0}button{cursor:pointer}
-#local,#remote{padding:8px;background:#293d5d;min-height:25px}</style></head>
-<body><h2>Fedpara WebView 操作診断</h2>
-<p>クリック・入力・Pythonブリッジを独立して確認します。</p>
-<button id="click">1. JavaScriptクリックテスト</button><div id="local">待機中</div>
-<input id="input" placeholder="2. ここに文字を入力できますか？">
-<button id="python">3. Pythonへの接続テスト</button><div id="remote">待機中</div>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.10"></script></head>
+<body class="min-h-screen bg-[#080e0b] px-6 py-7 font-mono text-sm text-[#e5f6ec]">
+<h2 class="mb-4 border-b border-emerald-700 pb-3 text-xl font-bold text-emerald-300">Fedpara WebView 操作診断</h2>
+<p class="my-3 text-[#91a79b]">クリック・入力・Pythonブリッジを独立して確認します。</p>
+<button id="click" class="my-2 cursor-pointer border border-emerald-500 bg-emerald-500 px-4 py-2 font-bold text-emerald-950 hover:bg-emerald-300">1. JavaScriptクリックテスト</button>
+<div id="local" class="min-h-8 border border-emerald-900 bg-[#0d2116] p-3">待機中</div>
+<input id="input" class="my-3 w-full border border-emerald-700 bg-[#0c1912] px-3 py-2.5 text-emerald-50 caret-emerald-400 focus:outline-2 focus:outline-emerald-400" placeholder="2. ここに文字を入力できますか？">
+<button id="python" class="my-2 cursor-pointer border border-emerald-500 bg-emerald-500 px-4 py-2 font-bold text-emerald-950 hover:bg-emerald-300">3. Pythonへの接続テスト</button>
+<div id="remote" class="min-h-8 border border-emerald-900 bg-[#0d2116] p-3">待機中</div>
 <script>
 const local=document.getElementById('local'), remote=document.getElementById('remote');
 let clicks=0;
